@@ -58,8 +58,6 @@
 
 ### 高级功能
 
-- ✅ **Team 服务** - 多 Agent 协作，支持复杂任务分解
-- ✅ **Sub Agent** - 子 Agent 系统，角色管理，会话隔离
 - ✅ **MCP 协议** - 支持 Model Context Protocol 工具
 - ✅ **ACP 协议** - Agent Communication Protocol，外部集成支持
 - ✅ **系统托盘** - 后台运行，最小化到托盘
@@ -149,13 +147,13 @@ OpenAgentSeal/
 │   ├── agent.py              # Agent 核心类
 │   ├── master_agent.py       # Master Agent
 │   ├── agent_service.py      # Agent 服务层
-│   ├── team_service.py       # Team 服务
 │   ├── cli.py                # 命令行入口
 │   ├── config.py             # 配置管理
 │   ├── memory_manager.py     # 记忆管理器
 │   ├── logger.py             # 日志系统
 │   ├── retry.py              # 重试机制
 │   ├── tray.py               # 系统托盘
+│   ├── user_config.py        # 用户配置
 │   ├── llm/                  # LLM 客户端
 │   │   ├── anthropic_client.py
 │   │   ├── openai_client.py
@@ -171,13 +169,9 @@ OpenAgentSeal/
 │   │   ├── dispatcher.py
 │   │   ├── queue.py
 │   │   └── worker.py
-│   ├── sub_agent/            # 子 Agent 系统
-│   │   ├── manager.py
-│   │   ├── roles.py
-│   │   └── session.py
 │   ├── app/                  # Web UI
-│   │   ├── web/              # Vue3 前端
-│   │   └── web_server.py     # WebSocket 服务
+│   │   ├── runner/           # Runner 模块
+│   │   └── web/              # Vue3 前端
 │   ├── acp/                  # ACP 协议
 │   │   └── server.py
 │   ├── skills/               # Claude Skills
@@ -280,12 +274,12 @@ tools:
 ┌─────────────────────────▼───────────────────────────────────┐
 │                    FastAPI Server                            │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │  Agent   │  │   Team   │  │Sub Agent │  │  Memory  │   │
-│  │ Service  │  │ Service  │  │ Manager  │  │ Manager  │   │
+│  │  Agent   │  │  Runner  │  │  Memory  │  │   Task   │   │
+│  │ Service  │  │ Manager  │  │ Manager  │  │  Queue   │   │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │   Task   │  │  Tools   │  │   LLM    │  │  Logger  │   │
-│  │  Queue   │  │ System   │  │  Client  │  │          │   │
+│  │  Tools   │  │   LLM    │  │  Logger  │  │   ACP    │   │
+│  │ System   │  │  Client  │  │          │  │ Server   │   │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```

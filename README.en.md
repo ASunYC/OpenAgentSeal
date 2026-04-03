@@ -58,8 +58,6 @@
 
 ### Advanced Features
 
-- ✅ **Team Service** - Multi-Agent collaboration for complex task decomposition
-- ✅ **Sub Agent** - Sub-agent system with role management and session isolation
 - ✅ **MCP Protocol** - Support for Model Context Protocol tools
 - ✅ **ACP Protocol** - Agent Communication Protocol for external integration
 - ✅ **System Tray** - Background running with tray minimization
@@ -149,13 +147,13 @@ OpenAgentSeal/
 │   ├── agent.py              # Agent core class
 │   ├── master_agent.py       # Master Agent
 │   ├── agent_service.py      # Agent service layer
-│   ├── team_service.py       # Team service
 │   ├── cli.py                # CLI entry point
 │   ├── config.py             # Configuration management
 │   ├── memory_manager.py     # Memory manager
 │   ├── logger.py             # Logging system
 │   ├── retry.py              # Retry mechanism
 │   ├── tray.py               # System tray
+│   ├── user_config.py        # User configuration
 │   ├── llm/                  # LLM clients
 │   │   ├── anthropic_client.py
 │   │   ├── openai_client.py
@@ -171,13 +169,9 @@ OpenAgentSeal/
 │   │   ├── dispatcher.py
 │   │   ├── queue.py
 │   │   └── worker.py
-│   ├── sub_agent/            # Sub-agent system
-│   │   ├── manager.py
-│   │   ├── roles.py
-│   │   └── session.py
 │   ├── app/                  # Web UI
-│   │   ├── web/              # Vue3 frontend
-│   │   └── web_server.py     # WebSocket server
+│   │   ├── runner/           # Runner module
+│   │   └── web/              # Vue3 frontend
 │   ├── acp/                  # ACP protocol
 │   │   └── server.py
 │   ├── skills/               # Claude Skills
@@ -280,12 +274,12 @@ tools:
 ┌─────────────────────────▼───────────────────────────────────┐
 │                    FastAPI Server                            │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │  Agent   │  │   Team   │  │Sub Agent │  │  Memory  │   │
-│  │ Service  │  │ Service  │  │ Manager  │  │ Manager  │   │
+│  │  Agent   │  │  Runner  │  │  Memory  │  │   Task   │   │
+│  │ Service  │  │ Manager  │  │ Manager  │  │  Queue   │   │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │   Task   │  │  Tools   │  │   LLM    │  │  Logger  │   │
-│  │  Queue   │  │ System   │  │  Client  │  │          │   │
+│  │  Tools   │  │   LLM    │  │  Logger  │  │   ACP    │   │
+│  │ System   │  │  Client  │  │          │  │ Server   │   │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```

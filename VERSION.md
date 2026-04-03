@@ -25,9 +25,7 @@
 ## Changelog
 
 ### 2026.3.30 - Current
-**Team 功能与前端优化**
-- 新增 Team（团队）功能模块，支持多 Agent 协作
-- 新增 Agent Team 功能，优化思考方式
+**前端优化与架构重构**
 - 前端设置组件完善：MCP、模型、会话、技能、系统、用户、工作区管理
 - 支持通过前端传递的 ID 创建智能体
 - 优化会话恢复逻辑
@@ -37,12 +35,10 @@
 **核心模块状态**
 - ✅ Agent 核心层: `agent.py`, `master_agent.py`, `agent_service.py`
 - ✅ LLM 客户端: `llm/` (OpenAI, Anthropic, DeepSeek 支持)
-- ✅ 工具层: `tools/` (Bash, File, MCP, Skills, SubAgent)
+- ✅ 工具层: `tools/` (Bash, File, MCP, Skills, WebSearch)
 - ✅ 任务队列: `task_queue/` (Dispatcher, Queue, Worker)
-- ✅ 子 Agent: `sub_agent/` (Manager, Roles, Session, Workspace)
-- ✅ Web UI: `web_ui/web_server.py` (WebSocket 版本)
+- ✅ Runner 模块: `app/runner/` (ChatManager, AgentRunner, ChatRepository)
 - ✅ ACP 协议: `acp/` (外部集成支持)
-- ✅ Team 服务: `team_service.py` (多 Agent 协作)
 
 ---
 
@@ -58,14 +54,11 @@
 **核心模块状态**
 - ✅ Agent 核心层: `agent.py`, `master_agent.py`, `agent_service.py`
 - ✅ LLM 客户端: `llm/` (OpenAI, Anthropic, DeepSeek 支持)
-- ✅ 工具层: `tools/` (Bash, File, MCP, Skills, SubAgent)
+- ✅ 工具层: `tools/` (Bash, File, MCP, Skills, WebSearch)
 - ✅ 任务队列: `task_queue/` (Dispatcher, Queue, Worker)
-- ✅ 子 Agent: `sub_agent/` (Manager, Roles, Session, Workspace)
-- ✅ Web UI: `web_ui/web_server.py` (WebSocket 版本)
 - ✅ ACP 协议: `acp/` (外部集成支持)
 
 **待清理模块**
-- ⚠️ `sub_agent/ui.py` - 终端 UI，实验性功能
 - ⚠️ `app/web/` - Vue3 前端，待完整集成
 
 ---
@@ -129,8 +122,7 @@
 |------|------|------|------|
 | Core Agent | 2026.3.30 | ✅ 稳定 | 核心 Agent 执行循环 |
 | Task Queue | 2026.3.30 | ✅ 稳定 | 任务队列系统 |
-| Sub Agent | 2026.3.30 | ✅ 稳定 | 子 Agent 系统 |
-| Team Service | 2026.3.30 | ✅ 稳定 | 多 Agent 协作服务 |
+| Runner | 2026.3.30 | ✅ 稳定 | Runner 模块 (ChatManager, AgentRunner) |
 | Web UI | 2026.3.30 | 🔄 重构中 | Vue3 前端，设置组件完善 |
 | ACP | 2026.3.30 | ✅ 稳定 | Agent 通信协议 |
 | Skills | 2026.2.28 | ✅ 稳定 | Skills 系统 |
@@ -143,7 +135,7 @@
 
 | 版本 | 日期 | 类型 | 主要变更 |
 |------|------|------|----------|
-| 2026.3.30 | 2026-03-30 | 功能 | Team 功能，前端设置组件完善 |
+| 2026.3.30 | 2026-03-30 | 功能 | 前端设置组件完善，架构重构 |
 | 2026.3.14 | 2026-03-14 | 优化 | 架构整理，文档完善 |
 | 2026.3.3 | 2026-03-03 | 功能 | Web UI 增强 |
 | 2026.2.28 | 2026-02-28 | 修复 | Skills 系统改进 |
