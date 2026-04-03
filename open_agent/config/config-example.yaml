@@ -1,0 +1,58 @@
+# Open Agent Configuration Example
+# 
+# Configuration File Locations (in priority order):
+# 1) open_agent/config/config.yaml - Development mode (current directory)
+# 2) ~/.open-agent/config/config.yaml - User config directory
+# 3) <package>/open_agent/config/config.yaml - Package installation directory
+#
+# To use this config:
+# - Copy this file to one of the above locations as config.yaml
+# - All config files (config.yaml, mcp.json, system_prompt.md) are in the same directory
+#
+# NOTE: LLM Configuration (api_key, api_base, model, provider) is now managed via open_agent.json
+# Use the CLI model selection command to choose and configure LLM models.
+
+# ===== Retry Configuration =====
+retry:
+  enabled: true           # Enable retry mechanism
+  max_retries: 3          # Maximum number of retries
+  initial_delay: 1.0      # Initial delay time (seconds)
+  max_delay: 60.0         # Maximum delay time (seconds)
+  exponential_base: 2.0   # Exponential backoff base (delay = initial_delay * base^attempt)
+
+# ===== Agent Configuration =====
+max_steps: 100  # Maximum execution steps
+workspace_dir: "./workspace"  # Working directory
+system_prompt_path: "system_prompt.md"  # System prompt file (same config directory)
+
+# ===== Tools Configuration =====
+tools:
+  # Basic tool switches
+  enable_file_tools: true  # File read/write/edit tools (ReadTool, WriteTool, EditTool)
+  enable_bash: true        # Bash command execution tool
+  enable_note: true        # Session note tool (SessionNoteTool)
+  
+  # Web Search Tools - Network search and web page browsing
+  # When enabled, the LLM will only use these tools when user explicitly requests:
+  # - Trigger keywords: "联网搜索", "网上搜索", "搜索一下", "查一下", "上网查", etc.
+  # Default backend: Bing (cn.bing.com, free, works in China, no API key required)
+  # Optional backends (require API keys in environment variables):
+  # - SERPER_API_KEY: Get from https://serper.dev/ (Google search API)
+  # - JINA_API_KEY: Get from https://jina.ai/ (Web page content extraction)
+  # - BRAVE_API_KEY: Get from https://brave.com/search/api/
+  # - TAVILY_API_KEY: Get from https://tavily.com/
+  enable_web_search: false  # Enable web search tools (web_search, web_browse). Default: false
+  
+  # Claude Skills
+  enable_skills: true      # Enable Skills
+  skills_dir: "./skills"   # Skills directory path
+  
+  # MCP Tools
+  enable_mcp: true         # Enable MCP tools
+  mcp_config_path: "mcp.json"  # MCP configuration file (same config directory)
+                           # Note: API Keys for MCP tools are configured in mcp.json
+  # MCP timeout configuration (prevents hanging on network issues)
+  mcp:
+    connect_timeout: 10.0    # Connection timeout in seconds (default: 10)
+    execute_timeout: 60.0    # Tool execution timeout in seconds (default: 60)
+    sse_read_timeout: 120.0  # SSE read timeout in seconds (default: 120)

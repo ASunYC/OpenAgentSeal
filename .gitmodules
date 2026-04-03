@@ -1,0 +1,3 @@
+[submodule "open_agent/skills"]
+	path = open_agent/skills
+	url = https://github.com/anthropics/skills.git

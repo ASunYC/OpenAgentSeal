@@ -14,9 +14,9 @@
 
 <h1 align="center">🦭 OpenAgentSeal</h1>
 
-<p align="center">一个基于 Python 的灵活 AI Agent 框架，提供完整的 Agent 执行循环、工具系统、记忆系统和多 LLM 集成。</p>
+<p align="center">A flexible Python-based AI Agent framework providing complete Agent execution loop, tool system, memory system, and multi-LLM integration.</p>
 
-> 💡 **TypeScript 版本**: 如果你需要 TypeScript/Node.js 版本，请查看 [OpenAgentSeal-JS](https://github.com/ASunYC/OpenAgentSeal-JS)
+> 💡 **TypeScript Version**: If you need the TypeScript/Node.js version, check out [OpenAgentSeal-JS](https://github.com/ASunYC/OpenAgentSeal-JS)
 
 <p align="center">
   <a href="https://github.com/ASunYC/OpenAgentSeal/blob/main/LICENSE">
@@ -34,72 +34,72 @@
 </p>
 
 <p align="center">
-  <a href="#功能特性">功能特性</a> •
-  <a href="#快速开始">快速开始</a> •
-  <a href="#开发指南">开发指南</a> •
-  <a href="#架构设计">架构设计</a> •
-  <a href="#api-参考">API 参考</a>
+  <a href="#features">Features</a> •
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#development-guide">Development Guide</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#api-reference">API Reference</a>
 </p>
 
 ---
 
-## 功能特性
+## Features
 
-### 核心功能
+### Core Features
 
-- ✅ **Agent 执行循环** - 支持多轮对话和工具调用
-- ✅ **多 LLM 支持** - 支持 Anthropic、OpenAI、DeepSeek、MiniMax、火山引擎、通义千问、智谱 AI 等
-- ✅ **流式响应** - SSE 流式输出，实时显示 AI 回复
-- ✅ **工具系统** - 文件操作、命令执行、笔记记录、MCP 工具、Claude Skills
-- ✅ **思维链 (CoT)** - ReAct 模式，逐步推理，展示思考过程
-- ✅ **记忆系统** - 树状记忆结构，SQLite 后端，支持时序图 RAG
-- ✅ **任务队列** - 优先级调度，并发控制
-- ✅ **日志系统** - 分级日志，自动轮转
+- ✅ **Agent Execution Loop** - Support for multi-turn conversations and tool calling
+- ✅ **Multi-LLM Support** - Support for Anthropic, OpenAI, DeepSeek, MiniMax, Volcano Engine, Qwen, Zhipu AI, and more
+- ✅ **Streaming Response** - SSE streaming output with real-time AI responses
+- ✅ **Tool System** - File operations, command execution, note taking, MCP tools, Claude Skills
+- ✅ **Chain of Thought (CoT)** - ReAct mode with step-by-step reasoning
+- ✅ **Memory System** - Tree-structured memory with SQLite backend and temporal graph RAG
+- ✅ **Task Queue** - Priority scheduling and concurrency control
+- ✅ **Logging System** - Tiered logging with automatic rotation
 
-### 高级功能
+### Advanced Features
 
-- ✅ **Team 服务** - 多 Agent 协作，支持复杂任务分解
-- ✅ **Sub Agent** - 子 Agent 系统，角色管理，会话隔离
-- ✅ **MCP 协议** - 支持 Model Context Protocol 工具
-- ✅ **ACP 协议** - Agent Communication Protocol，外部集成支持
-- ✅ **系统托盘** - 后台运行，最小化到托盘
+- ✅ **Team Service** - Multi-Agent collaboration for complex task decomposition
+- ✅ **Sub Agent** - Sub-agent system with role management and session isolation
+- ✅ **MCP Protocol** - Support for Model Context Protocol tools
+- ✅ **ACP Protocol** - Agent Communication Protocol for external integration
+- ✅ **System Tray** - Background running with tray minimization
 
 ### Web UI (Vue3)
 
-- ✅ **流式对话** - 实时显示 AI 回复
-- ✅ **模型切换** - 支持多模型配置和切换
-- ✅ **思考过程** - 展示 CoT 推理步骤
-- ✅ **设置面板** - 用户/模型/Agent/MCP/技能/工作区配置
-- ✅ **概览画布** - Agent 状态可视化
+- ✅ **Streaming Chat** - Real-time AI response display
+- ✅ **Model Switching** - Support for multiple model configurations
+- ✅ **Thinking Process** - Display CoT reasoning steps
+- ✅ **Settings Panel** - User/Model/Agent/MCP/Skill/Workspace configuration
+- ✅ **Overview Canvas** - Agent status visualization
 
 ---
 
-## 快速开始
+## Quick Start
 
-### 1. 安装
+### 1. Installation
 
 ```bash
-# 克隆项目
+# Clone the project
 git clone https://github.com/ASunYC/OpenAgentSeal.git
 cd OpenAgentSeal
 
-# 使用 uv 安装 (推荐)
+# Install with uv (recommended)
 pip install uv
 uv sync
 
-# 或使用 pip 安装
+# Or install with pip
 pip install -e .
 ```
 
-### 2. 配置模型
+### 2. Configure Model
 
-首次运行会自动启动模型配置向导：
+The model configuration wizard will start automatically on first run:
 
 ```bash
 open-agent
 ```
 
-或手动配置 `~/.open-agent/models.yaml`：
+Or manually configure `~/.open-agent/models.yaml`:
 
 ```yaml
 models:
@@ -113,101 +113,101 @@ models:
     is_default: true
 ```
 
-### 3. 运行
+### 3. Run
 
 ```bash
-# 交互模式 (默认)
+# Interactive mode (default)
 open-agent
 
-# 指定工作目录
+# Specify workspace directory
 open-agent --workspace /path/to/workspace
 
-# 单任务执行
-open-agent --task "创建一个 Python 脚本"
+# Single task execution
+open-agent --task "Create a Python script"
 
-# 仅 CLI 模式
+# CLI only mode
 open-agent --cli-only
 
-# 仅 Web UI 模式
+# Web UI only mode
 open-agent --web-only --port 9998
 
-# ACP 服务模式
+# ACP service mode
 open-agent-acp --port 8080
 ```
 
-访问 Web UI: http://127.0.0.1:9998
+Visit Web UI at: http://127.0.0.1:9998
 
 ---
 
-## 开发指南
+## Development Guide
 
-### 项目结构
+### Project Structure
 
 ```
 OpenAgentSeal/
-├── open_agent/               # 主包
-│   ├── agent.py              # Agent 核心类
+├── open_agent/               # Main package
+│   ├── agent.py              # Agent core class
 │   ├── master_agent.py       # Master Agent
-│   ├── agent_service.py      # Agent 服务层
-│   ├── team_service.py       # Team 服务
-│   ├── cli.py                # 命令行入口
-│   ├── config.py             # 配置管理
-│   ├── memory_manager.py     # 记忆管理器
-│   ├── logger.py             # 日志系统
-│   ├── retry.py              # 重试机制
-│   ├── tray.py               # 系统托盘
-│   ├── llm/                  # LLM 客户端
+│   ├── agent_service.py      # Agent service layer
+│   ├── team_service.py       # Team service
+│   ├── cli.py                # CLI entry point
+│   ├── config.py             # Configuration management
+│   ├── memory_manager.py     # Memory manager
+│   ├── logger.py             # Logging system
+│   ├── retry.py              # Retry mechanism
+│   ├── tray.py               # System tray
+│   ├── llm/                  # LLM clients
 │   │   ├── anthropic_client.py
 │   │   ├── openai_client.py
 │   │   └── llm_wrapper.py
-│   ├── tools/                # 工具系统
-│   │   ├── bash_tool.py      # Bash 执行
-│   │   ├── file_tools.py     # 文件操作
-│   │   ├── note_tool.py      # 笔记工具
-│   │   ├── mcp_loader.py     # MCP 工具加载
-│   │   ├── skill_tool.py     # Skills 工具
-│   │   └── web_search.py     # Web 搜索
-│   ├── task_queue/           # 任务队列
+│   ├── tools/                # Tool system
+│   │   ├── bash_tool.py      # Bash execution
+│   │   ├── file_tools.py     # File operations
+│   │   ├── note_tool.py      # Note taking
+│   │   ├── mcp_loader.py     # MCP tool loading
+│   │   ├── skill_tool.py     # Skills tool
+│   │   └── web_search.py     # Web search
+│   ├── task_queue/           # Task queue
 │   │   ├── dispatcher.py
 │   │   ├── queue.py
 │   │   └── worker.py
-│   ├── sub_agent/            # 子 Agent 系统
+│   ├── sub_agent/            # Sub-agent system
 │   │   ├── manager.py
 │   │   ├── roles.py
 │   │   └── session.py
 │   ├── app/                  # Web UI
-│   │   ├── web/              # Vue3 前端
-│   │   └── web_server.py     # WebSocket 服务
-│   ├── acp/                  # ACP 协议
+│   │   ├── web/              # Vue3 frontend
+│   │   └── web_server.py     # WebSocket server
+│   ├── acp/                  # ACP protocol
 │   │   └── server.py
 │   ├── skills/               # Claude Skills
-│   └── config/               # 配置文件
+│   └── config/               # Configuration files
 │       ├── config.yaml
 │       └── mcp.json
-├── tests/                    # 测试套件
-├── docs/                     # 文档
-├── workspace/                # 默认工作目录
-├── pyproject.toml            # 项目配置
-└── VERSION.md                # 版本历史
+├── tests/                    # Test suite
+├── docs/                     # Documentation
+├── workspace/                # Default workspace
+├── pyproject.toml            # Project configuration
+└── VERSION.md                # Version history
 ```
 
-### 开发模式
+### Development Mode
 
 ```bash
-# 安装开发依赖
+# Install dev dependencies
 uv sync --all-extras
 
-# 运行测试
+# Run tests
 uv run pytest
 
-# 代码格式化
+# Format code
 uv run ruff format .
 
-# 类型检查
+# Type check
 uv run mypy open_agent
 ```
 
-### 添加新工具
+### Adding New Tools
 
 ```python
 from open_agent.tools.base import Tool, ToolResult
@@ -218,17 +218,17 @@ class MyToolArgs(BaseModel):
 
 class MyTool(Tool):
     name = "my_tool"
-    description = "我的自定义工具"
+    description = "My custom tool"
     parameters = MyToolArgs
 
     async def execute(self, args: MyToolArgs) -> ToolResult:
         return ToolResult(
             success=True,
-            content=f"结果：{args.input}"
+            content=f"Result: {args.input}"
         )
 ```
 
-### 配置文件
+### Configuration Files
 
 #### config.yaml
 
@@ -267,7 +267,7 @@ tools:
 
 ---
 
-## 架构设计
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -292,7 +292,7 @@ tools:
 
 ---
 
-## API 参考
+## API Reference
 
 ### Python SDK
 
@@ -300,7 +300,7 @@ tools:
 from open_agent import Agent, LLMClient
 from open_agent.schema import LLMProvider
 
-# 创建 LLM 客户端
+# Create LLM client
 llm_client = LLMClient(
     api_key="your-api-key",
     api_base="https://api.anthropic.com",
@@ -308,79 +308,79 @@ llm_client = LLMClient(
     provider=LLMProvider.ANTHROPIC
 )
 
-# 创建 Agent
+# Create Agent
 agent = Agent(
     llm_client=llm_client,
     tools=["read", "write", "edit", "bash", "note"],
     workspace_dir="./workspace"
 )
 
-# 同步对话
-response = await agent.chat("你好，请帮我创建一个文件")
+# Synchronous chat
+response = await agent.chat("Hello, please help me create a file")
 
-# 流式对话
-async for chunk in agent.stream_chat("你好"):
+# Streaming chat
+async for chunk in agent.stream_chat("Hello"):
     print(chunk, end="", flush=True)
 ```
 
-### ACP 协议
+### ACP Protocol
 
 ```bash
-# 启动 ACP 服务
+# Start ACP service
 open-agent-acp --port 8080
 
-# ACP 客户端连接
-# 通过 Agent Client Protocol 兼容的客户端连接
+# Connect via ACP-compatible client
+# Connect through Agent Client Protocol compatible clients
 ```
 
 ---
 
-## 支持的 LLM 提供商
+## Supported LLM Providers
 
-| 提供商 | 协议 | 说明 |
-|--------|------|------|
-| Anthropic | anthropic | Claude 系列 |
-| OpenAI | openai | GPT 系列 |
-| DeepSeek | anthropic/openai | DeepSeek 系列 |
-| MiniMax | anthropic | MiniMax 系列 |
-| 通义千问 | openai | 阿里云 |
-| 智谱 AI | anthropic | GLM 系列 |
-| 火山引擎 | anthropic | 豆包系列 |
-| 月之暗面 | anthropic | Moonshot |
-| 百川 | openai | Baichuan |
-| 硅基流动 | openai | 多模型代理 |
-
----
-
-## Skills 系统
-
-项目内置丰富的 Claude Skills：
-
-- **document-skills** - 文档处理 (PDF, DOCX, XLSX, PPTX)
-- **mcp-builder** - MCP 服务器构建
-- **webapp-testing** - Web 应用自动化测试
+| Provider | Protocol | Description |
+|----------|----------|-------------|
+| Anthropic | anthropic | Claude series |
+| OpenAI | openai | GPT series |
+| DeepSeek | anthropic/openai | DeepSeek series |
+| MiniMax | anthropic | MiniMax series |
+| Qwen | openai | Alibaba Cloud |
+| Zhipu AI | anthropic | GLM series |
+| Volcano Engine | anthropic | Doubao series |
+| Moonshot | anthropic | Moonshot |
+| Baichuan | openai | Baichuan |
+| SiliconFlow | openai | Multi-model proxy |
 
 ---
 
-## 版本历史
+## Skills System
 
-详见 [VERSION.md](./VERSION.md)
+Built-in Claude Skills:
 
-当前版本：**2026.3.30**
+- **document-skills** - Document processing (PDF, DOCX, XLSX, PPTX)
+- **mcp-builder** - MCP server building
+- **webapp-testing** - Web application automation testing
 
 ---
 
-## 合作交流
+## Version History
 
-欢迎加入我们的社区，一起交流讨论！
+See [VERSION.md](./VERSION.md) for details.
 
-- 📧 **邮箱**: [452212601@qq.com](mailto:452212601@qq.com)
+Current version: **2026.3.30**
+
+---
+
+## Contact & Collaboration
+
+Welcome to join our community!
+
+- 📧 **Email**: [452212601@qq.com](mailto:452212601@qq.com)
 - 💬 **QQ**: 452212601
-- 🐛 **问题反馈**: [GitHub Issues](https://github.com/ASunYC/OpenAgentSeal/issues)
+- 🐛 **Issues**: [GitHub Issues](https://github.com/ASunYC/OpenAgentSeal/issues)
 
 ---
 
-## 许可证
+## License
 
 MIT License
 
