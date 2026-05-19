@@ -141,9 +141,10 @@ npm run build
 Windows 构建产物位于：
 
 ```text
-desktop/src-tauri/target/release/open-agent-seal-desktop.exe
-desktop/src-tauri/target/release/bundle/nsis/OpenAgentSeal_0.1.0_x64-setup.exe
-desktop/src-tauri/target/release/bundle/msi/OpenAgentSeal_0.1.0_x64_en-US.msi
+dist/OpenAgentSeal-win-x64/installers/OpenAgentSeal_0.1.0_x64-setup.exe
+dist/OpenAgentSeal-win-x64/installers/OpenAgentSeal_0.1.0_x64_en-US.msi
+dist/OpenAgentSeal-win-x64/portable/OpenAgentSeal.exe
+dist/OpenAgentSeal-win-x64/OpenAgentSeal-portable-win-x64.zip
 ```
 
 ### 托盘能力

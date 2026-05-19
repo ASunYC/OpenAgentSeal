@@ -42,12 +42,14 @@ This runs `../scripts/build_desktop_sidecar.ps1`, which:
 1. builds the Vue frontend,
 2. packages the Python backend with PyInstaller,
 3. places the sidecar at `src-tauri/binaries/open-agent-backend-x86_64-pc-windows-msvc.exe`,
-4. runs the Tauri build and produces NSIS/MSI installers.
+4. runs the Tauri build,
+5. collects installer and portable outputs into `dist/OpenAgentSeal-win-x64`.
 
 Build outputs:
 
 ```text
-src-tauri/target/release/open-agent-seal-desktop.exe
-src-tauri/target/release/bundle/nsis/OpenAgentSeal_0.1.0_x64-setup.exe
-src-tauri/target/release/bundle/msi/OpenAgentSeal_0.1.0_x64_en-US.msi
+dist/OpenAgentSeal-win-x64/installers/OpenAgentSeal_0.1.0_x64-setup.exe
+dist/OpenAgentSeal-win-x64/installers/OpenAgentSeal_0.1.0_x64_en-US.msi
+dist/OpenAgentSeal-win-x64/portable/OpenAgentSeal.exe
+dist/OpenAgentSeal-win-x64/OpenAgentSeal-portable-win-x64.zip
 ```

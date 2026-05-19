@@ -124,8 +124,11 @@ fn resolve_backend_command(app: &tauri::App) -> BackendCommand {
 fn find_sidecar(app: &tauri::App) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Ok(root) = repo_root() {
-        candidates.push(root.join("desktop").join("src-tauri").join("binaries").join(SIDECAR_NAME));
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            candidates.push(parent.join(SIDECAR_NAME));
+            candidates.push(parent.join("binaries").join(SIDECAR_NAME));
+        }
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -134,11 +137,8 @@ fn find_sidecar(app: &tauri::App) -> Option<PathBuf> {
         candidates.push(resource_dir.join("resources").join(SIDECAR_NAME));
     }
 
-    if let Ok(current_exe) = env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
-            candidates.push(parent.join(SIDECAR_NAME));
-            candidates.push(parent.join("binaries").join(SIDECAR_NAME));
-        }
+    if let Ok(root) = repo_root() {
+        candidates.push(root.join("desktop").join("src-tauri").join("binaries").join(SIDECAR_NAME));
     }
 
     candidates.into_iter().find(|path| path.exists())
