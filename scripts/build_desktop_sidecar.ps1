@@ -33,6 +33,7 @@ Write-Host "[2/4] Building Python backend sidecar..."
     --noconfirm `
     --clean `
     --onefile `
+    --noconsole `
     --name $SidecarName `
     --paths $Root `
     --distpath $BinariesDir `

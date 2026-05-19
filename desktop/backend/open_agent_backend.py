@@ -7,10 +7,31 @@ import sys
 from pathlib import Path
 
 
+def _desktop_log_path() -> Path:
+    base_dir = (
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or os.environ.get("USERPROFILE")
+        or "."
+    )
+    log_dir = Path(base_dir) / "OpenAgentSeal"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "desktop-backend.log"
+
+
+def _ensure_text_streams() -> None:
+    log_path = _desktop_log_path()
+    if sys.stdout is None:
+        sys.stdout = log_path.open("a", encoding="utf-8", errors="replace", buffering=1)
+    if sys.stderr is None:
+        sys.stderr = log_path.open("a", encoding="utf-8", errors="replace", buffering=1)
+
+
 def main() -> None:
     os.environ.setdefault("OPEN_AGENT_DESKTOP", "1")
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    _ensure_text_streams()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
