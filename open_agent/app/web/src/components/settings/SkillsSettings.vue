@@ -38,6 +38,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { API_BASE } from '@/api'
 import { useSettingsStore } from '@/stores/settings'
 
 const settingsStore = useSettingsStore()
@@ -57,7 +58,7 @@ async function loadSkills() {
   loading.value = true
   error.value = null
   try {
-    const response = await fetch('/api/skills')
+    const response = await fetch(`${API_BASE}/skills`)
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`)
     }

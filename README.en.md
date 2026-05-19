@@ -14,7 +14,12 @@
 
 <h1 align="center">🦭 OpenAgentSeal</h1>
 
-<p align="center">A flexible Python-based AI Agent framework providing complete Agent execution loop, tool system, memory system, and multi-LLM integration.</p>
+<p align="center">A flexible Python-based AI Agent framework providing an Agent execution loop, tool system, memory system, multi-LLM integration, Web UI, and lightweight desktop shell.</p>
+
+<p align="center">
+  <a href="./README.md">Language Home</a> •
+  <a href="./README.zh-CN.md">中文</a>
+</p>
 
 > 💡 **TypeScript Version**: If you need the TypeScript/Node.js version, check out [OpenAgentSeal-JS](https://github.com/ASunYC/OpenAgentSeal-JS)
 
@@ -61,6 +66,7 @@
 - ✅ **MCP Protocol** - Support for Model Context Protocol tools
 - ✅ **ACP Protocol** - Agent Communication Protocol for external integration
 - ✅ **System Tray** - Background running with tray minimization
+- ✅ **Tauri Desktop Shell** - Native window, tray menu, backend lifecycle management, and Windows packaging
 
 ### Web UI (Vue3)
 
@@ -134,6 +140,22 @@ open-agent-acp --port 8080
 ```
 
 Visit Web UI at: http://127.0.0.1:9998
+
+### 4. Desktop Shell
+
+```bash
+cd desktop
+npm install
+npm run dev
+```
+
+Build the Windows desktop app:
+
+```bash
+npm run build
+```
+
+See [desktop/README.md](./desktop/README.md) for shell-specific notes.
 
 ---
 
@@ -353,6 +375,64 @@ Built-in Claude Skills:
 - **document-skills** - Document processing (PDF, DOCX, XLSX, PPTX)
 - **mcp-builder** - MCP server building
 - **webapp-testing** - Web application automation testing
+
+---
+
+## ECC Integration
+
+OpenAgentSeal integrates [Everything Claude Code (ECC)](https://github.com/affaan-m/everything-claude-code), providing 38 specialized Agents, 156 Skills, and 72 Commands.
+
+### Check ECC Status
+
+```bash
+python -m open_agent.ecc.commands status      # View installation status
+python -m open_agent.ecc.commands agents      # List 38 agents
+python -m open_agent.ecc.commands skills      # List 156 skills
+python -m open_agent.ecc.commands commands    # List 72 commands
+```
+
+### Auto-check on Startup
+
+Running `python run.py` automatically checks ECC installation status:
+
+```
+[OK] ECC installed (version: 0.1.0)
+```
+
+### Using in Claude Code
+
+Copy the `.ecc/` directory to your project, and Claude Code will auto-load:
+
+- **Agents**: Use Task tool to invoke, e.g., `planner`, `tdd-guide`, `code-reviewer`
+- **Skills**: Auto-activate matching skills based on context
+- **Hooks**: Auto-run quality check hooks
+
+### Update ECC
+
+```bash
+# Force reinstall
+python -m open_agent.ecc.commands install --force
+
+# Or run installer script directly
+python scripts/ecc_installer.py
+```
+
+### ECC Directory Structure
+
+```
+.ecc/
+├── agents/          # 38 specialized subagents
+├── skills/          # 156 workflow skills
+├── commands/        # 72 slash commands
+├── hooks/           # Trigger-based automations
+├── rules/           # Always-follow guidelines
+├── mcp-configs/     # MCP server configurations
+├── scripts/         # Node.js utility scripts
+├── CLAUDE.md        # Project instructions
+├── AGENTS.md        # Agent instructions
+├── RULES.md         # Rule definitions
+└── VERSION          # Version number
+```
 
 ---
 

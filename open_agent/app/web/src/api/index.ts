@@ -5,7 +5,9 @@
 
 import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, SessionInfo, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile } from '@/types'
 
-const API_BASE = '/api'
+const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
+const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+export const API_BASE = isTauriRuntime ? `${DESKTOP_BACKEND}/api` : '/api'
 
 // Helper for API calls
 async function request<T>(path: string, options?: RequestInit): Promise<T> {

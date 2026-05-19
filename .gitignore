@@ -60,6 +60,7 @@ docs/assets/preview.html
 CLAUDE.md
 
 node_modules/
+desktop/src-tauri/target/
 
 .agent_memory.json
 
@@ -70,3 +71,4 @@ static/
 
 .opencode/*
 .ruff_cache/*
+desktop/src-tauri/gen/
