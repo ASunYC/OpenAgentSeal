@@ -136,6 +136,8 @@ cd desktop
 npm run build
 ```
 
+该命令会调用 `scripts/build_desktop_sidecar.ps1`，先用 PyInstaller 把 Python 后端打成 sidecar，再执行 Tauri 打包。
+
 Windows 构建产物位于：
 
 ```text

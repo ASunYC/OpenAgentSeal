@@ -10,7 +10,7 @@ The desktop shell owns native application concerns only:
 - desktop packaging
 
 The tray menu includes Open Window, Open in Browser, Restart Backend, Open Backend Log, and Quit.
-Backend stdout/stderr is written to `desktop-backend.log` at the repository root.
+Backend stdout/stderr is written to `%LOCALAPPDATA%\OpenAgentSeal\desktop-backend.log` on Windows.
 
 The Agent core remains in Python and the Web UI remains in `open_agent/app/web`.
 
@@ -37,5 +37,17 @@ Set `OPEN_AGENT_DESKTOP_PYTHON` to force a specific Python executable.
 npm run build
 ```
 
-The first version expects Python and project dependencies to be available on the target machine.
-Packaging Python as a bundled sidecar should be handled as a follow-up packaging step.
+This runs `../scripts/build_desktop_sidecar.ps1`, which:
+
+1. builds the Vue frontend,
+2. packages the Python backend with PyInstaller,
+3. places the sidecar at `src-tauri/binaries/open-agent-backend-x86_64-pc-windows-msvc.exe`,
+4. runs the Tauri build and produces NSIS/MSI installers.
+
+Build outputs:
+
+```text
+src-tauri/target/release/open-agent-seal-desktop.exe
+src-tauri/target/release/bundle/nsis/OpenAgentSeal_0.1.0_x64-setup.exe
+src-tauri/target/release/bundle/msi/OpenAgentSeal_0.1.0_x64_en-US.msi
+```

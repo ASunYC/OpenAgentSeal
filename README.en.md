@@ -155,6 +155,8 @@ Build the Windows desktop app:
 npm run build
 ```
 
+This command runs `scripts/build_desktop_sidecar.ps1`, packages the Python backend as a PyInstaller sidecar, then runs the Tauri build.
+
 See [desktop/README.md](./desktop/README.md) for shell-specific notes.
 
 ---

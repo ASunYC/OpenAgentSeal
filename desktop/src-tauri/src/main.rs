@@ -18,9 +18,11 @@ use tauri::{
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: &str = "9998";
+const SIDECAR_NAME: &str = "open-agent-backend-x86_64-pc-windows-msvc.exe";
 
 struct BackendProcess {
     child: Mutex<Option<Child>>,
+    command: BackendCommand,
 }
 
 impl BackendProcess {
@@ -37,7 +39,7 @@ impl BackendProcess {
             return Err("Backend port is already owned by another process".to_string());
         }
 
-        let mut backend = spawn_backend()?;
+        let mut backend = spawn_backend(&self.command)?;
         if wait_for_backend_ready() {
             *child = Some(backend);
             Ok(())
@@ -47,6 +49,11 @@ impl BackendProcess {
             Err("Python backend did not become ready within 20 seconds".to_string())
         }
     }
+}
+
+enum BackendCommand {
+    Sidecar { path: PathBuf, workspace: PathBuf },
+    Python { executable: PathBuf, root: PathBuf },
 }
 
 impl Drop for BackendProcess {
@@ -92,30 +99,91 @@ fn python_executable(root: &Path) -> PathBuf {
     }
 }
 
-fn spawn_backend() -> Result<Child, String> {
-    let root = repo_root()?;
-    let python = python_executable(&root);
+fn resolve_backend_command(app: &tauri::App) -> BackendCommand {
+    if let Some(path) = find_sidecar(app) {
+        return BackendCommand::Sidecar {
+            path,
+            workspace: PathBuf::from(env::var("OPEN_AGENT_DESKTOP_WORKSPACE").unwrap_or_else(
+                |_| {
+                    PathBuf::from(env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string()))
+                        .join("OpenAgentSeal")
+                        .to_string_lossy()
+                        .into_owned()
+                },
+            )),
+        };
+    }
+
+    let root = repo_root().unwrap_or_else(|_| PathBuf::from("."));
+    BackendCommand::Python {
+        executable: python_executable(&root),
+        root,
+    }
+}
+
+fn find_sidecar(app: &tauri::App) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(root) = repo_root() {
+        candidates.push(root.join("desktop").join("src-tauri").join("binaries").join(SIDECAR_NAME));
+    }
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join(SIDECAR_NAME));
+        candidates.push(resource_dir.join("binaries").join(SIDECAR_NAME));
+        candidates.push(resource_dir.join("resources").join(SIDECAR_NAME));
+    }
+
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            candidates.push(parent.join(SIDECAR_NAME));
+            candidates.push(parent.join("binaries").join(SIDECAR_NAME));
+        }
+    }
+
+    candidates.into_iter().find(|path| path.exists())
+}
+
+fn spawn_backend(command_config: &BackendCommand) -> Result<Child, String> {
     let stdout = open_backend_log()?;
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("Failed to clone backend log handle: {error}"))?;
 
-    let mut command = Command::new(python);
+    let mut command = match command_config {
+        BackendCommand::Sidecar { path, workspace } => {
+            let mut command = Command::new(path);
+            if let Some(parent) = path.parent() {
+                command.current_dir(parent);
+            }
+            command
+                .env("OPEN_AGENT_DESKTOP_WORKSPACE", workspace)
+                .env("OPEN_AGENT_DESKTOP_HOST", BACKEND_HOST)
+                .env("OPEN_AGENT_DESKTOP_PORT", BACKEND_PORT);
+            command
+        }
+        BackendCommand::Python { executable, root } => {
+            let mut command = Command::new(executable);
+            command
+                .current_dir(root)
+                .arg("-m")
+                .arg("open_agent")
+                .arg("--web-only")
+                .arg("--no-browser")
+                .arg("--host")
+                .arg(BACKEND_HOST)
+                .arg("--port")
+                .arg(BACKEND_PORT)
+                .arg("--workspace")
+                .arg(root);
+            command
+        }
+    };
+
     command
-        .current_dir(&root)
         .env("OPEN_AGENT_DESKTOP", "1")
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
-        .arg("-m")
-        .arg("open_agent")
-        .arg("--web-only")
-        .arg("--no-browser")
-        .arg("--host")
-        .arg(BACKEND_HOST)
-        .arg("--port")
-        .arg(BACKEND_PORT)
-        .arg("--workspace")
-        .arg(&root)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
@@ -132,7 +200,15 @@ fn spawn_backend() -> Result<Child, String> {
 }
 
 fn backend_log_path() -> Result<PathBuf, String> {
-    Ok(repo_root()?.join("desktop-backend.log"))
+    let base_dir = env::var("LOCALAPPDATA")
+        .or_else(|_| env::var("APPDATA"))
+        .or_else(|_| env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let log_dir = base_dir.join("OpenAgentSeal");
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|error| format!("Failed to create backend log directory: {error}"))?;
+    Ok(log_dir.join("desktop-backend.log"))
 }
 
 fn open_backend_log() -> Result<File, String> {
@@ -278,6 +354,7 @@ fn robot_tray_icon() -> Image<'static> {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            let backend_command = resolve_backend_command(app);
             let backend = if backend_healthy() {
                 None
             } else if backend_port_in_use() {
@@ -287,7 +364,7 @@ fn main() {
                 )
                 .into());
             } else {
-                let backend = spawn_backend()?;
+                let backend = spawn_backend(&backend_command)?;
                 if !wait_for_backend_ready() {
                     return Err("Python backend did not become ready within 20 seconds; see desktop-backend.log".into());
                 }
@@ -296,6 +373,7 @@ fn main() {
 
             app.manage(BackendProcess {
                 child: Mutex::new(backend),
+                command: backend_command,
             });
 
             let open = MenuItemBuilder::with_id("open", "Open Window").build(app)?;

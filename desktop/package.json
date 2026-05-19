@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "powershell -ExecutionPolicy Bypass -File ../scripts/build_desktop_sidecar.ps1",
+    "tauri:build": "tauri build",
     "web:dev": "npm --prefix ../open_agent/app/web run dev -- --host 127.0.0.1",
     "web:build": "npm --prefix ../open_agent/app/web run build"
   },
