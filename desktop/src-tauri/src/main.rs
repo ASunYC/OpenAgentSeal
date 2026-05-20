@@ -21,6 +21,7 @@ use tauri::{
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: &str = "9998";
 const SIDECAR_NAME: &str = "open-agent-backend-x86_64-pc-windows-msvc.exe";
+const ABOUT_URL: &str = "https://github.com/ASunYC";
 
 struct BackendProcess {
     child: Mutex<Option<Child>>,
@@ -299,6 +300,13 @@ fn open_backend_log_file() -> Result<(), String> {
     open_target(path.to_string_lossy().as_ref())
 }
 
+fn current_user_label() -> String {
+    let username = env::var("USERNAME")
+        .or_else(|_| env::var("USER"))
+        .unwrap_or_else(|_| "Unknown".to_string());
+    format!("User  {username}")
+}
+
 fn open_target(target: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut command = {
@@ -327,7 +335,7 @@ fn open_target(target: &str) -> Result<(), String> {
         .map_err(|error| format!("Failed to open {target}: {error}"))
 }
 
-fn robot_tray_icon() -> Image<'static> {
+fn fallback_tray_icon() -> Image<'static> {
     const SIZE: u32 = 32;
     let mut rgba = vec![0; (SIZE * SIZE * 4) as usize];
 
@@ -362,6 +370,13 @@ fn robot_tray_icon() -> Image<'static> {
     rect(&mut rgba, 25, 16, 27, 21, body);
 
     Image::new_owned(rgba, SIZE, SIZE)
+}
+
+fn app_tray_icon() -> Image<'static> {
+    Image::from_bytes(include_bytes!("../../../icon.ico")).unwrap_or_else(|error| {
+        append_desktop_log(&format!("Failed to load icon.ico for tray icon: {error}"));
+        fallback_tray_icon()
+    })
 }
 
 fn main() {
@@ -405,17 +420,42 @@ fn main() {
                 command: backend_command,
             });
 
+            let frontend_header = MenuItemBuilder::new("Frontend").enabled(false).build(app)?;
             let open = MenuItemBuilder::with_id("open", "Open Window").build(app)?;
             let browser = MenuItemBuilder::with_id("browser", "Open in Browser").build(app)?;
+
+            let backend_header = MenuItemBuilder::new("Backend").enabled(false).build(app)?;
             let restart = MenuItemBuilder::with_id("restart", "Restart Backend").build(app)?;
             let logs = MenuItemBuilder::with_id("logs", "Open Backend Log").build(app)?;
+
+            let account_header = MenuItemBuilder::new("Account").enabled(false).build(app)?;
+            let user = MenuItemBuilder::new(current_user_label()).enabled(false).build(app)?;
+
+            let info_header = MenuItemBuilder::new("Info").enabled(false).build(app)?;
+            let version = MenuItemBuilder::new(format!("Version  v{}", env!("CARGO_PKG_VERSION")))
+                .enabled(false)
+                .build(app)?;
+            let about = MenuItemBuilder::with_id("about", "About Us").build(app)?;
+
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&open, &browser, &restart, &logs, &quit])
+                .item(&frontend_header)
+                .items(&[&open, &browser])
+                .separator()
+                .item(&backend_header)
+                .items(&[&restart, &logs])
+                .separator()
+                .item(&account_header)
+                .item(&user)
+                .separator()
+                .item(&info_header)
+                .items(&[&version, &about])
+                .separator()
+                .item(&quit)
                 .build()?;
 
             TrayIconBuilder::new()
-                .icon(robot_tray_icon())
+                .icon(app_tray_icon())
                 .tooltip("OpenAgentSeal")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
@@ -434,6 +474,11 @@ fn main() {
                     "logs" => {
                         if let Err(error) = open_backend_log_file() {
                             append_desktop_log(&format!("Failed to open backend log: {error}"));
+                        }
+                    }
+                    "about" => {
+                        if let Err(error) = open_target(ABOUT_URL) {
+                            append_desktop_log(&format!("Failed to open About Us URL: {error}"));
                         }
                     }
                     "quit" => app.exit(0),

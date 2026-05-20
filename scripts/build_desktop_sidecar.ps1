@@ -15,11 +15,17 @@ $PortableConfigDir = Join-Path $PortableDir "config"
 $SidecarName = "open-agent-backend-x86_64-pc-windows-msvc"
 $SidecarExe = Join-Path $BinariesDir "$SidecarName.exe"
 $AppExe = Join-Path $TauriDir "target\release\open-agent-seal-desktop.exe"
-$NsisInstaller = Join-Path $TauriDir "target\release\bundle\nsis\OpenAgentSeal_0.1.0_x64-setup.exe"
-$MsiInstaller = Join-Path $TauriDir "target\release\bundle\msi\OpenAgentSeal_0.1.0_x64_en-US.msi"
+$VersionConfig = Join-Path $Root "version.json"
 
 New-Item -ItemType Directory -Force -Path $BinariesDir | Out-Null
 New-Item -ItemType Directory -Force -Path $PyinstallerWorkDir | Out-Null
+
+Write-Host "[0/4] Syncing app version..."
+powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync_version.ps1")
+
+$AppVersion = (Get-Content -Raw -Encoding UTF8 -Path $VersionConfig | ConvertFrom-Json).version
+$NsisInstaller = Join-Path $TauriDir "target\release\bundle\nsis\OpenAgentSeal_${AppVersion}_x64-setup.exe"
+$MsiInstaller = Join-Path $TauriDir "target\release\bundle\msi\OpenAgentSeal_${AppVersion}_x64_en-US.msi"
 
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) {
@@ -89,5 +95,5 @@ Write-Host "Release dir: $ReleaseDir"
 Write-Host "Portable app: $PortableDir\OpenAgentSeal.exe"
 Write-Host "Portable skills: $PortableSkillsDir"
 Write-Host "Portable config: $PortableConfigDir"
-Write-Host "NSIS: $InstallersDir\OpenAgentSeal_0.1.0_x64-setup.exe"
-Write-Host "MSI: $InstallersDir\OpenAgentSeal_0.1.0_x64_en-US.msi"
+Write-Host "NSIS: $InstallersDir\OpenAgentSeal_${AppVersion}_x64-setup.exe"
+Write-Host "MSI: $InstallersDir\OpenAgentSeal_${AppVersion}_x64_en-US.msi"
