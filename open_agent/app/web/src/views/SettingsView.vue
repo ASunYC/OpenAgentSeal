@@ -166,7 +166,7 @@ const appVersion = ref('0.1.0')
 
 const settings = reactive<SystemSettings>({
   language: 'zh-CN',
-  theme: 'system',
+  theme: 'light',
   fontSize: 'medium',
   workspace: '',
   autoSave: true,
@@ -184,7 +184,7 @@ async function updateSettings() {
 async function resetSettings() {
   const defaultSettings: SystemSettings = {
     language: 'zh-CN',
-    theme: 'system',
+    theme: 'light',
     fontSize: 'medium',
     workspace: settings.workspace,
     autoSave: true,

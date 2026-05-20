@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/open_agent/ecc/hooks.py\" session-start"
+          }
+        ],
+        "description": "Load OpenAgentSeal project context on session start",
+        "id": "openagentseal:session-start"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/open_agent/ecc/hooks.py\" pre-task"
+          }
+        ],
+        "description": "Validate task input before agent execution",
+        "id": "openagentseal:pre-task"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/open_agent/ecc/hooks.py\" quality-gate --no-tests",
+            "timeout": 60
+          }
+        ],
+        "description": "Run Python lint and typecheck after file edits",
+        "id": "openagentseal:post-edit-quality"
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/open_agent/ecc/hooks.py\" post-task"
+          }
+        ],
+        "description": "Log task completion and metrics",
+        "id": "openagentseal:post-task"
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/open_agent/ecc/hooks.py\" quality-gate",
+            "timeout": 120
+          }
+        ],
+        "description": "Run full quality gate (lint, typecheck) at session end",
+        "id": "openagentseal:stop-quality-gate"
+      }
+    ]
+  }
+}

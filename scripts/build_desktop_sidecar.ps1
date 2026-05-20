@@ -10,7 +10,8 @@ $PyinstallerWorkDir = Join-Path $Root "build\pyinstaller"
 $ReleaseDir = Join-Path $Root "dist\OpenAgentSeal-win-x64"
 $InstallersDir = Join-Path $ReleaseDir "installers"
 $PortableDir = Join-Path $ReleaseDir "portable"
-$PortableZip = Join-Path $ReleaseDir "OpenAgentSeal-portable-win-x64.zip"
+$PortableSkillsDir = Join-Path $PortableDir "skills"
+$PortableConfigDir = Join-Path $PortableDir "config"
 $SidecarName = "open-agent-backend-x86_64-pc-windows-msvc"
 $SidecarExe = Join-Path $BinariesDir "$SidecarName.exe"
 $AppExe = Join-Path $TauriDir "target\release\open-agent-seal-desktop.exe"
@@ -79,12 +80,14 @@ Copy-Item -LiteralPath $NsisInstaller -Destination $InstallersDir -Force
 Copy-Item -LiteralPath $MsiInstaller -Destination $InstallersDir -Force
 Copy-Item -LiteralPath $AppExe -Destination (Join-Path $PortableDir "OpenAgentSeal.exe") -Force
 Copy-Item -LiteralPath $SidecarExe -Destination (Join-Path $PortableDir "$SidecarName.exe") -Force
-Compress-Archive -Path (Join-Path $PortableDir "*") -DestinationPath $PortableZip -Force
+Copy-Item -LiteralPath (Join-Path $Root "open_agent\skills") -Destination $PortableSkillsDir -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $Root "open_agent\config") -Destination $PortableConfigDir -Recurse -Force
 
 Write-Host "Done."
 Write-Host "Sidecar: $SidecarExe"
 Write-Host "Release dir: $ReleaseDir"
 Write-Host "Portable app: $PortableDir\OpenAgentSeal.exe"
-Write-Host "Portable zip: $PortableZip"
+Write-Host "Portable skills: $PortableSkillsDir"
+Write-Host "Portable config: $PortableConfigDir"
 Write-Host "NSIS: $InstallersDir\OpenAgentSeal_0.1.0_x64-setup.exe"
 Write-Host "MSI: $InstallersDir\OpenAgentSeal_0.1.0_x64_en-US.msi"

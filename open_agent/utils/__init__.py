@@ -10,6 +10,8 @@ from .path_utils import (
     get_executable_dir,
     get_external_config_dir,
     get_external_skills_dir,
+    get_user_skills_dir,
+    ensure_user_skills_dir,
     get_resource_path,
 )
 
@@ -23,6 +25,7 @@ __all__ = [
     "get_executable_dir",
     "get_external_config_dir",
     "get_external_skills_dir",
+    "get_user_skills_dir",
+    "ensure_user_skills_dir",
     "get_resource_path",
 ]
-

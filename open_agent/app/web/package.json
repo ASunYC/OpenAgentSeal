@@ -13,6 +13,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.5.0",
     "vue": "^3.4.0",
     "pinia": "^2.1.7",
     "marked": "^12.0.0",

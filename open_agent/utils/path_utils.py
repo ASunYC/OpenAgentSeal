@@ -11,6 +11,7 @@ NOT from inside the bundled package.
 
 import os
 import platform
+import shutil
 import sys
 from pathlib import Path
 
@@ -61,7 +62,7 @@ def get_executable_dir() -> Path:
         return Path(__file__).parent.parent.parent.resolve()
 
 
-def get_external_config_dir() -> Path:
+def get_external_config_dir() -> Path | None:
     """Get the external config directory path.
     
     When frozen, looks for config/ next to the executable.
@@ -78,10 +79,44 @@ def get_external_config_dir() -> Path:
     return None
 
 
-def get_external_skills_dir() -> Path:
+def get_user_skills_dir() -> Path:
+    """Get the user-editable skills directory."""
+    return get_user_app_dir() / "open_agent" / "skills"
+
+
+def get_bundled_skills_dir() -> Path | None:
+    """Get the PyInstaller bundled skills directory, if available."""
+    if is_frozen():
+        bundled_dir = Path(sys._MEIPASS) / "open_agent" / "skills"
+        if bundled_dir.exists():
+            return bundled_dir
+    return None
+
+
+def ensure_user_skills_dir() -> Path | None:
+    """Seed bundled skills into the user directory on first run.
+
+    The installed application directory may be read-only, so installed builds use
+    this editable user copy when no exe-local skills directory exists.
+    """
+    user_skills_dir = get_user_skills_dir()
+    if user_skills_dir.exists():
+        return user_skills_dir
+
+    bundled_skills_dir = get_bundled_skills_dir()
+    if not bundled_skills_dir:
+        return None
+
+    user_skills_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(bundled_skills_dir, user_skills_dir)
+    return user_skills_dir
+
+
+def get_external_skills_dir() -> Path | None:
     """Get the external skills directory path.
     
-    When frozen, looks for skills/ next to the executable.
+    When frozen, looks for skills/ next to the executable, then falls back to
+    a user-editable first-run copy under ~/.open-agent/open_agent/skills.
     When not frozen, returns None (use default search path).
     
     Returns:
@@ -92,6 +127,12 @@ def get_external_skills_dir() -> Path:
         skills_dir = exe_dir / "skills"
         if skills_dir.exists():
             return skills_dir
+        user_skills_dir = ensure_user_skills_dir()
+        if user_skills_dir:
+            return user_skills_dir
+        bundled_skills_dir = get_bundled_skills_dir()
+        if bundled_skills_dir:
+            return bundled_skills_dir
     return None
 
 

@@ -36,6 +36,13 @@
         </div>
         
         <div class="header-right">
+          <button class="btn-settings" @click="openBrowserHome" title="Browser">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M2 12h20"/>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
+          </button>
           <button class="btn-settings" @click="openSettings" :title="t('设置', 'Settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"/>
@@ -49,7 +56,7 @@
       <div class="chat-body">
         <!-- 私人对话区 -->
         <div class="private-chat-panel">
-          <div class="chat-messages" ref="messagesContainer">
+          <div class="chat-messages" ref="messagesContainer" @click="handleChatClick">
             <div
               v-for="(msg, index) in messages"
               :key="index"
@@ -103,7 +110,12 @@
             :title="t('迭代模式', 'Iteration Mode')"
             @click="settingsStore.toggleCoT"
           >
-            <span class="cot-icon">🔄</span>
+            <svg class="cot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 12a9 9 0 0 1-15.31 6.36"/>
+              <path d="M3 12A9 9 0 0 1 18.31 5.64"/>
+              <path d="M6 18H3v3"/>
+              <path d="M18 6h3V3"/>
+            </svg>
           </button>
           <textarea
             v-model="inputMessage"
@@ -132,12 +144,100 @@
             :class="{ 'cot-active': settingsStore.settings.useCoT }"
             class="cot-status"
           >
-            {{ settingsStore.settings.useCoT ? t('🔄 迭代模式已开启', '🔄 Iteration mode enabled') : t('🔄 迭代模式已关闭', '🔄 Iteration mode disabled') }}
+            {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
           </span>
         </div>
       </footer>
     </main>
-    
+
+    <main class="main-browser" v-else-if="currentView === 'browser'">
+      <header class="chat-header browser-app-header">
+        <div class="header-left">
+          <div class="logo">
+            <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <circle cx="12" cy="10" r="3"/>
+              <path d="M7 16c0-2 2-3 5-3s5 1 5 3"/>
+            </svg>
+            <span class="logo-text">OpenAgentSeal</span>
+          </div>
+        </div>
+        <div class="header-right">
+          <button class="btn-settings" @click="currentView = 'chat'" title="Back to chat">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M19 12H5"/>
+              <path d="M12 19l-7-7 7-7"/>
+            </svg>
+          </button>
+          <button class="btn-settings" @click="openSettings" :title="t('设置', 'Settings')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <section class="browser-workspace">
+        <div class="browser-tabs">
+          <button
+            v-for="tab in browserTabs"
+            :key="tab.id"
+            class="browser-tab"
+            :class="{ active: tab.id === activeBrowserTabId }"
+            @click="switchBrowserTab(tab.id)"
+            :title="tab.url"
+          >
+            <span class="browser-tab-title">{{ tab.title }}</span>
+            <span v-if="tab.loadState === 'loading'" class="browser-tab-state"></span>
+            <span class="browser-tab-close" @click.stop="closeBrowserTab(tab.id)">x</span>
+          </button>
+          <button class="browser-new-tab" @click="createBrowserTab()" title="New tab">+</button>
+        </div>
+
+        <div class="browser-toolbar">
+          <button class="browser-icon-btn" @click="browserBack" :disabled="!canBrowserBack" title="Back">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M19 12H5"/>
+              <path d="M12 19l-7-7 7-7"/>
+            </svg>
+          </button>
+          <button class="browser-icon-btn" @click="browserForward" :disabled="!canBrowserForward" title="Forward">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M5 12h14"/>
+              <path d="M12 5l7 7-7 7"/>
+            </svg>
+          </button>
+          <button class="browser-icon-btn" @click="reloadBrowserTab" :disabled="!activeBrowserTab" title="Reload">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+              <path d="M21 3v6h-6"/>
+            </svg>
+          </button>
+          <input
+            class="browser-address"
+            v-model="browserAddress"
+            @keydown.enter.prevent="goBrowserAddress"
+            placeholder="https://example.com"
+          />
+          <button class="browser-go" @click="goBrowserAddress">Go</button>
+        </div>
+
+        <div class="browser-frame-area" v-if="activeBrowserTab">
+          <iframe
+            class="browser-frame"
+            :key="`${activeBrowserTab.id}-${activeBrowserTab.renderKey}`"
+            :src="activeBrowserTab.url"
+            @load="onBrowserFrameLoad"
+            referrerpolicy="no-referrer"
+          ></iframe>
+        </div>
+        <div class="browser-empty" v-else>
+          <button class="browser-go" @click="createBrowserTab()">Open browser tab</button>
+        </div>
+      </section>
+    </main>
+
     <!-- 设置面板 -->
     <aside 
       class="settings-sidebar" 
@@ -167,7 +267,8 @@ import { api } from '@/api'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import { marked } from 'marked'
-import type { Message, ModelConfig, ThinkingStep } from '@/types'
+import type { Message, ThinkingStep } from '@/types'
+import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
 const settingsStore = useSettingsStore()
@@ -175,6 +276,35 @@ const sessionStore = useSessionStore()
 
 // 当前视图
 const currentView = ref('chat')
+
+type BrowserLoadState = 'idle' | 'loading' | 'loaded'
+
+interface BrowserTab {
+  id: string
+  url: string
+  title: string
+  history: string[]
+  historyIndex: number
+  renderKey: number
+  loadState: BrowserLoadState
+}
+
+const BROWSER_HOME = 'about:blank'
+const browserTabs = ref<BrowserTab[]>([])
+const activeBrowserTabId = ref('')
+const browserAddress = ref('')
+
+const activeBrowserTab = computed(() => {
+  return browserTabs.value.find(tab => tab.id === activeBrowserTabId.value) || null
+})
+
+const canBrowserBack = computed(() => {
+  return !!activeBrowserTab.value && activeBrowserTab.value.historyIndex > 0
+})
+
+const canBrowserForward = computed(() => {
+  return !!activeBrowserTab.value && activeBrowserTab.value.historyIndex < activeBrowserTab.value.history.length - 1
+})
 
 // 设置面板状态
 const showSettings = ref(false)
@@ -209,7 +339,7 @@ const availableModels = computed(() => {
 function getAgentColor(): string {
   const agent = agentStore.agents.find(a => a.id === selectedAgentId.value)
   if (!agent) return '#3b82f6'
-  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4']
+  const colors = ['#2f6ef4', '#3f7f68', '#8a6f2c', '#9b4f45', '#596579', '#4f7f9f', '#6f6a9a']
   const index = agent.name.charCodeAt(0) % colors.length
   return colors[index]
 }
@@ -233,9 +363,58 @@ function formatTime(timestamp?: string): string {
 // 渲染 Markdown
 function renderMarkdown(content: string): string {
   try {
-    return marked(content) as string
+    const html = marked(content) as string
+    return normalizeRenderedLinks(html)
   } catch {
     return content
+  }
+}
+
+function normalizeRenderedLinks(html: string): string {
+  if (typeof DOMParser === 'undefined') return html
+
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html')
+
+  doc.querySelectorAll('a[href]').forEach((anchor) => {
+    const rawText = anchor.textContent || anchor.getAttribute('href') || ''
+    const parts = splitUrlDecoration(rawText)
+    const cleanedHref = sanitizeBrowserUrlCandidate(parts.core || rawText)
+    const link = anchor.cloneNode(true) as HTMLAnchorElement
+
+    link.setAttribute('href', cleanedHref)
+    link.setAttribute('target', '_blank')
+    link.setAttribute('rel', 'noopener noreferrer')
+    link.textContent = cleanedHref
+
+    if (parts.leading || parts.trailing) {
+      const wrapper = doc.createElement('span')
+      if (parts.leading) wrapper.appendChild(doc.createTextNode(parts.leading))
+      wrapper.appendChild(link)
+      if (parts.trailing) wrapper.appendChild(doc.createTextNode(parts.trailing))
+      anchor.replaceWith(wrapper)
+    } else {
+      anchor.replaceWith(link)
+    }
+  })
+
+  return doc.body.firstElementChild?.innerHTML || html
+}
+
+function splitUrlDecoration(value: string): { leading: string; core: string; trailing: string } {
+  let text = value.trim()
+  const leadingMatch = text.match(/^[<([{'"“‘]+/)
+  const leading = leadingMatch?.[0] || ''
+  if (leading) text = text.slice(leading.length)
+
+  const trailingMatch = text.match(/[>\])}"'”’。、，。！？!?.,;:]+$/)
+  const trailing = trailingMatch?.[0] || ''
+  if (trailing) text = text.slice(0, -trailing.length)
+
+  return {
+    leading,
+    core: text,
+    trailing,
   }
 }
 
@@ -383,6 +562,12 @@ async function sendMessage() {
     // 监听后端发送的事件：thinking, tool_call, tool_result, complete, error
     await api.chat(sessionId.value, userMessage, (event) => {
       console.log('[Iteration Debug] Received event:', event)
+
+      if (event.event === 'message' && event.content) {
+        assistantContent = event.content
+        assistantMessage.content = event.content
+        scrollToBottom()
+      }
       
       // 仅在开启迭代模式时处理步骤
       if (settingsStore.settings.useCoT && assistantMessage.thinking) {
@@ -470,9 +655,15 @@ async function sendMessage() {
       }
     })
     
-    // 更新 assistant 消息内容
-    assistantMessage.content = assistantContent || t('抱歉，没有收到回复。', 'Sorry, no response received.')
-    
+    // 更新 assistant 消息内容，加入一个本地打字机动画
+    await typewriterReveal(
+      assistantMessage,
+      assistantContent || t('抱歉，没有收到回复。', 'Sorry, no response received.'),
+      {
+        onUpdate: scrollToBottom
+      }
+    )
+
     scrollToBottom()
   } catch (error) {
     console.error('Failed to send message:', error)
@@ -522,8 +713,200 @@ function switchSettingsTab(tab: string) {
   settingsTab.value = tab
 }
 
+function normalizeBrowserUrl(rawUrl: string): string {
+  const trimmed = sanitizeBrowserUrlCandidate(rawUrl)
+  if (!trimmed) return BROWSER_HOME
+  if (trimmed === 'about:blank') return BROWSER_HOME
+
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`
+
+  try {
+    const parsed = new URL(withScheme)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return BROWSER_HOME
+    }
+    return parsed.toString()
+  } catch {
+    return BROWSER_HOME
+  }
+}
+
+function sanitizeBrowserUrlCandidate(rawUrl: string): string {
+  let value = rawUrl.trim()
+  value = value.replace(/^[<([{'"“‘]+/, '')
+  value = value.replace(/[>\])}"'”’。、，。！？!?.,;:]+$/g, '')
+
+  try {
+    const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`)
+    parsed.hash = ''
+    return parsed.toString()
+  } catch {
+    return value
+  }
+}
+
+function titleFromUrl(url: string): string {
+  if (!url || url === 'about:blank') {
+    return 'New Tab'
+  }
+
+  try {
+    return new URL(url).host || url
+  } catch {
+    return url
+  }
+}
+
+function createBrowserTab(rawUrl: string = BROWSER_HOME) {
+  const url = normalizeBrowserUrl(rawUrl)
+  const tab: BrowserTab = {
+    id: `browser_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    url,
+    title: titleFromUrl(url),
+    history: [url],
+    historyIndex: 0,
+    renderKey: 0,
+    loadState: 'loading'
+  }
+
+  browserTabs.value.push(tab)
+  activeBrowserTabId.value = tab.id
+  browserAddress.value = url
+  currentView.value = 'browser'
+}
+
+function openBrowserHome() {
+  if (!activeBrowserTab.value) {
+    createBrowserTab()
+    return
+  }
+
+  browserAddress.value = activeBrowserTab.value.url
+  currentView.value = 'browser'
+}
+
+function openBrowserTab(rawUrl: string) {
+  createBrowserTab(rawUrl)
+}
+
+function navigateActiveBrowserTab(rawUrl: string, replace = false) {
+  const tab = activeBrowserTab.value
+  if (!tab) {
+    createBrowserTab(rawUrl)
+    return
+  }
+
+  const url = normalizeBrowserUrl(rawUrl)
+  tab.url = url
+  tab.title = titleFromUrl(url)
+  tab.loadState = 'loading'
+  tab.renderKey += 1
+
+  if (replace) {
+    tab.history[tab.historyIndex] = url
+  } else {
+    tab.history = tab.history.slice(0, tab.historyIndex + 1)
+    tab.history.push(url)
+    tab.historyIndex = tab.history.length - 1
+  }
+
+  browserAddress.value = url
+  currentView.value = 'browser'
+}
+
+function goBrowserAddress() {
+  navigateActiveBrowserTab(browserAddress.value)
+}
+
+function switchBrowserTab(tabId: string) {
+  const tab = browserTabs.value.find(item => item.id === tabId)
+  if (!tab) return
+
+  activeBrowserTabId.value = tab.id
+  browserAddress.value = tab.url
+  currentView.value = 'browser'
+}
+
+function closeBrowserTab(tabId: string) {
+  const index = browserTabs.value.findIndex(tab => tab.id === tabId)
+  if (index === -1) return
+
+  browserTabs.value.splice(index, 1)
+
+  if (activeBrowserTabId.value === tabId) {
+    const nextTab = browserTabs.value[index] || browserTabs.value[index - 1] || null
+    activeBrowserTabId.value = nextTab?.id || ''
+    browserAddress.value = nextTab?.url || ''
+    if (!nextTab) currentView.value = 'chat'
+  }
+}
+
+function browserBack() {
+  const tab = activeBrowserTab.value
+  if (!tab || tab.historyIndex <= 0) return
+
+  tab.historyIndex -= 1
+  tab.url = tab.history[tab.historyIndex]
+  tab.title = titleFromUrl(tab.url)
+  tab.loadState = 'loading'
+  tab.renderKey += 1
+  browserAddress.value = tab.url
+}
+
+function browserForward() {
+  const tab = activeBrowserTab.value
+  if (!tab || tab.historyIndex >= tab.history.length - 1) return
+
+  tab.historyIndex += 1
+  tab.url = tab.history[tab.historyIndex]
+  tab.title = titleFromUrl(tab.url)
+  tab.loadState = 'loading'
+  tab.renderKey += 1
+  browserAddress.value = tab.url
+}
+
+function reloadBrowserTab() {
+  const tab = activeBrowserTab.value
+  if (!tab) return
+
+  tab.loadState = 'loading'
+  tab.renderKey += 1
+}
+
+function onBrowserFrameLoad() {
+  const tab = activeBrowserTab.value
+  if (tab) tab.loadState = 'loaded'
+}
+
+function handleChatClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  const anchor = target?.closest?.('a[href]') as HTMLAnchorElement | null
+  if (!anchor) return
+
+  const href = anchor.getAttribute('href') || ''
+  if (!/^https?:\/\//i.test(href)) return
+
+  event.preventDefault()
+  openBrowserTab(href)
+}
+
+async function listenForDesktopNavigation() {
+  try {
+    const tauriEvent = await import('@tauri-apps/api/event')
+    await tauriEvent.listen<string>('external-navigation-requested', event => {
+      if (event.payload) openBrowserTab(sanitizeBrowserUrlCandidate(event.payload))
+    })
+  } catch (error) {
+    console.debug('Tauri navigation bridge is not available in web mode:', error)
+  }
+}
+
 // 初始化
 onMounted(async () => {
+  await listenForDesktopNavigation()
+
   await agentStore.loadAgents()
   await agentStore.loadModelConfigs()
   await sessionStore.loadChats()
@@ -566,6 +949,57 @@ onMounted(async () => {
   width: 100vw;
   overflow: hidden;
   position: relative;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 18% 12%, var(--mesh-one), transparent 34%),
+    radial-gradient(circle at 82% 18%, var(--mesh-two), transparent 30%),
+    radial-gradient(circle at 50% 90%, rgba(47, 110, 244, 0.08), transparent 34%),
+    linear-gradient(135deg, var(--mesh-three), var(--bg-secondary));
+}
+
+.app-container::before {
+  content: '';
+  position: absolute;
+  inset: -18%;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 22% 24%, rgba(47, 110, 244, 0.16), transparent 24%),
+    radial-gradient(circle at 76% 18%, rgba(181, 213, 255, 0.32), transparent 24%),
+    radial-gradient(circle at 62% 78%, rgba(255, 255, 255, 0.55), transparent 28%);
+  filter: blur(26px);
+  opacity: 0.72;
+  animation: mesh-drift 18s ease-in-out infinite alternate;
+  transform: translate3d(0, 0, 0);
+}
+
+.app-container::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle at center, var(--dot-color) 1px, transparent 1px);
+  background-size: 18px 18px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.9), rgba(0, 0, 0, 0.78));
+  opacity: 0.38;
+}
+
+.app-container.dark::before {
+  background:
+    radial-gradient(circle at 22% 24%, rgba(47, 110, 244, 0.12), transparent 24%),
+    radial-gradient(circle at 76% 18%, rgba(70, 95, 130, 0.22), transparent 24%),
+    radial-gradient(circle at 62% 78%, rgba(24, 25, 27, 0.5), transparent 28%);
+  opacity: 0.62;
+}
+
+@keyframes mesh-drift {
+  from {
+    transform: translate3d(-1.5%, -1%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(1.5%, 1%, 0) scale(1.04);
+  }
 }
 
 /* 主聊天区域 */
@@ -573,7 +1007,232 @@ onMounted(async () => {
   flex: 1;
   display: flex;
   flex-direction: column;
-  background: var(--main-bg);
+  background: transparent;
+  position: relative;
+  z-index: 1;
+}
+
+.main-browser {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  min-width: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.browser-workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.browser-app-header {
+  flex-shrink: 0;
+}
+
+.browser-header-center {
+  justify-content: center;
+  flex: 1;
+}
+
+.browser-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 18px 0;
+  background: var(--glass-bg);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.browser-tab,
+.browser-new-tab,
+.browser-command,
+.browser-icon-btn,
+.browser-go {
+  border: 1px solid var(--border-color);
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  transition: transform 0.18s ease, background 0.2s, border-color 0.2s, opacity 0.2s;
+}
+
+.browser-tab {
+  height: 34px;
+  max-width: 220px;
+  min-width: 120px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 12px;
+  border-radius: 10px 10px 0 0;
+  border-bottom-color: transparent;
+}
+
+.browser-tab.active {
+  background: var(--glass-bg-strong);
+  border-color: var(--primary-color);
+  border-bottom-color: transparent;
+  box-shadow: 0 10px 24px rgba(47, 110, 244, 0.08);
+}
+
+.browser-tab-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.browser-tab-close {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.browser-tab-close:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.browser-tab-state {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid var(--primary-color);
+  border-top-color: transparent;
+  animation: browser-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.browser-new-tab {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px 12px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.browser-icon-btn,
+.browser-command {
+  height: 36px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.browser-icon-btn {
+  width: 36px;
+  padding: 0;
+}
+
+.browser-command {
+  gap: 6px;
+  padding: 0 12px;
+}
+
+.browser-icon-btn svg,
+.browser-command svg {
+  width: 16px;
+  height: 16px;
+}
+
+.browser-icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.browser-tab:hover,
+.browser-new-tab:hover,
+.browser-command:hover,
+.browser-icon-btn:hover:not(:disabled),
+.browser-go:hover {
+  background: var(--hover-bg);
+  transform: translateY(-1px);
+}
+
+.browser-address {
+  flex: 1;
+  min-width: 160px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
+  font-size: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.browser-address:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.browser-go {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.browser-frame-area {
+  flex: 1;
+  min-height: 0;
+  margin: 16px 18px 18px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+  background: var(--glass-bg-strong);
+  box-shadow: var(--soft-shadow);
+}
+
+.browser-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: white;
+  display: block;
+}
+
+.browser-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@keyframes browser-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* 顶部标题栏 */
@@ -582,9 +1241,13 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   padding: 12px 24px;
-  background: var(--card-bg);
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px) saturate(170%);
+  -webkit-backdrop-filter: blur(20px) saturate(170%);
   border-bottom: 1px solid var(--border-color);
-  height: 60px;
+  box-shadow: inset 0 1px 0 var(--glass-border);
+  height: 64px;
+  flex-shrink: 0;
 }
 
 .header-left {
@@ -596,18 +1259,22 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 6px 8px;
+  border-radius: 14px;
 }
 
 .logo-icon {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   color: var(--primary-color);
+  filter: drop-shadow(0 8px 16px rgba(47, 110, 244, 0.18));
 }
 
 .logo-text {
   font-size: 18px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text-primary);
+  letter-spacing: -0.02em;
 }
 
 .header-center {
@@ -617,47 +1284,55 @@ onMounted(async () => {
 }
 
 .selector select {
-  padding: 8px 32px 8px 12px;
-  background: var(--input-bg);
+  height: 36px;
+  padding: 8px 34px 8px 13px;
+  background: var(--glass-bg-strong);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 560;
   cursor: pointer;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 10px center;
+  background-position: right 12px center;
   min-width: 150px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65), 0 8px 20px rgba(17, 24, 39, 0.04);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.18s ease;
 }
 
 .selector select:focus {
   outline: none;
   border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(47, 110, 244, 0.12);
 }
 
 .header-right {
   display: flex;
   align-items: center;
+  gap: 4px;
 }
 
 .btn-settings {
   width: 40px;
   height: 40px;
-  border-radius: 10px;
-  border: none;
+  border-radius: 12px;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s;
+  transition: transform 0.18s ease, background 0.2s, border-color 0.2s, color 0.2s;
 }
 
 .btn-settings:hover {
-  background: var(--hover-bg);
+  background: var(--glass-bg-strong);
+  border-color: var(--border-color);
   color: var(--text-primary);
+  transform: translateY(-1px);
 }
 
 .btn-settings svg {
@@ -669,16 +1344,17 @@ onMounted(async () => {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
+  padding: 30px 32px 24px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
 }
 
 .message {
   display: flex;
   gap: 12px;
-  max-width: 80%;
+  max-width: min(78%, 860px);
+  animation: message-rise 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .message.user {
@@ -686,17 +1362,29 @@ onMounted(async () => {
   flex-direction: row-reverse;
 }
 
+@keyframes message-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .message-avatar {
   flex-shrink: 0;
 }
 
 .avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 10px 22px rgba(17, 24, 39, 0.08);
 }
 
 .user-avatar {
@@ -712,7 +1400,7 @@ onMounted(async () => {
 .agent-avatar {
   color: white;
   font-weight: 700;
-  font-size: 16px;
+  font-size: 14px;
 }
 
 .message-content {
@@ -725,7 +1413,8 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 11px;
+  letter-spacing: 0.01em;
 }
 
 .message.user .message-header {
@@ -733,7 +1422,7 @@ onMounted(async () => {
 }
 
 .sender {
-  font-weight: 500;
+  font-weight: 650;
   color: var(--text-primary);
 }
 
@@ -742,19 +1431,23 @@ onMounted(async () => {
 }
 
 .message-text {
-  padding: 12px 16px;
-  border-radius: 12px;
+  padding: 12px 15px;
+  border-radius: 16px;
   font-size: 14px;
   line-height: 1.6;
-  background: var(--card-bg);
+  background: var(--glass-bg-strong);
   color: var(--text-primary);
   border: 1px solid var(--border-color);
+  box-shadow: 0 12px 28px rgba(17, 24, 39, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.68);
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
 }
 
 .message.user .message-text {
   background: var(--primary-color);
   color: white;
   border-color: var(--primary-color);
+  box-shadow: 0 14px 30px rgba(47, 110, 244, 0.18);
 }
 
 .message-text :deep(p) {
@@ -766,16 +1459,16 @@ onMounted(async () => {
 }
 
 .message-text :deep(code) {
-  background: rgba(0, 0, 0, 0.1);
+  background: rgba(23, 23, 23, 0.08);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: 6px;
   font-family: monospace;
 }
 
 .message-text :deep(pre) {
-  background: rgba(0, 0, 0, 0.1);
+  background: rgba(23, 23, 23, 0.07);
   padding: 12px;
-  border-radius: 8px;
+  border-radius: 12px;
   overflow-x: auto;
   margin: 8px 0;
 }
@@ -784,9 +1477,10 @@ onMounted(async () => {
   display: flex;
   gap: 4px;
   padding: 12px 16px;
-  background: var(--card-bg);
+  background: var(--glass-bg-strong);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 16px;
+  box-shadow: var(--soft-shadow);
 }
 
 .typing-indicator span {
@@ -816,32 +1510,49 @@ onMounted(async () => {
 
 /* 底部输入区域 */
 .chat-footer {
-  padding: 16px 24px;
-  background: var(--card-bg);
+  padding: 16px 24px 14px;
+  background: var(--footer-bg);
   border-top: 1px solid var(--border-color);
+  backdrop-filter: blur(22px) saturate(170%);
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+  box-shadow: inset 0 1px 0 var(--glass-border);
 }
 
 .input-area {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  gap: 12px;
+  align-items: center;
 }
 
 .input-area textarea {
   flex: 1;
-  padding: 12px 16px;
-  background: var(--input-bg);
+  width: 100%;
+  height: 96px;
+  min-height: 96px;
+  padding: 14px 16px;
+  background: var(--glass-bg-strong);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 18px;
   color: var(--text-primary);
   font-size: 14px;
+  line-height: 1.5;
   resize: none;
-  min-height: 60px;
+  box-sizing: border-box;
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .input-area textarea:focus {
   outline: none;
   border-color: var(--primary-color);
+  box-shadow: var(--glass-shadow), 0 0 0 3px rgba(47, 110, 244, 0.12);
+}
+
+.input-area textarea::placeholder {
+  color: var(--text-muted);
 }
 
 /* CoT 切换按钮样式 */
@@ -849,42 +1560,38 @@ onMounted(async () => {
   width: 44px;
   height: 44px;
   padding: 0;
-  background: var(--input-bg);
+  background: var(--glass-bg-strong);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 16px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s ease;
+  color: var(--text-secondary);
+  box-shadow: var(--soft-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+  transition: transform 0.18s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   flex-shrink: 0;
 }
 
 .cot-toggle-btn:hover {
   background: var(--hover-bg);
+  transform: translateY(-1px);
+  color: var(--text-primary);
 }
 
 .cot-toggle-btn.active {
   background: var(--primary-color);
   border-color: var(--primary-color);
-  animation: pulse 2s infinite;
+  box-shadow: 0 14px 30px rgba(47, 110, 244, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 
 .cot-toggle-btn.active .cot-icon {
-  filter: brightness(0) invert(1);
-}
-
-@keyframes pulse {
-  0%, 100% {
-    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4);
-  }
-  50% {
-    box-shadow: 0 0 0 8px rgba(59, 130, 246, 0);
-  }
+  color: white;
 }
 
 .cot-icon {
-  font-size: 18px;
+  width: 18px;
+  height: 18px;
 }
 
 /* 输入提示 */
@@ -892,9 +1599,12 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 6px;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 0 4px;
   font-size: 11px;
   color: var(--text-secondary);
+  flex-wrap: wrap;
 }
 
 .cot-status {
@@ -909,8 +1619,10 @@ onMounted(async () => {
 .input-actions {
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
-  gap: 8px;
+  justify-content: space-between;
+  align-self: center;
+  height: 96px;
+  gap: 0;
 }
 
 .btn-clear {
@@ -919,16 +1631,19 @@ onMounted(async () => {
   justify-content: center;
   width: 44px;
   height: 44px;
-  background: transparent;
+  background: var(--glass-bg-strong);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 16px;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.2s;
+  box-shadow: var(--soft-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+  transition: transform 0.18s ease, background 0.2s ease, color 0.2s ease;
 }
 
 .btn-clear:hover {
   background: var(--hover-bg);
+  color: var(--text-primary);
+  transform: translateY(-1px);
 }
 
 .btn-clear svg {
@@ -946,15 +1661,17 @@ onMounted(async () => {
   padding: 0;
   background: var(--primary-color);
   border: none;
-  border-radius: 12px;
+  border-radius: 16px;
   color: white;
   font-size: 14px;
   cursor: pointer;
-  transition: opacity 0.2s;
+  box-shadow: 0 14px 30px rgba(47, 110, 244, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  transition: transform 0.18s ease, opacity 0.2s;
 }
 
 .btn-send:hover:not(:disabled) {
   opacity: 0.9;
+  transform: translateY(-1px);
 }
 
 .btn-send:disabled {
@@ -974,10 +1691,13 @@ onMounted(async () => {
   right: -900px;
   width: 900px;
   height: 100vh;
-  background: var(--card-bg);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(24px) saturate(175%);
+  -webkit-backdrop-filter: blur(24px) saturate(175%);
   border-left: 1px solid var(--border-color);
+  box-shadow: -24px 0 60px rgba(17, 24, 39, 0.16), inset 1px 0 0 rgba(255, 255, 255, 0.45);
   z-index: 1000;
-  transition: right 0.3s ease;
+  transition: right 0.32s cubic-bezier(0.22, 1, 0.36, 1);
   overflow: hidden;
 }
 
@@ -992,7 +1712,9 @@ onMounted(async () => {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(23, 23, 23, 0.22);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   z-index: 999;
 }
 
@@ -1002,6 +1724,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
 }
 
 .chat-body.dual-panel {
@@ -1014,5 +1737,6 @@ onMounted(async () => {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  position: relative;
 }
 </style>

@@ -11,9 +11,9 @@
         <div class="setting-item">
           <label>{{ t('主题', 'Theme') }}</label>
           <select v-model="settings.theme">
-            <option value="dark">{{ t('深色', 'Dark') }}</option>
             <option value="light">{{ t('浅色', 'Light') }}</option>
-            <option value="auto">{{ t('自动', 'Auto') }}</option>
+            <option value="dark">{{ t('深色', 'Dark') }}</option>
+            <option value="system">{{ t('自动', 'Auto') }}</option>
           </select>
         </div>
         <div class="setting-item">

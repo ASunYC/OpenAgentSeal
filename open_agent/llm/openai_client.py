@@ -1,5 +1,6 @@
 """OpenAI LLM client implementation."""
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -76,6 +77,124 @@ class OpenAIClient(LLMClientBase):
         response = await self.client.chat.completions.create(**params)
         # Return full response to access usage info
         return response
+
+    async def _emit_stream_callback(self, content: str) -> None:
+        """Emit incremental streaming content to the registered callback."""
+        if not self.stream_callback:
+            return
+
+        event_data = {
+            "event": "message",
+            "content": content,
+        }
+
+        try:
+            result = self.stream_callback(event_data)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as e:
+            logger.warning("Stream callback error: %s", e)
+
+    async def _make_stream_api_request(
+        self,
+        api_messages: list[dict[str, Any]],
+        tools: list[Any] | None = None,
+    ) -> LLMResponse:
+        """Execute a streaming API request and build an LLMResponse from chunks."""
+        params = {
+            "model": self.model,
+            "messages": api_messages,
+            "extra_body": {"reasoning_split": True},
+            "stream": True,
+        }
+
+        if tools:
+            params["tools"] = self._convert_tools(tools)
+
+        full_content = ""
+        thinking_content = ""
+        finish_reason = "stop"
+        tool_call_parts: dict[int, dict[str, Any]] = {}
+
+        try:
+            stream = await self.client.chat.completions.create(**params)
+            async for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+
+                choice = choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+
+                delta = getattr(choice, "delta", None)
+                if not delta:
+                    continue
+
+                content_delta = getattr(delta, "content", None)
+                if content_delta:
+                    full_content += content_delta
+                    await self._emit_stream_callback(full_content)
+
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    thinking_content += reasoning_delta
+
+                reasoning_details = getattr(delta, "reasoning_details", None)
+                if reasoning_details:
+                    for detail in reasoning_details:
+                        text = getattr(detail, "text", None)
+                        if text:
+                            thinking_content += text
+
+                for tool_call in getattr(delta, "tool_calls", None) or []:
+                    index = getattr(tool_call, "index", 0) or 0
+                    part = tool_call_parts.setdefault(
+                        index,
+                        {"id": None, "type": "function", "name": "", "arguments": ""},
+                    )
+                    if getattr(tool_call, "id", None):
+                        part["id"] = tool_call.id
+                    if getattr(tool_call, "type", None):
+                        part["type"] = tool_call.type
+
+                    function = getattr(tool_call, "function", None)
+                    if function:
+                        if getattr(function, "name", None):
+                            part["name"] += function.name
+                        if getattr(function, "arguments", None):
+                            part["arguments"] += function.arguments
+
+            tool_calls = []
+            for index, part in sorted(tool_call_parts.items()):
+                if not part["name"]:
+                    continue
+                try:
+                    arguments = json.loads(part["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    arguments = {}
+
+                tool_calls.append(
+                    ToolCall(
+                        id=part["id"] or f"call_{index}",
+                        type=part["type"] or "function",
+                        function=FunctionCall(
+                            name=part["name"],
+                            arguments=arguments,
+                        ),
+                    )
+                )
+
+            return LLMResponse(
+                content=full_content,
+                thinking=thinking_content if thinking_content else None,
+                tool_calls=tool_calls if tool_calls else None,
+                finish_reason=finish_reason or "stop",
+                usage=None,
+            )
+        except Exception as e:
+            setattr(e, "_stream_emitted", bool(full_content))
+            raise
 
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
         """Convert tools to OpenAI format.
@@ -292,6 +411,43 @@ class OpenAIClient(LLMClientBase):
         """
         # Prepare request
         request_params = self._prepare_request(messages, tools)
+
+        # Streaming path: emit incremental content updates while keeping the
+        # existing final-response parsing logic for tool calls and usage data.
+        if self.stream_callback:
+            if self.retry_config.enabled:
+                for attempt in range(self.retry_config.max_retries + 1):
+                    try:
+                        response = await self._make_stream_api_request(
+                            request_params["api_messages"],
+                            request_params["tools"],
+                        )
+                        return response
+                    except Exception as e:
+                        if getattr(e, "_stream_emitted", False):
+                            raise
+
+                        if attempt >= self.retry_config.max_retries:
+                            from ..retry import RetryExhaustedError
+
+                            raise RetryExhaustedError(e, attempt + 1)
+
+                        delay = self.retry_config.calculate_delay(attempt)
+                        logger.warning(
+                            "Streaming request failed: %s, retrying attempt %s after %.2f seconds",
+                            str(e),
+                            attempt + 2,
+                            delay,
+                        )
+                        if self.retry_callback:
+                            self.retry_callback(e, attempt + 1)
+                        await asyncio.sleep(delay)
+            else:
+                response = await self._make_stream_api_request(
+                    request_params["api_messages"],
+                    request_params["tools"],
+                )
+                return response
 
         # Make API request with retry logic
         if self.retry_config.enabled:

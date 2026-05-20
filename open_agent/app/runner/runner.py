@@ -203,7 +203,25 @@ class AgentRunner:
         
         # Create event collector for status callback
         event_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
-        
+
+        stream_response = config_manager.get_settings().stream_response
+
+        async def stream_callback(stream_data: Dict[str, Any]):
+            """Convert incremental LLM stream updates into AgentEvents."""
+            content = stream_data.get("content")
+            if content is None:
+                return
+
+            await event_queue.put(
+                AgentEvent(
+                    event=stream_data.get("event", "message"),
+                    session_id=session_id,
+                    step=agent.current_step,
+                    content=content,
+                    status=stream_data.get("status", "streaming"),
+                )
+            )
+
         async def status_callback(event_data: Dict[str, Any]):
             """Convert agent status callbacks to AgentEvents"""
             event_type = event_data.get("event", "")
@@ -225,10 +243,11 @@ class AgentRunner:
                 max_steps=event_data.get("max_steps"),
             )
             await event_queue.put(event)
-        
+
         # Set callback on agent
         agent.status_callback = status_callback
-        
+        agent.llm.stream_callback = stream_callback if stream_response else None
+
         # Create a task to run the agent
         agent_task = asyncio.create_task(agent.run())
         
@@ -290,6 +309,7 @@ class AgentRunner:
             )
         finally:
             agent.status_callback = None
+            agent.llm.stream_callback = None
     
     def _create_agent_from_config(self, agent_config):
         """Create agent instance from agent config"""

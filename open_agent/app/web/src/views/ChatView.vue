@@ -42,7 +42,7 @@
               <div class="message-text" v-html="renderMarkdown(msg.content || '')"></div>
             </div>
           </div>
-          
+
           <div v-if="loading" class="message assistant">
             <div class="message-avatar">
               <div class="avatar agent-avatar" :style="{ background: getAgentColor() }">
@@ -57,6 +57,7 @@
               </div>
             </div>
           </div>
+          
         </div>
         
         <div class="input-area">
@@ -104,6 +105,7 @@ import { useAgentStore } from '@/stores/agent'
 import { api } from '@/api'
 import type { AgentConfig, Message } from '@/types'
 import { marked } from 'marked'
+import { typewriterReveal } from '@/utils/typewriter'
 
 const settingsStore = useSettingsStore()
 const agentStore = useAgentStore()
@@ -122,7 +124,7 @@ function t(zh: string, en: string): string {
 function getAgentColor(): string {
   const agent = agents.value.find(a => a.id === selectedAgentId.value)
   if (!agent) return '#3b82f6'
-  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4']
+  const colors = ['#2f6ef4', '#3f7f68', '#8a6f2c', '#9b4f45', '#596579', '#4f7f9f', '#6f6a9a']
   const index = agent.name.charCodeAt(0) % colors.length
   return colors[index]
 }
@@ -182,7 +184,7 @@ async function sendMessage() {
   
   scrollToBottom()
   loading.value = true
-  
+
   try {
     let assistantContent = ''
     
@@ -191,14 +193,27 @@ async function sendMessage() {
       if (event.event === 'message' && event.content) {
         assistantContent = event.content
       }
+
+      if (event.event === 'complete' && event.content) {
+        assistantContent = event.content
+      }
     })
     
-    messages.value.push({
+    const assistantMessage: Message = {
       role: 'assistant',
-      content: assistantContent || t('抱歉，没有收到回复。', 'Sorry, no response received.'),
+      content: '',
       timestamp: new Date().toISOString()
-    })
-    
+    }
+    messages.value.push(assistantMessage)
+
+    await typewriterReveal(
+      assistantMessage,
+      assistantContent || t('抱歉，没有收到回复。', 'Sorry, no response received.'),
+      {
+        onUpdate: scrollToBottom
+      }
+    )
+
     scrollToBottom()
   } catch (error) {
     console.error('Failed to send message:', error)

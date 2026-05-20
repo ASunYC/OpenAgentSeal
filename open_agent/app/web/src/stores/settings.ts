@@ -2,9 +2,12 @@ import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import type { SystemSettings } from '@/types'
 
+const SETTINGS_VERSION = 2
+
 const defaultSettings: SystemSettings = {
   language: 'zh-CN',
-  theme: 'dark',
+  theme: 'light',
+  settingsVersion: SETTINGS_VERSION,
   fontSize: 'medium',
   workspace: '',
   autoSave: true,
@@ -20,7 +23,16 @@ export const useSettingsStore = defineStore('settings', () => {
     try {
       const saved = localStorage.getItem('open-agent-settings')
       if (saved) {
-        settings.value = { ...defaultSettings, ...JSON.parse(saved) }
+        const savedSettings = JSON.parse(saved) as Partial<SystemSettings>
+        const mergedSettings: SystemSettings = { ...defaultSettings, ...savedSettings }
+
+        if (savedSettings.settingsVersion !== SETTINGS_VERSION) {
+          mergedSettings.theme = 'light'
+          mergedSettings.settingsVersion = SETTINGS_VERSION
+        }
+
+        settings.value = mergedSettings
+        saveSettings()
       }
     } catch (e) {
       console.error('Failed to load settings:', e)

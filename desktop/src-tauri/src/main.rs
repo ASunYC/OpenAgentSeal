@@ -15,7 +15,7 @@ use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Emitter, Manager,
 };
 
 const BACKEND_HOST: &str = "127.0.0.1";
@@ -280,6 +280,17 @@ fn open_backend_in_browser() -> Result<(), String> {
     open_target(&backend_url())
 }
 
+fn is_allowed_main_navigation(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "about" | "asset" | "data" | "file" | "tauri" => true,
+        "http" | "https" => {
+            let host = url.host_str().unwrap_or_default();
+            matches!(host, "127.0.0.1" | "localhost" | "tauri.localhost")
+        }
+        _ => false,
+    }
+}
+
 fn open_backend_log_file() -> Result<(), String> {
     let path = backend_log_path()?;
     if !path.exists() {
@@ -355,6 +366,22 @@ fn robot_tray_icon() -> Image<'static> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
+                .on_navigation(|webview, url| {
+                    if webview.label() == "main" && !is_allowed_main_navigation(url) {
+                        let target = url.as_str().to_string();
+                        let _ = webview.emit("external-navigation-requested", target.clone());
+                        append_desktop_log(&format!(
+                            "Blocked external navigation in main window: {target}"
+                        ));
+                        return false;
+                    }
+
+                    true
+                })
+                .build(),
+        )
         .setup(|app| {
             let backend_command = resolve_backend_command(app);
             let backend = if backend_healthy() {

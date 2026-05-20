@@ -206,7 +206,7 @@ def _get_default_workspace() -> str:
 class AppSettings:
     """应用设置"""
     language: str = "zh-CN"              # 语言
-    theme: str = "dark"                  # 主题: light, dark, system
+    theme: str = "light"                 # 主题: light, dark, system
     font_size: str = "medium"            # 字体大小: small, medium, large
     workspace: str = field(default_factory=_get_default_workspace)  # 工作目录
     auto_save: bool = True               # 自动保存

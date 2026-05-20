@@ -162,6 +162,7 @@ export interface CommandArg {
 export interface SystemSettings {
   language: 'zh-CN' | 'en-US'
   theme: 'light' | 'dark' | 'system'
+  settingsVersion?: number
   fontSize: 'small' | 'medium' | 'large'
   workspace: string
   autoSave: boolean
@@ -212,6 +213,7 @@ export interface CommandInfo {
 export interface AppSettings {
   language: 'zh-CN' | 'en-US'
   theme: 'light' | 'dark' | 'system'
+  settingsVersion?: number
   fontSize: 'small' | 'medium' | 'large'
   workspace: string
   autoSave: boolean

@@ -51,5 +51,4 @@ Build outputs:
 dist/OpenAgentSeal-win-x64/installers/OpenAgentSeal_0.1.0_x64-setup.exe
 dist/OpenAgentSeal-win-x64/installers/OpenAgentSeal_0.1.0_x64_en-US.msi
 dist/OpenAgentSeal-win-x64/portable/OpenAgentSeal.exe
-dist/OpenAgentSeal-win-x64/OpenAgentSeal-portable-win-x64.zip
 ```

@@ -115,6 +115,16 @@ class LLMClient:
         """Set retry callback."""
         self._client.retry_callback = value
 
+    @property
+    def stream_callback(self):
+        """Get stream callback."""
+        return self._client.stream_callback
+
+    @stream_callback.setter
+    def stream_callback(self, value):
+        """Set stream callback."""
+        self._client.stream_callback = value
+
     async def generate(
         self,
         messages: list[Message],

@@ -307,9 +307,10 @@ const stopDrag = () => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--card-bg);
+  background: transparent;
   position: relative;
   min-width: 500px;
+  color: var(--text-primary);
 }
 
 .resizer {
@@ -329,8 +330,8 @@ const stopDrag = () => {
 .resizer-indicator {
   width: 4px;
   height: 60px;
-  background: var(--border-color);
-  border-radius: 2px;
+  background: rgba(115, 115, 115, 0.32);
+  border-radius: 999px;
   transition: all 0.2s;
 }
 
@@ -349,22 +350,26 @@ const stopDrag = () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  padding: 18px 22px;
   border-bottom: 1px solid var(--border-color);
+  background: var(--glass-bg);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
 }
 
 .panel-header h2 {
   font-size: 18px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text-primary);
   margin: 0;
+  letter-spacing: -0.02em;
 }
 
 .btn-close {
   width: 32px;
   height: 32px;
-  border-radius: 8px;
-  border: none;
+  border-radius: 10px;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -375,7 +380,8 @@ const stopDrag = () => {
 }
 
 .btn-close:hover {
-  background: var(--hover-bg);
+  background: var(--glass-bg-strong);
+  border-color: var(--border-color);
   color: var(--text-primary);
 }
 
@@ -391,35 +397,46 @@ const stopDrag = () => {
 }
 
 .settings-menu {
-  width: 160px;
-  min-width: 160px;
+  width: 178px;
+  min-width: 178px;
   border-right: 1px solid var(--border-color);
-  padding: 12px 0;
+  padding: 14px 10px;
   overflow-y: auto;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+:global(.dark) .settings-menu,
+:global(.dark) .settings-content {
+  background: rgba(0, 0, 0, 0.08);
 }
 
 .menu-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
-  margin: 2px 8px;
-  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 2px 0;
+  border-radius: 12px;
   cursor: pointer;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 560;
   transition: all 0.2s;
   position: relative;
+  border: 1px solid transparent;
 }
 
 .menu-item:hover {
-  background: var(--hover-bg);
+  background: var(--glass-bg);
+  border-color: var(--border-color);
   color: var(--text-primary);
 }
 
 .menu-item.active {
-  background: var(--active-bg);
+  background: var(--glass-bg-strong);
   color: var(--primary-color);
+  border-color: rgba(47, 110, 244, 0.18);
+  box-shadow: 0 10px 24px rgba(47, 110, 244, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.62);
 }
 
 .menu-item svg {
@@ -432,15 +449,16 @@ const stopDrag = () => {
   margin-left: auto;
   font-size: 10px;
   padding: 2px 6px;
-  background: var(--border-color);
-  border-radius: 4px;
+  background: var(--active-bg);
+  border-radius: 999px;
   color: var(--text-muted);
 }
 
 .settings-content {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 22px;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .tab-content {
@@ -454,10 +472,11 @@ const stopDrag = () => {
 }
 
 .content-header h3 {
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 18px;
+  font-weight: 700;
   color: var(--text-primary);
   margin: 0 0 4px 0;
+  letter-spacing: -0.02em;
 }
 
 .content-header p {
@@ -470,15 +489,17 @@ const stopDrag = () => {
   padding: 10px 20px;
   background: var(--primary-color);
   border: none;
-  border-radius: 8px;
+  border-radius: 12px;
   color: white;
   font-size: 14px;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: opacity 0.2s, transform 0.18s ease;
   align-self: flex-start;
+  box-shadow: 0 14px 28px rgba(47, 110, 244, 0.18);
 }
 
 .btn-primary:hover {
   opacity: 0.9;
+  transform: translateY(-1px);
 }
 </style>

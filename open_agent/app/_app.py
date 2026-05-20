@@ -691,39 +691,35 @@ def _setup_legacy_routes(app: FastAPI):
         try:
             from open_agent.tools.skill_loader import SkillLoader
             from open_agent.config import Config
+            from open_agent.utils.path_utils import get_external_skills_dir, is_frozen
 
             # Get skills directory - use Config.get_package_dir() to find skills directory
             # instead of find_config_file which is for files, not directories
             skills_dir = None
 
             # Try to find skills directory in multiple locations
-            # Priority 1: Development mode - current directory's open_agent/skills
-            dev_skills = Path.cwd() / "open_agent" / "skills"
-            if dev_skills.exists():
-                skills_dir = dev_skills
+            # Priority 1: Frozen mode - exe-local skills or seeded user skills
+            if is_frozen():
+                skills_dir = get_external_skills_dir()
 
-            # Priority 2: Package installation directory's skills subdirectory
+            # Priority 2: Development mode - current directory's open_agent/skills
+            if not skills_dir:
+                dev_skills = Path.cwd() / "open_agent" / "skills"
+                if dev_skills.exists():
+                    skills_dir = dev_skills
+
+            # Priority 3: Package installation directory's skills subdirectory
             if not skills_dir:
                 package_skills = Config.get_package_dir() / "skills"
                 if package_skills.exists():
                     skills_dir = package_skills
 
-            # Priority 3: User app directory
+            # Priority 4: User app directory
             if not skills_dir:
                 user_app_dir = Path.home() / ".open-agent"
                 user_skills = user_app_dir / "open_agent" / "skills"
                 if user_skills.exists():
                     skills_dir = user_skills
-
-            # Priority 4: Frozen executable mode
-            if not skills_dir:
-                import sys
-
-                if getattr(sys, "frozen", False):
-                    exe_dir = Path(sys.executable).parent
-                    external_skills = exe_dir / "skills"
-                    if external_skills.exists():
-                        skills_dir = external_skills
 
             # Fallback to default
             if not skills_dir:
