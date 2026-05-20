@@ -10,6 +10,20 @@
 
 </div>
 
+## Screenshots / 界面预览
+
+### Chat Workspace / 聊天工作区
+
+![OpenAgentSeal chat workspace](./docs/assets/screenshots/openagentseal-chat.png)
+
+### Built-in Browser / 内置浏览器
+
+![OpenAgentSeal built-in browser](./docs/assets/screenshots/openagentseal-browser.png)
+
+### Settings Panel / 设置面板
+
+![OpenAgentSeal settings panel](./docs/assets/screenshots/openagentseal-settings.png)
+
 ---
 
 ## English
