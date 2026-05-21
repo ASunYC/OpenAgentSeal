@@ -48,7 +48,7 @@
       <h3>{{ t('工作目录说明', 'Workspace Information') }}</h3>
       <ul>
         <li>{{ t('智能体将在此目录下创建和管理文件', 'Agents will create and manage files in this directory') }}</li>
-        <li>{{ t('会话日志将保存在工作目录的logs子目录中', 'Session logs will be saved in the logs subdirectory') }}</li>
+        <li>{{ t('对话日志将保存在工作目录的logs子目录中', 'Chat logs will be saved in the logs subdirectory') }}</li>
         <li>{{ t('MCP配置文件存放在工作目录的config子目录中', 'MCP config files are stored in the config subdirectory') }}</li>
         <li>{{ t('修改工作目录后需要重启应用才能生效', 'Restart the application after changing workspace') }}</li>
       </ul>

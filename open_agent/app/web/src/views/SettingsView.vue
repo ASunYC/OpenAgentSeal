@@ -90,7 +90,7 @@
         <div class="setting-item">
           <div class="setting-info">
             <label>{{ t('自动保存', 'Auto Save') }}</label>
-            <p>{{ t('自动保存会话和配置', 'Automatically save sessions and configurations') }}</p>
+            <p>{{ t('自动保存对话和配置', 'Automatically save chats and configurations') }}</p>
           </div>
           <div class="setting-control">
             <label class="toggle">
@@ -170,7 +170,8 @@ const settings = reactive<SystemSettings>({
   fontSize: 'medium',
   workspace: '',
   autoSave: true,
-  streamResponse: true
+  streamResponse: true,
+  useCoT: false
 })
 
 function t(zh: string, en: string): string {
@@ -188,7 +189,8 @@ async function resetSettings() {
     fontSize: 'medium',
     workspace: settings.workspace,
     autoSave: true,
-    streamResponse: true
+    streamResponse: true,
+    useCoT: false
   }
   
   Object.assign(settings, defaultSettings)

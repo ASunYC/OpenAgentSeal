@@ -1,14 +1,14 @@
 /**
- * Session store following CoPaw's Pinia pattern
+ * Chat store following CoPaw's Pinia pattern
  * Manages chats and messages state
  */
 
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { Chat, Message, AgentEvent } from '@/types'
-import { chatApi, runAgentStream, cancelSession } from '@/api'
+import { chatApi, runAgentStream, cancelRunnerChat } from '@/api'
 
-export const useSessionStore = defineStore('session', () => {
+export const useChatStore = defineStore('chat', () => {
   // State
   const chats = ref<Chat[]>([])
   const currentChatId = ref<string | null>(null)
@@ -22,7 +22,7 @@ export const useSessionStore = defineStore('session', () => {
     chats.value.find(c => c.id === currentChatId.value)
   )
 
-  const currentSessionId = computed(() => 
+  const currentRunnerSessionId = computed(() =>
     currentChat.value?.session_id
   )
 
@@ -44,6 +44,20 @@ export const useSessionStore = defineStore('session', () => {
       chats.value.unshift(chat)
       await selectChat(chat.id)
       return chat
+    } catch (e) {
+      error.value = String(e)
+      return null
+    }
+  }
+
+  async function forkCurrentChat(name?: string) {
+    if (!currentRunnerSessionId.value) return null
+
+    try {
+      const forked = await chatApi.fork(currentRunnerSessionId.value, name)
+      chats.value.unshift(forked.chat)
+      await selectChat(forked.chat.id)
+      return forked.chat
     } catch (e) {
       error.value = String(e)
       return null
@@ -79,7 +93,7 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function sendMessage(content: string) {
-    if (!currentSessionId.value || isRunning.value) return
+    if (!currentRunnerSessionId.value || isRunning.value) return
 
     // Add user message
     const userMsg: Message = { role: 'user', content }
@@ -89,7 +103,7 @@ export const useSessionStore = defineStore('session', () => {
 
     try {
       // Stream agent response
-      for await (const event of runAgentStream(currentSessionId.value, messages.value)) {
+      for await (const event of runAgentStream(currentRunnerSessionId.value, messages.value)) {
         currentEvents.value.push(event)
         
         // Handle different event types
@@ -119,8 +133,8 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function cancel() {
-    if (!currentSessionId.value) return
-    await cancelSession(currentSessionId.value)
+    if (!currentRunnerSessionId.value) return
+    await cancelRunnerChat(currentRunnerSessionId.value)
     isRunning.value = false
   }
 
@@ -138,10 +152,11 @@ export const useSessionStore = defineStore('session', () => {
     error,
     // Getters
     currentChat,
-    currentSessionId,
+    currentRunnerSessionId,
     // Actions
     loadChats,
     createChat,
+    forkCurrentChat,
     selectChat,
     deleteChat,
     sendMessage,

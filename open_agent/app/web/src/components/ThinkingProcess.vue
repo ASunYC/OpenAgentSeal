@@ -80,7 +80,7 @@ const getStepTitle = (type: ThinkingStep['type']) => {
       <span class="thinking-icon">🔄</span>
       <span class="thinking-title">迭代过程</span>
       <span class="thinking-progress">
-        <span class="thinking-count">{{ thinking.steps.length }} / {{ maxSteps }}</span>
+        <span class="thinking-count">{{ stepProgress }}</span>
         <span
           v-if="thinking.isThinking"
           class="thinking-status"

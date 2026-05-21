@@ -800,7 +800,7 @@ export interface ChatHistory {
   - [x] UserSettings.vue - 用户设置
   - [x] ModelsSettings.vue - 模型配置
   - [x] AgentsSettings.vue - 智能体管理
-  - [x] SessionsSettings.vue - 会话管理
+  - [x] ChatsSettings.vue - 对话管理
   - [x] SkillsSettings.vue - 技能管理
   - [x] MCPSettings.vue - MCP 配置
   - [x] SystemSettings.vue - 系统设置

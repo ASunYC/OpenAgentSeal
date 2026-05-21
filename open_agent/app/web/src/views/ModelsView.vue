@@ -212,7 +212,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, onMounted, computed } from 'vue'
+import { reactive, onMounted } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useAgentStore } from '@/stores/agent'
 import { api } from '@/api'
@@ -235,7 +235,7 @@ interface LocalModelConfig {
   isNew: boolean  // 是否为新建的配置卡片
   base_url?: string
   provider_type?: string
-  isDefault?: boolean
+  is_default?: boolean
   showKey?: boolean
   editing?: boolean
   saving?: boolean
@@ -325,7 +325,7 @@ function createNewModel() {
     isNew: true,
     base_url: '',
     provider_type: 'openai',
-    isDefault: false,
+    is_default: false,
     models: [],
     selectedModel: '',
     showKey: false,
@@ -536,7 +536,7 @@ async function saveConfig(id: string) {
       api_key: config.apiKey,
       base_url: config.base_url,
       provider_type: config.provider_type || 'openai',
-      is_default: config.isDefault
+      is_default: config.is_default
     }
     
     const result = await api.saveModelConfig(modelConfig)
@@ -587,7 +587,7 @@ onMounted(async () => {
       isNew: false,  // 从后端加载的配置不是新建的
       base_url: config.base_url,
       provider_type: config.provider_type || 'openai',
-      isDefault: config.is_default || config.isDefault,
+      is_default: config.is_default,
       models: models,
       selectedModel: config.name || '',
       showKey: false,

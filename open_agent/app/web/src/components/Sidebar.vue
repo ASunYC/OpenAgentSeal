@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { useSessionStore } from '@/stores/session'
+import { useChatStore } from '@/stores/chat'
 
-const store = useSessionStore()
+const store = useChatStore()
 </script>
 
 <template>
@@ -21,7 +21,7 @@ const store = useSessionStore()
     
     <!-- Chat List -->
     <div class="flex-1 overflow-y-auto py-2">
-      <div class="px-4 py-2 text-xs text-gray-500 uppercase">会话列表</div>
+      <div class="px-4 py-2 text-xs text-gray-500 uppercase">对话列表</div>
       
       <div
         v-for="chat in store.chats"
@@ -46,7 +46,7 @@ const store = useSessionStore()
         class="w-full px-4 py-3 text-left text-blue-400 hover:bg-gray-700/50 transition"
         @click="store.createChat()"
       >
-        + 新建会话
+        + 新建对话
       </button>
     </div>
     

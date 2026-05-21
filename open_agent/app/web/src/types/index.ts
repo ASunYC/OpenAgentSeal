@@ -8,6 +8,7 @@ export interface Chat {
   session_id: string
   user_id: string
   channel: string
+  meta?: Record<string, any>
   created_at: string
   updated_at: string
 }
@@ -27,6 +28,12 @@ export interface ChatHistory {
   chat_id: string
   total: number
   messages: Message[]
+}
+
+export interface ForkChatResponse {
+  chat: Chat
+  source_session_id: string
+  copied_message_count: number
 }
 
 export interface AgentEvent {
@@ -117,30 +124,6 @@ export interface AgentConfig {
 }
 
 // Agent 类型别名，用于视图组件
-export interface Agent {
-  id: string
-  name: string
-  description?: string
-  model: string
-  systemPrompt?: string
-  temperature?: number
-  maxTokens?: number
-  avatar?: string
-  createdAt: string
-  updatedAt: string
-}
-
-// 会话历史
-export interface SessionHistory {
-  session_id: string
-  agent_id: string
-  agent_name: string
-  created_at: string
-  updated_at: string
-  message_count: number
-  preview?: string
-}
-
 // 指令定义
 export interface Command {
   name: string
@@ -173,10 +156,10 @@ export interface SystemSettings {
 // 统计数据
 export interface DashboardStats {
   totalAgents: number
-  totalSessions: number
+  totalChats: number
   totalMessages: number
   activeModels: number
-  recentSessions: SessionHistory[]
+  recentChats: Chat[]
 }
 
 // 菜单项定义
@@ -187,20 +170,6 @@ export interface MenuItem {
   icon: string
   children?: MenuItem[]
 }
-
-// 会话信息 (用于历史会话列表)
-export interface SessionInfo {
-  id: string
-  agent_id: string
-  agent_name: string
-  created_at: string
-  updated_at: string
-  message_count: number
-  preview?: string
-}
-
-// ChatSession 类型别名，用于历史会话视图
-export type ChatSession = SessionInfo
 
 // 指令信息 (用于指令展示)
 export interface CommandInfo {
@@ -218,6 +187,7 @@ export interface AppSettings {
   workspace: string
   autoSave: boolean
   streamResponse: boolean
+  useCoT: boolean
 }
 
 // 思考步骤

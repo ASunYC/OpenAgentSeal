@@ -542,7 +542,7 @@ onMounted(async () => {
       display_name: config.display_name || '',
       base_url: config.base_url,
       provider_type: config.provider_type || 'openai',
-      is_default: config.is_default || config.isDefault,
+      is_default: config.is_default,
       showKey: false,
       saving: false,
       editing: false,

@@ -62,6 +62,62 @@ class ChatManager:
         await self.repo.create_chat(chat)
         logger.info(f"Created chat: {chat.id} (session: {chat.session_id})")
         return chat
+
+    def _derive_fork_session_id(self, source_session_id: str) -> str:
+        """Create a new session id that keeps the source agent routing when possible."""
+        if source_session_id.startswith("session_agent_"):
+            agent_part = source_session_id[len("session_agent_"):]
+            if "_" in agent_part:
+                agent_id = agent_part.rsplit("_", 1)[0]
+                if agent_id:
+                    return f"session_agent_{agent_id}_{uuid.uuid4().hex[:8]}"
+        return f"{source_session_id}_fork_{uuid.uuid4().hex[:8]}"
+
+    async def fork_chat(
+        self,
+        source_session_id: str,
+        name: str | None = None,
+        user_id: str = "default",
+        channel: str = "web",
+    ) -> tuple[Optional[ChatSpec], int]:
+        """Fork an existing chat session into a new task with copied messages."""
+        source_chat = await self.repo.find_by_session_id(source_session_id)
+        if not source_chat:
+            return None, 0
+
+        new_session_id = self._derive_fork_session_id(source_chat.session_id)
+        forked_chat = ChatSpec(
+            name=name or f"{source_chat.name} Copy",
+            session_id=new_session_id,
+            user_id=source_chat.user_id or user_id,
+            channel=source_chat.channel or channel,
+            meta={
+                **source_chat.meta,
+                "forked_from_chat_id": source_chat.id,
+                "forked_from_session_id": source_chat.session_id,
+            },
+        )
+
+        await self.repo.create_chat(forked_chat)
+
+        source_messages = self._session_messages.get(source_chat.session_id, [])
+        self._session_messages[forked_chat.session_id] = [
+            message.model_copy(deep=True) for message in source_messages
+        ]
+
+        source_agent_id = self._session_agents.get(source_chat.session_id)
+        if source_agent_id:
+            self._session_agents[forked_chat.session_id] = source_agent_id
+
+        logger.info(
+            "Forked chat %s -> %s (session: %s -> %s, messages=%d)",
+            source_chat.id,
+            forked_chat.id,
+            source_chat.session_id,
+            forked_chat.session_id,
+            len(source_messages),
+        )
+        return forked_chat, len(source_messages)
     
     async def get_or_create_chat(
         self,

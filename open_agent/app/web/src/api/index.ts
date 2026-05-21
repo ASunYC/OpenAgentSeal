@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, SessionInfo, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile } from '@/types'
+import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse } from '@/types'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
 const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -39,6 +39,10 @@ export const chatApi = {
     return request<Chat>(`/chats/${chatId}`)
   },
 
+  async getByRunnerSession(runnerSessionId: string): Promise<Chat> {
+    return request<Chat>(`/chats/runner-channel/${encodeURIComponent(runnerSessionId)}`)
+  },
+
   async delete(chatId: string): Promise<void> {
     await request(`/chats/${chatId}`, { method: 'DELETE' })
   },
@@ -46,11 +50,21 @@ export const chatApi = {
   async getHistory(chatId: string): Promise<ChatHistory> {
     return request<ChatHistory>(`/chats/${chatId}/history`)
   },
+
+  async fork(runnerSessionId: string, name?: string): Promise<ForkChatResponse> {
+    return request<ForkChatResponse>('/chats/fork', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: runnerSessionId,
+        name,
+      }),
+    })
+  },
 }
 
 // SSE Streaming following CoPaw's pattern
 export async function* runAgentStream(
-  sessionId: string,
+  runnerSessionId: string,
   messages: Message[],
   userId = 'default'
 ): AsyncGenerator<AgentEvent> {
@@ -58,7 +72,7 @@ export async function* runAgentStream(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      session_id: sessionId,
+      session_id: runnerSessionId,
       user_id: userId,
       messages,
       stream: true,
@@ -98,9 +112,9 @@ export async function* runAgentStream(
   }
 }
 
-// Cancel running session
-export async function cancelSession(sessionId: string): Promise<boolean> {
-  const result = await request<{ success: boolean }>(`/cancel?session_id=${sessionId}`, {
+// Cancel a running chat in the runner.
+export async function cancelRunnerChat(runnerSessionId: string): Promise<boolean> {
+  const result = await request<{ success: boolean }>(`/cancel?session_id=${runnerSessionId}`, {
     method: 'POST',
   })
   return result.success
@@ -169,26 +183,6 @@ export const providerApi = {
   },
 }
 
-// Session API
-export const sessionApi = {
-  async list(agentId?: string): Promise<SessionInfo[]> {
-    const query = agentId ? `?agent_id=${agentId}` : ''
-    return request<SessionInfo[]>(`/sessions${query}`)
-  },
-
-  async get(sessionId: string): Promise<SessionInfo> {
-    return request<SessionInfo>(`/sessions/${sessionId}`)
-  },
-
-  async getMessages(sessionId: string): Promise<Message[]> {
-    return request<Message[]>(`/sessions/${sessionId}/messages`)
-  },
-
-  async delete(sessionId: string): Promise<ApiResponse<void>> {
-    return request<ApiResponse<void>>(`/sessions/${sessionId}`, { method: 'DELETE' })
-  },
-}
-
 // Command API
 export const commandApi = {
   async list(): Promise<CommandInfo[]> {
@@ -224,7 +218,7 @@ export const settingsApi = {
 // Dashboard API
 export const dashboardApi = {
   async getStats(): Promise<{
-    totalSessions: number
+    totalChats: number
     totalMessages: number
     activeAgents: number
     recentActivity: { date: string; count: number }[]
@@ -271,8 +265,10 @@ export const api = {
   getChats: chatApi.list,
   createChat: chatApi.create,
   getChat: chatApi.get,
+  getChatByRunnerSession: chatApi.getByRunnerSession,
   deleteChat: chatApi.delete,
   getChatHistory: chatApi.getHistory,
+  forkChat: chatApi.fork,
 
   // Agent
   getAgents: agentApi.list,
@@ -289,12 +285,6 @@ export const api = {
   // Provider
   getProviders: providerApi.list,
   getProviderModels: providerApi.getModels,
-
-  // Session
-  getSessions: sessionApi.list,
-  getSession: sessionApi.get,
-  getSessionMessages: sessionApi.getMessages,
-  deleteSession: sessionApi.delete,
 
   // Command
   getCommands: commandApi.list,

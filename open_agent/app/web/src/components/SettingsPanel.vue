@@ -91,14 +91,14 @@
         
         <div 
           class="menu-item" 
-          :class="{ active: currentTab === 'sessions' }"
-          @click="switchTab('sessions')"
+          :class="{ active: currentTab === 'chats' }"
+          @click="switchTab('chats')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/>
             <polyline points="12 6 12 12 16 14"/>
           </svg>
-          <span>{{ t('会话', 'Sessions') }}</span>
+          <span>{{ t('对话', 'Chats') }}</span>
         </div>
         
         <div 
@@ -191,8 +191,8 @@
         <!-- 智能体设置 -->
         <AgentsSettings v-else-if="currentTab === 'agents'" />
         
-        <!-- 会话 -->
-        <SessionsSettings v-else-if="currentTab === 'sessions'" />
+        <!-- 对话 -->
+        <ChatsSettings v-else-if="currentTab === 'chats'" />
         
         <!-- 技能 -->
         <SkillsSettings v-else-if="currentTab === 'skills'" />
@@ -231,7 +231,7 @@ import WorkspaceSettings from '@/components/settings/WorkspaceSettings.vue'
 import UserSettings from '@/components/settings/UserSettings.vue'
 import ModelsSettings from '@/components/settings/ModelsSettings.vue'
 import AgentsSettings from '@/components/settings/AgentsSettings.vue'
-import SessionsSettings from '@/components/settings/SessionsSettings.vue'
+import ChatsSettings from '@/components/settings/ChatsSettings.vue'
 import SkillsSettings from '@/components/settings/SkillsSettings.vue'
 import MCPSettings from '@/components/settings/MCPSettings.vue'
 import SystemSettings from '@/components/settings/SystemSettings.vue'

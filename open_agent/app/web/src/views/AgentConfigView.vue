@@ -32,7 +32,7 @@
             <p>{{ agent.description || t('暂无描述', 'No description') }}</p>
           </div>
           <div class="agent-meta">
-            <span class="model-badge">{{ agent.modelId }}</span>
+            <span class="model-badge">{{ agent.model_id }}</span>
           </div>
         </div>
       </div>
@@ -88,7 +88,7 @@
           
           <div class="form-group">
             <label>{{ t('选择模型', 'Select Model') }}</label>
-            <select v-model="selectedAgent.modelId">
+            <select v-model="selectedAgent.model_id">
               <option v-for="config in modelConfigs" :key="config.provider" :value="config.model">
                 {{ config.provider }} - {{ config.model }}
               </option>
@@ -98,7 +98,7 @@
           <div class="form-group">
             <label>{{ t('系统提示词', 'System Prompt') }}</label>
             <textarea 
-              v-model="selectedAgent.systemPrompt"
+              v-model="selectedAgent.system_prompt"
               :placeholder="t('输入系统提示词', 'Enter system prompt')"
               rows="5"
             ></textarea>
@@ -127,7 +127,7 @@
             <label>{{ t('最大令牌数', 'Max Tokens') }}</label>
             <input 
               type="number" 
-              v-model.number="selectedAgent.maxTokens"
+              v-model.number="selectedAgent.max_tokens"
               min="100"
               max="128000"
             />
@@ -194,10 +194,13 @@ function createNewAgent() {
     id: '',
     name: t('新智能体', 'New Agent'),
     description: '',
-    modelId: modelConfigs.value[0]?.model || 'gpt-4o',
-    systemPrompt: '',
+    model_id: modelConfigs.value[0]?.model || 'gpt-4o',
+    system_prompt: '',
     temperature: 0.7,
-    maxTokens: 4096,
+    max_tokens: 4096,
+    max_steps: 100,
+    tools: [],
+    mcp_servers: [],
     created_at: now,
     updated_at: now
   }
@@ -262,7 +265,7 @@ onMounted(async () => {
   await agentStore.loadModelConfigs()
   modelConfigs.value = agentStore.modelConfigs.map(c => ({
     provider: c.provider,
-    model: c.model
+    model: c.name
   }))
   
   if (modelConfigs.value.length === 0) {

@@ -20,14 +20,14 @@
       </div>
       
       <div class="stat-card">
-        <div class="stat-icon sessions">
+        <div class="stat-icon chats">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
         </div>
         <div class="stat-content">
-          <span class="stat-value">{{ stats.totalSessions }}</span>
-          <span class="stat-label">{{ t('会话', 'Sessions') }}</span>
+          <span class="stat-value">{{ stats.totalChats }}</span>
+          <span class="stat-label">{{ t('对话', 'Chats') }}</span>
         </div>
       </div>
       
@@ -60,13 +60,13 @@
     
     <div class="dashboard-content">
       <section class="recent-section">
-        <h2>{{ t('最近会话', 'Recent Sessions') }}</h2>
-        <div class="recent-list" v-if="recentSessions.length > 0">
+        <h2>{{ t('最近对话', 'Recent Chats') }}</h2>
+        <div class="recent-list" v-if="recentChats.length > 0">
           <div 
             class="recent-item" 
-            v-for="session in recentSessions" 
-            :key="session.session_id"
-            @click="openSession(session)"
+            v-for="chat in recentChats" 
+            :key="chat.id"
+            @click="openChat(chat)"
           >
             <div class="recent-item-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -74,14 +74,14 @@
               </svg>
             </div>
             <div class="recent-item-content">
-              <span class="recent-item-title">{{ session.agent_name }}</span>
-              <span class="recent-item-preview">{{ session.preview || t('无预览', 'No preview') }}</span>
+              <span class="recent-item-title">{{ chat.name }}</span>
+              <span class="recent-item-preview">{{ chat.session_id }}</span>
             </div>
-            <span class="recent-item-time">{{ formatTime(session.updated_at) }}</span>
+            <span class="recent-item-time">{{ formatTime(chat.updated_at) }}</span>
           </div>
         </div>
         <div class="empty-list" v-else>
-          <p>{{ t('暂无最近会话', 'No recent sessions') }}</p>
+          <p>{{ t('暂无最近对话', 'No recent chats') }}</p>
         </div>
       </section>
       
@@ -94,6 +94,13 @@
               <circle cx="12" cy="7" r="4"/>
             </svg>
             <span>{{ t('新建智能体', 'New Agent') }}</span>
+          </button>
+          <button class="action-btn" @click="forkCurrentTask" :disabled="!chatStore.currentRunnerSessionId">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="10" height="10" rx="2"/>
+              <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
+            </svg>
+            <span>{{ t('复制当前任务', 'Fork Current Task') }}</span>
           </button>
           <button class="action-btn" @click="$emit('navigate', 'chat')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -124,23 +131,23 @@
 import { ref, onMounted, computed } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useSettingsStore } from '@/stores/settings'
-import { useSessionStore } from '@/stores/session'
-import type { SessionHistory } from '@/types'
+import { useChatStore } from '@/stores/chat'
+import type { Chat } from '@/types'
 
 const emit = defineEmits(['navigate'])
 
 const agentStore = useAgentStore()
 const settingsStore = useSettingsStore()
-const sessionStore = useSessionStore()
+const chatStore = useChatStore()
 
 const stats = computed(() => ({
   totalAgents: agentStore.agents.length,
-  totalSessions: sessionStore.chats.length,
-  totalMessages: sessionStore.chats.reduce((sum: number, c: any) => sum + (c.message_count || 0), 0),
+  totalChats: chatStore.chats.length,
+  totalMessages: chatStore.chats.reduce((sum: number, c: any) => sum + (c.message_count || 0), 0),
   activeModels: agentStore.modelConfigs.length
 }))
 
-const recentSessions = ref<SessionHistory[]>([])
+const recentChats = ref<Chat[]>([])
 
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
@@ -156,23 +163,21 @@ function formatTime(dateStr: string): string {
   })
 }
 
-function openSession(session: SessionHistory) {
-  emit('navigate', 'history', session.session_id, session.agent_id)
+function openChat(_chat: Chat) {
+  emit('navigate', 'history')
+}
+
+async function forkCurrentTask() {
+  const forked = await chatStore.forkCurrentChat(t('新任务', 'New Task'))
+  if (forked) {
+    emit('navigate', 'chat')
+  }
 }
 
 onMounted(async () => {
-  await sessionStore.loadChats()
-  // 获取最近会话
-  const sessions = sessionStore.chats.slice(0, 5)
-  recentSessions.value = sessions.map((s: any) => ({
-    session_id: s.session_id,
-    agent_id: s.id,
-    agent_name: s.name,
-    created_at: s.created_at,
-    updated_at: s.updated_at,
-    message_count: 0,
-    preview: ''
-  }))
+  await chatStore.loadChats()
+  // 获取最近对话
+  recentChats.value = chatStore.chats.slice(0, 5)
 })
 </script>
 
@@ -237,7 +242,7 @@ onMounted(async () => {
 }
 
 .stat-icon.agents { background: rgba(59, 130, 246, 0.1); color: #3b82f6; }
-.stat-icon.sessions { background: rgba(16, 185, 129, 0.1); color: #10b981; }
+.stat-icon.chats { background: rgba(16, 185, 129, 0.1); color: #10b981; }
 .stat-icon.messages { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
 .stat-icon.models { background: rgba(139, 92, 246, 0.1); color: #8b5cf6; }
 

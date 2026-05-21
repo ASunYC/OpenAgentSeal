@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, nextTick, watch } from 'vue'
-import { useSessionStore } from '@/stores/session'
+import { useChatStore } from '@/stores/chat'
 
-const store = useSessionStore()
+const store = useChatStore()
 const inputText = ref('')
 const messagesContainer = ref<HTMLElement | null>(null)
 
@@ -35,7 +35,7 @@ function handleKeydown(e: KeyboardEvent) {
     <!-- Header -->
     <header class="px-6 py-4 border-b border-gray-700 bg-gray-800/50">
       <h2 class="text-lg font-medium">
-        {{ store.currentChat?.name || '选择或创建会话' }}
+        {{ store.currentChat?.name || '选择或创建对话' }}
       </h2>
     </header>
     

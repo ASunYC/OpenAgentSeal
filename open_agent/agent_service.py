@@ -564,7 +564,7 @@ class AgentService:
         if agent_id not in self._sessions:
             return []
         return self._sessions[agent_id].messages
-    
+
     def clear_messages(self, agent_id: str):
         """清空会话消息
         

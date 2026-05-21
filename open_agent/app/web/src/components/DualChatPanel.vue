@@ -1,18 +1,18 @@
 <script setup lang="ts">
-import { ref, nextTick, watch, computed, onMounted } from 'vue'
-import { useSessionStore } from '@/stores/session'
+import { ref } from 'vue'
+import { useChatStore } from '@/stores/chat'
 
-const sessionStore = useSessionStore()
+const chatStore = useChatStore()
 
 const privateInputText = ref('')
 const messagesContainer = ref<HTMLElement | null>(null)
 
 async function handlePrivateSend() {
   const text = privateInputText.value.trim()
-  if (!text || sessionStore.isRunning) return
+  if (!text || chatStore.isRunning) return
   
   privateInputText.value = ''
-  await sessionStore.sendMessage(text)
+  await chatStore.sendMessage(text)
 }
 
 function handlePrivateKeydown(e: KeyboardEvent) {
@@ -22,18 +22,13 @@ function handlePrivateKeydown(e: KeyboardEvent) {
   }
 }
 
-function formatTime(dateStr: string): string {
-  if (!dateStr) return ''
-  const date = new Date(dateStr)
-  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-}
 </script>
 
 <template>
   <div class="h-full flex flex-col">
     <header class="px-6 py-4 border-b border-gray-700 bg-gray-800/50">
       <h2 class="text-lg font-medium">
-        {{ sessionStore.currentChat?.name || '选择或创建会话' }}
+        {{ chatStore.currentChat?.name || '选择或创建对话' }}
       </h2>
     </header>
     
@@ -41,13 +36,13 @@ function formatTime(dateStr: string): string {
       ref="messagesContainer"
       class="flex-1 overflow-y-auto px-6 py-4 space-y-4"
     >
-      <div v-if="sessionStore.messages.length === 0" class="text-center text-gray-500 py-20">
+      <div v-if="chatStore.messages.length === 0" class="text-center text-gray-500 py-20">
         <div class="text-6xl mb-4">💬</div>
         <p>开始新对话</p>
       </div>
       
       <div
-        v-for="(msg, idx) in sessionStore.messages"
+        v-for="(msg, idx) in chatStore.messages"
         :key="idx"
         class="flex gap-4 fade-in"
         :class="msg.role === 'user' ? 'justify-end' : 'justify-start'"
@@ -76,7 +71,7 @@ function formatTime(dateStr: string): string {
         </div>
       </div>
       
-      <div v-if="sessionStore.isRunning" class="flex gap-4 fade-in">
+      <div v-if="chatStore.isRunning" class="flex gap-4 fade-in">
         <div class="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-sm">
           🤖
         </div>
@@ -94,19 +89,19 @@ function formatTime(dateStr: string): string {
           placeholder="输入消息... (Shift+Enter 换行)"
           rows="1"
           @keydown="handlePrivateKeydown"
-          :disabled="sessionStore.isRunning || !sessionStore.currentChatId"
+          :disabled="chatStore.isRunning || !chatStore.currentChatId"
         ></textarea>
         <button
           class="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-xl font-medium transition"
           @click="handlePrivateSend"
-          :disabled="!privateInputText.trim() || sessionStore.isRunning || !sessionStore.currentChatId"
+          :disabled="!privateInputText.trim() || chatStore.isRunning || !chatStore.currentChatId"
         >
           发送
         </button>
         <button
-          v-if="sessionStore.isRunning"
+          v-if="chatStore.isRunning"
           class="px-4 py-3 bg-red-600 hover:bg-red-500 rounded-xl font-medium transition"
-          @click="sessionStore.cancel"
+          @click="chatStore.cancel"
         >
           停止
         </button>

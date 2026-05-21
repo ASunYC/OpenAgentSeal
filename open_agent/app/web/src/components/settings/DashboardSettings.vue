@@ -23,8 +23,8 @@
       <div class="stat-card">
         <div class="stat-icon">📁</div>
         <div class="stat-info">
-          <span class="stat-value">{{ stats.sessions }}</span>
-          <span class="stat-label">{{ t('会话数', 'Sessions') }}</span>
+          <span class="stat-value">{{ stats.chats }}</span>
+          <span class="stat-label">{{ t('对话数', 'Chats') }}</span>
         </div>
       </div>
       <div class="stat-card">
@@ -54,7 +54,7 @@ const settingsStore = useSettingsStore()
 const stats = ref({
   messages: 1284,
   agents: 3,
-  sessions: 12,
+  chats: 12,
   tools: 8
 })
 

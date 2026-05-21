@@ -37,6 +37,13 @@ class DeleteChatsRequest(BaseModel):
     chat_ids: List[str]
 
 
+class ForkChatRequest(BaseModel):
+    session_id: str
+    name: Optional[str] = None
+    user_id: str = "default"
+    channel: str = "web"
+
+
 class RunRequest(BaseModel):
     session_id: str
     user_id: str = "default"
@@ -57,6 +64,7 @@ async def list_chats(user_id: str = Query(None)) -> List[dict]:
             "session_id": c.session_id,
             "user_id": c.user_id,
             "channel": c.channel,
+            "meta": c.meta,
             "created_at": c.created_at.isoformat(),
             "updated_at": c.updated_at.isoformat(),
         }
@@ -79,6 +87,28 @@ async def create_chat(request: CreateChatRequest) -> dict:
         "session_id": chat.session_id,
         "user_id": chat.user_id,
         "channel": chat.channel,
+        "meta": chat.meta,
+        "created_at": chat.created_at.isoformat(),
+        "updated_at": chat.updated_at.isoformat(),
+    }
+
+
+@router.get("/chats/runner-channel/{session_id}")
+@router.get("/chats/session/{session_id}")
+async def get_chat_by_session(session_id: str) -> dict:
+    """Get chat metadata by session id."""
+    manager = get_chat_manager()
+    chat = await manager.repo.find_by_session_id(session_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    return {
+        "id": chat.id,
+        "name": chat.name,
+        "session_id": chat.session_id,
+        "user_id": chat.user_id,
+        "channel": chat.channel,
+        "meta": chat.meta,
         "created_at": chat.created_at.isoformat(),
         "updated_at": chat.updated_at.isoformat(),
     }
@@ -133,6 +163,36 @@ async def get_chat_history(chat_id: str) -> dict:
         "chat_id": history.chat_id,
         "total": history.total,
         "messages": [m.to_api_format() for m in history.messages],
+    }
+
+
+@router.post("/chats/fork")
+async def fork_chat(request: ForkChatRequest) -> dict:
+    """Fork an existing chat session into a new task."""
+    manager = get_chat_manager()
+    chat, copied_message_count = await manager.fork_chat(
+        source_session_id=request.session_id,
+        name=request.name,
+        user_id=request.user_id,
+        channel=request.channel,
+    )
+
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    return {
+        "chat": {
+            "id": chat.id,
+            "name": chat.name,
+            "session_id": chat.session_id,
+            "user_id": chat.user_id,
+            "channel": chat.channel,
+            "created_at": chat.created_at.isoformat(),
+            "updated_at": chat.updated_at.isoformat(),
+            "meta": chat.meta,
+        },
+        "source_session_id": request.session_id,
+        "copied_message_count": copied_message_count,
     }
 
 

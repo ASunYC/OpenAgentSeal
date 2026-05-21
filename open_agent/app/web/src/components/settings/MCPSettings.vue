@@ -49,11 +49,11 @@ function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
 }
 
-function editServer(server: any) {
+function editServer(_server: any) {
   alert(t('编辑功能开发中', 'Edit feature under development'))
 }
 
-function testServer(server: any) {
+function testServer(_server: any) {
   alert(t('测试功能开发中', 'Test feature under development'))
 }
 

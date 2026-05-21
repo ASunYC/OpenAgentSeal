@@ -168,12 +168,21 @@ export const useAgentStore = defineStore('agent', () => {
 
   // 创建新智能体
   function createNewAgent(): AgentConfig {
+    const now = new Date().toISOString()
     const newAgent: AgentConfig = {
       id: `agent-${Date.now()}`,
       name: '新智能体',
-      modelId: modelConfigs.value.find(c => c.isDefault)?.id || modelConfigs.value[0]?.id || '',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      model_id: modelConfigs.value.find(c => c.is_default)?.id || modelConfigs.value[0]?.id || '',
+      description: '',
+      avatar: '',
+      system_prompt: '',
+      temperature: 0.7,
+      max_tokens: 4096,
+      max_steps: 100,
+      tools: [],
+      mcp_servers: [],
+      created_at: now,
+      updated_at: now
     }
     return newAgent
   }

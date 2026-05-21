@@ -36,6 +36,12 @@
         </div>
         
         <div class="header-right">
+          <button class="btn-settings" @click="forkCurrentTask" :disabled="loading || isForking" :title="t('复制为新任务', 'Fork into new task')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="10" height="10" rx="2"/>
+              <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
+            </svg>
+          </button>
           <button class="btn-settings" @click="openBrowserHome" title="Browser">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="10"/>
@@ -262,7 +268,7 @@
 import { ref, computed, onMounted, nextTick, reactive } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useSettingsStore } from '@/stores/settings'
-import { useSessionStore } from '@/stores/session'
+import { useChatStore } from '@/stores/chat'
 import { api } from '@/api'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
@@ -272,7 +278,7 @@ import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
 const settingsStore = useSettingsStore()
-const sessionStore = useSessionStore()
+const chatStore = useChatStore()
 
 // 当前视图
 const currentView = ref('chat')
@@ -319,10 +325,11 @@ const onSettingsWidthChange = (width: number) => {
 // 聊天状态
 const selectedAgentId = ref('')
 const selectedModelId = ref('')
-const sessionId = ref('')  // 独立的 session ID
+const runnerSessionId = ref('')
 const messages = ref<Message[]>([])
 const inputMessage = ref('')
 const loading = ref(false)
+const isForking = ref(false)
 const messagesContainer = ref<HTMLElement | null>(null)
 
 // 翻译函数
@@ -427,37 +434,37 @@ async function onAgentChange() {
   const agent = agentStore.agents.find(a => a.id === selectedAgentId.value)
   if (agent) {
     selectedModelId.value = agent.model_id || ''
-    // 创建或恢复 session
+    // 创建或恢复 runner 对话通道
     await createOrGetSession()
   }
   loadChatHistory()
 }
 
-// 创建或获取 session
+// 创建或获取 runner 对话通道
 async function createOrGetSession() {
   if (!selectedAgentId.value) return
   
   try {
-    // 尝试从 localStorage 恢复 session ID
-    const savedSessionId = localStorage.getItem(`session_${selectedAgentId.value}`)
+    // 尝试从 localStorage 恢复 runner 通道 ID
+    const savedRunnerSessionId = localStorage.getItem(`session_${selectedAgentId.value}`)
     
-    if (savedSessionId) {
+    if (savedRunnerSessionId) {
       // 检查 localStorage 中是否有对应的消息历史
-      const savedMessages = localStorage.getItem(`messages_${savedSessionId}`)
+      const savedMessages = localStorage.getItem(`messages_${savedRunnerSessionId}`)
       if (savedMessages) {
-        // 有历史消息，直接使用保存的 session ID
-        sessionId.value = savedSessionId
-        console.log('Restored session from localStorage:', sessionId.value)
+        // 有历史消息，直接使用保存的 runner 通道 ID
+        runnerSessionId.value = savedRunnerSessionId
+        console.log('Restored runner chat channel from localStorage:', runnerSessionId.value)
         return
       }
     }
     
-    // 创建新的 session ID
-    sessionId.value = `session_agent_${selectedAgentId.value}_${Date.now()}`
-    localStorage.setItem(`session_${selectedAgentId.value}`, sessionId.value)
-    console.log('Created new session:', sessionId.value)
+    // 创建新的 runner 通道 ID
+    runnerSessionId.value = `session_agent_${selectedAgentId.value}_${Date.now()}`
+    localStorage.setItem(`session_${selectedAgentId.value}`, runnerSessionId.value)
+    console.log('Created runner chat channel:', runnerSessionId.value)
   } catch (error) {
-    console.error('Failed to create session:', error)
+    console.error('Failed to create runner chat channel:', error)
   }
 }
 
@@ -475,31 +482,26 @@ function onModelChange() {
 
 // 加载聊天历史
 async function loadChatHistory() {
-  if (!sessionId.value) return
+  if (!runnerSessionId.value) return
   
   try {
     // 首先尝试从 localStorage 加载
-    const savedMessages = localStorage.getItem(`messages_${sessionId.value}`)
+    const savedMessages = localStorage.getItem(`messages_${runnerSessionId.value}`)
     if (savedMessages) {
       messages.value = JSON.parse(savedMessages)
       scrollToBottom()
       return
     }
     
-    // 如果 localStorage 没有，尝试从后端加载
-    const history = await api.getSessionMessages(sessionId.value) as any
-    if (history && Array.isArray(history)) {
-      messages.value = history
-    } else if (history && history.messages && Array.isArray(history.messages)) {
-      messages.value = history.messages
-    } else {
-      messages.value = []
-    }
+    // 如果 localStorage 没有，尝试从 runner chat 历史加载
+    const chat = await api.getChatByRunnerSession(runnerSessionId.value)
+    const history = await api.getChatHistory(chat.id)
+    messages.value = history.messages || []
     scrollToBottom()
   } catch (error) {
     console.error('Failed to load chat history:', error)
     // 尝试从 localStorage 加载作为备份
-    const savedMessages = localStorage.getItem(`messages_${sessionId.value}`)
+    const savedMessages = localStorage.getItem(`messages_${runnerSessionId.value}`)
     if (savedMessages) {
       messages.value = JSON.parse(savedMessages)
     } else {
@@ -510,8 +512,30 @@ async function loadChatHistory() {
 
 // 保存消息到 localStorage
 function saveMessages() {
-  if (sessionId.value && messages.value.length > 0) {
-    localStorage.setItem(`messages_${sessionId.value}`, JSON.stringify(messages.value))
+  if (runnerSessionId.value && messages.value.length > 0) {
+    localStorage.setItem(`messages_${runnerSessionId.value}`, JSON.stringify(messages.value))
+  }
+}
+
+async function forkCurrentTask() {
+  if (!runnerSessionId.value || isForking.value || !selectedAgentId.value) return
+
+  isForking.value = true
+  try {
+    const currentMessages = JSON.parse(JSON.stringify(messages.value))
+    const forked = await api.forkChat(runnerSessionId.value, `${getAgentName()} Task`)
+    const nextRunnerSessionId = forked.chat.session_id
+
+    runnerSessionId.value = nextRunnerSessionId
+    localStorage.setItem(`session_${selectedAgentId.value}`, nextRunnerSessionId)
+    localStorage.setItem(`messages_${nextRunnerSessionId}`, JSON.stringify(currentMessages))
+    saveMessages()
+
+    console.log('[Task Fork] Created new task runner channel:', nextRunnerSessionId, 'copied messages:', forked.copied_message_count)
+  } catch (error) {
+    console.error('Failed to fork current task:', error)
+  } finally {
+    isForking.value = false
   }
 }
 
@@ -524,8 +548,8 @@ function generateId(): string {
 async function sendMessage() {
   if (!inputMessage.value.trim() || loading.value || !selectedAgentId.value) return
   
-  // 如果没有 session，创建一个
-  if (!sessionId.value) {
+  // 如果没有 runner 通道，创建一个
+  if (!runnerSessionId.value) {
     await createOrGetSession()
   }
   
@@ -558,9 +582,9 @@ async function sendMessage() {
   try {
     let assistantContent = ''
     
-    // 使用 sessionId 而不是 agentId
+    // 使用 runner 通道 ID，而不是 agentId
     // 监听后端发送的事件：thinking, tool_call, tool_result, complete, error
-    await api.chat(sessionId.value, userMessage, (event) => {
+    await api.chat(runnerSessionId.value, userMessage, (event) => {
       console.log('[Iteration Debug] Received event:', event)
 
       if (event.event === 'message' && event.content) {
@@ -683,8 +707,8 @@ function clearChat() {
   if (confirm(t('确定要清空对话记录吗？', 'Are you sure you want to clear the chat?'))) {
     messages.value = []
     // 清空 localStorage 中的消息
-    if (sessionId.value) {
-      localStorage.removeItem(`messages_${sessionId.value}`)
+    if (runnerSessionId.value) {
+      localStorage.removeItem(`messages_${runnerSessionId.value}`)
     }
   }
 }
@@ -909,7 +933,7 @@ onMounted(async () => {
 
   await agentStore.loadAgents()
   await agentStore.loadModelConfigs()
-  await sessionStore.loadChats()
+  await chatStore.loadChats()
   
   // 尝试恢复之前选中的智能体
   const savedAgentId = localStorage.getItem('selected_agent_id')
@@ -932,7 +956,7 @@ onMounted(async () => {
     }
     // 保存选中的 agent ID
     localStorage.setItem('selected_agent_id', agentToSelect.id)
-    // 创建或恢复 session
+    // 创建或恢复 runner 对话通道
     await createOrGetSession()
     await loadChatHistory()
     

@@ -1,7 +1,7 @@
 <template>
   <div class="chat-view">
     <header class="view-header">
-      <h1>{{ t('会话', 'Chat') }}</h1>
+      <h1>{{ t('对话', 'Chat') }}</h1>
       <p class="subtitle">{{ t('与智能体对话', 'Chat with agents') }}</p>
     </header>
     
