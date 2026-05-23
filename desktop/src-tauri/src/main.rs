@@ -75,6 +75,11 @@ fn backend_url() -> String {
     format!("http://{}:{}", BACKEND_HOST, BACKEND_PORT)
 }
 
+#[tauri::command]
+fn open_path(target: String) -> Result<(), String> {
+    open_target(&target)
+}
+
 fn repo_root() -> Result<PathBuf, String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
@@ -504,7 +509,7 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![backend_url])
+        .invoke_handler(tauri::generate_handler![backend_url, open_path])
         .run(tauri::generate_context!())
         .expect("error while running OpenAgentSeal desktop shell");
 }

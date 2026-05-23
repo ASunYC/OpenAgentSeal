@@ -3,8 +3,9 @@
 from .agent import Agent
 from .llm import LLMClient
 from .schema import FunctionCall, LLMProvider, LLMResponse, Message, ToolCall
+from .version import get_version
 
-__version__ = "0.1.0"
+__version__ = get_version()
 
 __all__ = [
     "Agent",

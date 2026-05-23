@@ -1,8 +1,8 @@
-<template>
+﻿<template>
   <div class="app-container" :class="settingsStore.settings.theme">
-    <!-- 主聊天面板 -->
-    <main class="main-chat" v-if="currentView === 'chat'">
-      <!-- 顶部标题栏 -->
+    <!-- 涓昏亰澶╅潰鏉?-->
+    <main class="main-chat">
+      <!-- 椤堕儴鏍囬鏍?-->
       <header class="chat-header">
         <div class="header-left">
           <div class="logo">
@@ -16,7 +16,7 @@
         </div>
         
         <div class="header-center">
-          <!-- 智能体选择器 -->
+          <!-- 鏅鸿兘浣撻€夋嫨鍣?-->
           <div class="selector agent-selector">
             <select v-model="selectedAgentId" @change="onAgentChange">
               <option v-for="agent in agentStore.agents" :key="agent.id" :value="agent.id">
@@ -25,7 +25,7 @@
             </select>
           </div>
           
-          <!-- 模型选择器 -->
+          <!-- 妯″瀷閫夋嫨鍣?-->
           <div class="selector model-selector">
             <select v-model="selectedModelId" @change="onModelChange">
               <option v-for="model in availableModels" :key="model.id" :value="model.id">
@@ -36,20 +36,25 @@
         </div>
         
         <div class="header-right">
-          <button class="btn-settings" @click="forkCurrentTask" :disabled="loading || isForking" :title="t('复制为新任务', 'Fork into new task')">
+          <button class="btn-settings" @click="forkCurrentTask" :disabled="loading || isForking" :title="t('澶嶅埗涓烘柊浠诲姟', 'Fork into new task')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="9" y="9" width="10" height="10" rx="2"/>
               <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
             </svg>
           </button>
-          <button class="btn-settings" @click="openBrowserHome" title="Browser">
+          <button
+            class="btn-settings"
+            :class="{ active: activeWorkspacePanel === 'browser' }"
+            @click="openBrowserHome"
+            title="Browser"
+          >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="10"/>
               <path d="M2 12h20"/>
               <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
             </svg>
           </button>
-          <button class="btn-settings" @click="openSettings" :title="t('设置', 'Settings')">
+          <button class="btn-settings" @click="openSettings" :title="t('璁剧疆', 'Settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"/>
               <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
@@ -58,9 +63,9 @@
         </div>
       </header>
       
-      <!-- 中间聊天区域 -->
-      <div class="chat-body">
-        <!-- 私人对话区 -->
+      <!-- 涓棿鑱婂ぉ鍖哄煙 -->
+      <div class="chat-body" :class="{ 'dual-panel': isWorkspaceOpen }" :style="workspaceLayoutStyle">
+        <!-- 绉佷汉瀵硅瘽鍖?-->
         <div class="private-chat-panel">
           <div class="chat-messages" ref="messagesContainer" @click="handleChatClick">
             <div
@@ -84,7 +89,7 @@
                   <span class="sender">{{ msg.role === 'user' ? t('你', 'You') : getAgentName() }}</span>
                   <span class="time">{{ formatTime(msg.timestamp) }}</span>
                 </div>
-                <!-- 思考过程显示 - 跟随每个 assistant 消息 -->
+                <!-- 鎬濊€冭繃绋嬫樉绀?- 璺熼殢姣忎釜 assistant 娑堟伅 -->
                 <ThinkingProcess
                   v-if="msg.role === 'assistant' && settingsStore.settings.useCoT && msg.thinking && (msg.thinking.steps.length > 0 || msg.thinking.isThinking)"
                   :thinking="msg.thinking"
@@ -92,28 +97,165 @@
                   :user-query="msg.userQuery || ''"
                   :current-step="msg.thinking.steps.length"
                 />
-                <!-- 正在输入指示器 - 当消息内容为空且正在加载时显示 -->
+                <!-- 姝ｅ湪杈撳叆鎸囩ず鍣?- 褰撴秷鎭唴瀹逛负绌轰笖姝ｅ湪鍔犺浇鏃舵樉绀?-->
                 <div v-if="msg.role === 'assistant' && !msg.content && msg.thinking?.isThinking" class="typing-indicator">
                   <span></span>
                   <span></span>
                   <span></span>
                 </div>
-                <!-- 消息内容 -->
+                <!-- 娑堟伅鍐呭 -->
                 <div v-if="msg.content" class="message-text" v-html="renderMarkdown(msg.content)"></div>
               </div>
             </div>
           </div>
+          <footer v-if="isWorkspaceOpen" class="chat-footer panel-chat-footer">
+            <div class="input-area">
+              <button
+                class="cot-toggle-btn"
+                :class="{ active: settingsStore.settings.useCoT }"
+                :title="t('迭代模式', 'Iteration Mode')"
+                @click="settingsStore.toggleCoT"
+              >
+                <svg class="cot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 12a9 9 0 0 1-15.31 6.36"/>
+                  <path d="M3 12A9 9 0 0 1 18.31 5.64"/>
+                  <path d="M6 18H3v3"/>
+                  <path d="M18 6h3V3"/>
+                </svg>
+              </button>
+              <textarea
+                v-model="inputMessage"
+                :placeholder="t('输入消息...', 'Type a message...')"
+                @keydown.enter.exact.prevent="sendMessage"
+                rows="3"
+              ></textarea>
+              <div class="input-actions">
+                <button class="btn-clear" @click="clearChat">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3,6 5,6 21,6"/>
+                    <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
+                  </svg>
+                </button>
+                <button class="btn-send" @click="sendMessage" :disabled="!inputMessage.trim() || loading" :title="t('发送', 'Send')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="22" y1="2" x2="11" y2="13"/>
+                    <polygon points="22,2 15,22 11,13 2,9"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="input-hints">
+              <span>{{ t('Enter 发送 · Shift+Enter 换行', 'Enter to send · Shift+Enter for new line') }}</span>
+              <span
+                :class="{ 'cot-active': settingsStore.settings.useCoT }"
+                class="cot-status"
+              >
+                {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
+              </span>
+            </div>
+          </footer>
         </div>
+
+        <button
+          v-if="isWorkspaceOpen"
+          class="workspace-resizer"
+          :class="{ active: isResizingWorkspace }"
+          type="button"
+          :title="t('拖动调整工作区宽度，双击重置', 'Drag to resize workspace, double-click to reset')"
+          :aria-label="t('调整工作区宽度', 'Resize workspace')"
+          @pointerdown="startWorkspaceResize"
+          @dblclick="resetWorkspaceWidth"
+        >
+          <span></span>
+        </button>
+
+        <aside v-if="isWorkspaceOpen" class="workspace-panel">
+          <header class="workspace-panel-header">
+            <div class="workspace-panel-title">
+              <svg v-if="activeWorkspacePanel === 'browser'" class="workspace-panel-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M2 12h20"/>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+              <span>{{ workspacePanelTitle }}</span>
+            </div>
+            <button class="workspace-close" @click="closeWorkspacePanel" :title="t('关闭工作区', 'Close workspace')">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 6 6 18"/>
+                <path d="m6 6 12 12"/>
+              </svg>
+            </button>
+          </header>
+
+          <section v-if="activeWorkspacePanel === 'browser'" class="browser-workspace">
+            <div class="browser-tabs">
+              <button
+                v-for="tab in browserTabs"
+                :key="tab.id"
+                class="browser-tab"
+                :class="{ active: tab.id === activeBrowserTabId }"
+                @click="switchBrowserTab(tab.id)"
+                :title="tab.url"
+              >
+                <span class="browser-tab-title">{{ tab.title }}</span>
+                <span v-if="tab.loadState === 'loading'" class="browser-tab-state"></span>
+                <span class="browser-tab-close" @click.stop="closeBrowserTab(tab.id)">x</span>
+              </button>
+              <button class="browser-new-tab" @click="createBrowserTab()" title="New tab">+</button>
+            </div>
+
+            <div class="browser-toolbar">
+              <button class="browser-icon-btn" @click="browserBack" :disabled="!canBrowserBack" title="Back">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M19 12H5"/>
+                  <path d="M12 19l-7-7 7-7"/>
+                </svg>
+              </button>
+              <button class="browser-icon-btn" @click="browserForward" :disabled="!canBrowserForward" title="Forward">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M5 12h14"/>
+                  <path d="M12 5l7 7-7 7"/>
+                </svg>
+              </button>
+              <button class="browser-icon-btn" @click="reloadBrowserTab" :disabled="!activeBrowserTab" title="Reload">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                  <path d="M21 3v6h-6"/>
+                </svg>
+              </button>
+              <input
+                class="browser-address"
+                v-model="browserAddress"
+                @keydown.enter.prevent="goBrowserAddress"
+                placeholder="https://example.com"
+              />
+              <button class="browser-go" @click="goBrowserAddress">Go</button>
+            </div>
+
+            <div class="browser-frame-area" v-if="activeBrowserTab">
+              <iframe
+                class="browser-frame"
+                :key="`${activeBrowserTab.id}-${activeBrowserTab.renderKey}`"
+                :src="activeBrowserTab.url"
+                @load="onBrowserFrameLoad"
+                referrerpolicy="no-referrer"
+              ></iframe>
+            </div>
+            <div class="browser-empty" v-else>
+              <button class="browser-go" @click="createBrowserTab()">Open browser tab</button>
+            </div>
+          </section>
+        </aside>
       </div>
       
-      <!-- 底部工具栏 -->
-      <footer class="chat-footer">
+      <!-- 搴曢儴宸ュ叿鏍?-->
+      <footer v-if="!isWorkspaceOpen" class="chat-footer">
         <div class="input-area">
-          <!-- 迭代模式切换按钮 -->
+          <!-- 杩唬妯″紡鍒囨崲鎸夐挳 -->
           <button
             class="cot-toggle-btn"
             :class="{ active: settingsStore.settings.useCoT }"
-            :title="t('迭代模式', 'Iteration Mode')"
+            :title="t('杩唬妯″紡', 'Iteration Mode')"
             @click="settingsStore.toggleCoT"
           >
             <svg class="cot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -156,95 +298,8 @@
       </footer>
     </main>
 
-    <main class="main-browser" v-else-if="currentView === 'browser'">
-      <header class="chat-header browser-app-header">
-        <div class="header-left">
-          <div class="logo">
-            <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"/>
-              <circle cx="12" cy="10" r="3"/>
-              <path d="M7 16c0-2 2-3 5-3s5 1 5 3"/>
-            </svg>
-            <span class="logo-text">OpenAgentSeal</span>
-          </div>
-        </div>
-        <div class="header-right">
-          <button class="btn-settings" @click="currentView = 'chat'" title="Back to chat">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M19 12H5"/>
-              <path d="M12 19l-7-7 7-7"/>
-            </svg>
-          </button>
-          <button class="btn-settings" @click="openSettings" :title="t('设置', 'Settings')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-            </svg>
-          </button>
-        </div>
-      </header>
 
-      <section class="browser-workspace">
-        <div class="browser-tabs">
-          <button
-            v-for="tab in browserTabs"
-            :key="tab.id"
-            class="browser-tab"
-            :class="{ active: tab.id === activeBrowserTabId }"
-            @click="switchBrowserTab(tab.id)"
-            :title="tab.url"
-          >
-            <span class="browser-tab-title">{{ tab.title }}</span>
-            <span v-if="tab.loadState === 'loading'" class="browser-tab-state"></span>
-            <span class="browser-tab-close" @click.stop="closeBrowserTab(tab.id)">x</span>
-          </button>
-          <button class="browser-new-tab" @click="createBrowserTab()" title="New tab">+</button>
-        </div>
-
-        <div class="browser-toolbar">
-          <button class="browser-icon-btn" @click="browserBack" :disabled="!canBrowserBack" title="Back">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M19 12H5"/>
-              <path d="M12 19l-7-7 7-7"/>
-            </svg>
-          </button>
-          <button class="browser-icon-btn" @click="browserForward" :disabled="!canBrowserForward" title="Forward">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M5 12h14"/>
-              <path d="M12 5l7 7-7 7"/>
-            </svg>
-          </button>
-          <button class="browser-icon-btn" @click="reloadBrowserTab" :disabled="!activeBrowserTab" title="Reload">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-              <path d="M21 3v6h-6"/>
-            </svg>
-          </button>
-          <input
-            class="browser-address"
-            v-model="browserAddress"
-            @keydown.enter.prevent="goBrowserAddress"
-            placeholder="https://example.com"
-          />
-          <button class="browser-go" @click="goBrowserAddress">Go</button>
-        </div>
-
-        <div class="browser-frame-area" v-if="activeBrowserTab">
-          <iframe
-            class="browser-frame"
-            :key="`${activeBrowserTab.id}-${activeBrowserTab.renderKey}`"
-            :src="activeBrowserTab.url"
-            @load="onBrowserFrameLoad"
-            referrerpolicy="no-referrer"
-          ></iframe>
-        </div>
-        <div class="browser-empty" v-else>
-          <button class="browser-go" @click="createBrowserTab()">Open browser tab</button>
-        </div>
-      </section>
-    </main>
-
-    <!-- 设置面板 -->
+    <!-- 璁剧疆闈㈡澘 -->
     <aside 
       class="settings-sidebar" 
       :class="{ open: showSettings }"
@@ -259,13 +314,13 @@
       />
     </aside>
     
-    <!-- 设置面板遮罩 -->
+    <!-- 璁剧疆闈㈡澘閬僵 -->
     <div class="settings-overlay" v-if="showSettings" @click="closeSettings"></div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, reactive } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, reactive } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useSettingsStore } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
@@ -280,8 +335,79 @@ const agentStore = useAgentStore()
 const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
 
-// 当前视图
-const currentView = ref('chat')
+// 褰撳墠瑙嗗浘
+type WorkspacePanel = '' | 'browser'
+
+const activeWorkspacePanel = ref<WorkspacePanel>('')
+const isWorkspaceOpen = computed(() => activeWorkspacePanel.value !== '')
+const workspaceWidth = ref(560)
+const isResizingWorkspace = ref(false)
+const WORKSPACE_DEFAULT_WIDTH = 560
+const WORKSPACE_MIN_WIDTH = 360
+const WORKSPACE_MAX_WIDTH = 820
+const WORKSPACE_MIN_CHAT_WIDTH = 480
+const WORKSPACE_RIGHT_GUTTER = 18
+
+const workspaceLayoutStyle = computed<Record<string, string>>(() => {
+  return {
+    '--workspace-width': isWorkspaceOpen.value ? `${workspaceWidth.value}px` : '0px',
+  }
+})
+
+const workspacePanelTitle = computed(() => {
+  if (activeWorkspacePanel.value === 'browser') return t('浏览器', 'Browser')
+  return t('工作区', 'Workspace')
+})
+
+function clampWorkspaceWidth(width: number): number {
+  if (typeof window === 'undefined') {
+    return Math.min(Math.max(width, WORKSPACE_MIN_WIDTH), WORKSPACE_MAX_WIDTH)
+  }
+
+  const viewportMax = Math.max(
+    WORKSPACE_MIN_WIDTH,
+    window.innerWidth - WORKSPACE_MIN_CHAT_WIDTH - WORKSPACE_RIGHT_GUTTER,
+  )
+  const maxWidth = Math.min(WORKSPACE_MAX_WIDTH, viewportMax)
+  return Math.round(Math.min(Math.max(width, WORKSPACE_MIN_WIDTH), maxWidth))
+}
+
+function updateWorkspaceWidthFromPointer(clientX: number): void {
+  if (typeof window === 'undefined') return
+  workspaceWidth.value = clampWorkspaceWidth(window.innerWidth - clientX - WORKSPACE_RIGHT_GUTTER)
+}
+
+function startWorkspaceResize(event: PointerEvent): void {
+  if (!isWorkspaceOpen.value) return
+
+  event.preventDefault()
+  const target = event.currentTarget as HTMLElement | null
+  target?.setPointerCapture?.(event.pointerId)
+  isResizingWorkspace.value = true
+  document.body.classList.add('workspace-resizing')
+  updateWorkspaceWidthFromPointer(event.clientX)
+  window.addEventListener('pointermove', onWorkspaceResize)
+  window.addEventListener('pointerup', stopWorkspaceResize, { once: true })
+  window.addEventListener('pointercancel', stopWorkspaceResize, { once: true })
+}
+
+function onWorkspaceResize(event: PointerEvent): void {
+  updateWorkspaceWidthFromPointer(event.clientX)
+}
+
+function stopWorkspaceResize(): void {
+  if (!isResizingWorkspace.value) return
+
+  isResizingWorkspace.value = false
+  document.body.classList.remove('workspace-resizing')
+  window.removeEventListener('pointermove', onWorkspaceResize)
+  window.removeEventListener('pointerup', stopWorkspaceResize)
+  window.removeEventListener('pointercancel', stopWorkspaceResize)
+}
+
+function resetWorkspaceWidth(): void {
+  workspaceWidth.value = clampWorkspaceWidth(WORKSPACE_DEFAULT_WIDTH)
+}
 
 type BrowserLoadState = 'idle' | 'loading' | 'loaded'
 
@@ -312,17 +438,17 @@ const canBrowserForward = computed(() => {
   return !!activeBrowserTab.value && activeBrowserTab.value.historyIndex < activeBrowserTab.value.history.length - 1
 })
 
-// 设置面板状态
+// 璁剧疆闈㈡澘鐘舵€?
 const showSettings = ref(false)
-const settingsTab = ref('dashboard') // 默认选中数据面板
-const settingsWidth = ref(900) // 默认宽度 900px
+const settingsTab = ref('dashboard') // 榛樿閫変腑鏁版嵁闈㈡澘
+const settingsWidth = ref(900) // 榛樿瀹藉害 900px
 
-// 处理设置面板宽度变化
+// 澶勭悊璁剧疆闈㈡澘瀹藉害鍙樺寲
 const onSettingsWidthChange = (width: number) => {
   settingsWidth.value = width
 }
 
-// 聊天状态
+// 鑱婂ぉ鐘舵€?
 const selectedAgentId = ref('')
 const selectedModelId = ref('')
 const runnerSessionId = ref('')
@@ -332,17 +458,17 @@ const loading = ref(false)
 const isForking = ref(false)
 const messagesContainer = ref<HTMLElement | null>(null)
 
-// 翻译函数
+// 缈昏瘧鍑芥暟
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
 }
 
-// 可用模型
+// 鍙敤妯″瀷
 const availableModels = computed(() => {
   return agentStore.modelConfigs
 })
 
-// 获取智能体颜色
+// 鑾峰彇鏅鸿兘浣撻鑹?
 function getAgentColor(): string {
   const agent = agentStore.agents.find(a => a.id === selectedAgentId.value)
   if (!agent) return '#3b82f6'
@@ -351,13 +477,13 @@ function getAgentColor(): string {
   return colors[index]
 }
 
-// 获取智能体名称
+// 鑾峰彇鏅鸿兘浣撳悕绉?
 function getAgentName(): string {
   const agent = agentStore.agents.find(a => a.id === selectedAgentId.value)
   return agent?.name || 'Agent'
 }
 
-// 格式化时间
+// 鏍煎紡鍖栨椂闂?
 function formatTime(timestamp?: string): string {
   if (!timestamp) return ''
   const date = new Date(timestamp)
@@ -367,7 +493,7 @@ function formatTime(timestamp?: string): string {
   })
 }
 
-// 渲染 Markdown
+// 娓叉煋 Markdown
 function renderMarkdown(content: string): string {
   try {
     const html = marked(content) as string
@@ -410,11 +536,11 @@ function normalizeRenderedLinks(html: string): string {
 
 function splitUrlDecoration(value: string): { leading: string; core: string; trailing: string } {
   let text = value.trim()
-  const leadingMatch = text.match(/^[<([{'"“‘]+/)
+  const leadingMatch = text.match(/^[<(\'"\\s]+/)
   const leading = leadingMatch?.[0] || ''
   if (leading) text = text.slice(leading.length)
 
-  const trailingMatch = text.match(/[>\])}"'”’。、，。！？!?.,;:]+$/)
+  const trailingMatch = text.match(/[>)\'"\\s.,;:!?]+$/)
   const trailing = trailingMatch?.[0] || ''
   if (trailing) text = text.slice(0, -trailing.length)
 
@@ -425,41 +551,41 @@ function splitUrlDecoration(value: string): { leading: string; core: string; tra
   }
 }
 
-// 智能体切换
+// 鏅鸿兘浣撳垏鎹?
 async function onAgentChange() {
-  // 保存当前选中的 agent ID
+  // 淇濆瓨褰撳墠閫変腑鐨?agent ID
   localStorage.setItem('selected_agent_id', selectedAgentId.value)
   
   messages.value = []
   const agent = agentStore.agents.find(a => a.id === selectedAgentId.value)
   if (agent) {
     selectedModelId.value = agent.model_id || ''
-    // 创建或恢复 runner 对话通道
+    // 鍒涘缓鎴栨仮澶?runner 瀵硅瘽閫氶亾
     await createOrGetSession()
   }
   loadChatHistory()
 }
 
-// 创建或获取 runner 对话通道
+// 鍒涘缓鎴栬幏鍙?runner 瀵硅瘽閫氶亾
 async function createOrGetSession() {
   if (!selectedAgentId.value) return
   
   try {
-    // 尝试从 localStorage 恢复 runner 通道 ID
+    // 灏濊瘯浠?localStorage 鎭㈠ runner 閫氶亾 ID
     const savedRunnerSessionId = localStorage.getItem(`session_${selectedAgentId.value}`)
     
     if (savedRunnerSessionId) {
-      // 检查 localStorage 中是否有对应的消息历史
+      // 妫€鏌?localStorage 涓槸鍚︽湁瀵瑰簲鐨勬秷鎭巻鍙?
       const savedMessages = localStorage.getItem(`messages_${savedRunnerSessionId}`)
       if (savedMessages) {
-        // 有历史消息，直接使用保存的 runner 通道 ID
+        // 鏈夊巻鍙叉秷鎭紝鐩存帴浣跨敤淇濆瓨鐨?runner 閫氶亾 ID
         runnerSessionId.value = savedRunnerSessionId
         console.log('Restored runner chat channel from localStorage:', runnerSessionId.value)
         return
       }
     }
     
-    // 创建新的 runner 通道 ID
+    // 鍒涘缓鏂扮殑 runner 閫氶亾 ID
     runnerSessionId.value = `session_agent_${selectedAgentId.value}_${Date.now()}`
     localStorage.setItem(`session_${selectedAgentId.value}`, runnerSessionId.value)
     console.log('Created runner chat channel:', runnerSessionId.value)
@@ -468,9 +594,9 @@ async function createOrGetSession() {
   }
 }
 
-// 模型切换
+// 妯″瀷鍒囨崲
 function onModelChange() {
-  // 更新当前智能体的模型
+  // 鏇存柊褰撳墠鏅鸿兘浣撶殑妯″瀷
   if (selectedAgentId.value && selectedModelId.value) {
     const agent = agentStore.agents.find(a => a.id === selectedAgentId.value)
     if (agent) {
@@ -480,12 +606,12 @@ function onModelChange() {
   }
 }
 
-// 加载聊天历史
+// 鍔犺浇鑱婂ぉ鍘嗗彶
 async function loadChatHistory() {
   if (!runnerSessionId.value) return
   
   try {
-    // 首先尝试从 localStorage 加载
+    // 棣栧厛灏濊瘯浠?localStorage 鍔犺浇
     const savedMessages = localStorage.getItem(`messages_${runnerSessionId.value}`)
     if (savedMessages) {
       messages.value = JSON.parse(savedMessages)
@@ -493,14 +619,14 @@ async function loadChatHistory() {
       return
     }
     
-    // 如果 localStorage 没有，尝试从 runner chat 历史加载
+    // 濡傛灉 localStorage 娌℃湁锛屽皾璇曚粠 runner chat 鍘嗗彶鍔犺浇
     const chat = await api.getChatByRunnerSession(runnerSessionId.value)
     const history = await api.getChatHistory(chat.id)
     messages.value = history.messages || []
     scrollToBottom()
   } catch (error) {
     console.error('Failed to load chat history:', error)
-    // 尝试从 localStorage 加载作为备份
+    // 灏濊瘯浠?localStorage 鍔犺浇浣滀负澶囦唤
     const savedMessages = localStorage.getItem(`messages_${runnerSessionId.value}`)
     if (savedMessages) {
       messages.value = JSON.parse(savedMessages)
@@ -510,7 +636,7 @@ async function loadChatHistory() {
   }
 }
 
-// 保存消息到 localStorage
+// 淇濆瓨娑堟伅鍒?localStorage
 function saveMessages() {
   if (runnerSessionId.value && messages.value.length > 0) {
     localStorage.setItem(`messages_${runnerSessionId.value}`, JSON.stringify(messages.value))
@@ -539,16 +665,16 @@ async function forkCurrentTask() {
   }
 }
 
-// 生成唯一ID
+// 鐢熸垚鍞竴ID
 function generateId(): string {
   return `step_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 }
 
-// 发送消息
+// 鍙戦€佹秷鎭?
 async function sendMessage() {
   if (!inputMessage.value.trim() || loading.value || !selectedAgentId.value) return
   
-  // 如果没有 runner 通道，创建一个
+  // Ensure the runner channel exists before sending.
   if (!runnerSessionId.value) {
     await createOrGetSession()
   }
@@ -565,12 +691,12 @@ async function sendMessage() {
   scrollToBottom()
   loading.value = true
   
-  // 创建一个 assistant 消息占位符，用于存储思考过程和最终回复
-  // 使用 reactive 确保深层响应式
+  // 鍒涘缓涓€涓?assistant 娑堟伅鍗犱綅绗︼紝鐢ㄤ簬瀛樺偍鎬濊€冭繃绋嬪拰鏈€缁堝洖澶?
+  // 浣跨敤 reactive 纭繚娣卞眰鍝嶅簲寮?
   const assistantMessage: Message = reactive({
     role: 'assistant' as const,
     content: '',
-    userQuery: userMessage,  // 保存用户查询
+    userQuery: userMessage,  // 淇濆瓨鐢ㄦ埛鏌ヨ
     timestamp: new Date().toISOString(),
     thinking: settingsStore.settings.useCoT ? {
       isThinking: true,
@@ -582,8 +708,8 @@ async function sendMessage() {
   try {
     let assistantContent = ''
     
-    // 使用 runner 通道 ID，而不是 agentId
-    // 监听后端发送的事件：thinking, tool_call, tool_result, complete, error
+    // 浣跨敤 runner 閫氶亾 ID锛岃€屼笉鏄?agentId
+    // 鐩戝惉鍚庣鍙戦€佺殑浜嬩欢锛歵hinking, tool_call, tool_result, complete, error
     await api.chat(runnerSessionId.value, userMessage, (event) => {
       console.log('[Iteration Debug] Received event:', event)
 
@@ -593,19 +719,19 @@ async function sendMessage() {
         scrollToBottom()
       }
       
-      // 仅在开启迭代模式时处理步骤
+      // 浠呭湪寮€鍚凯浠ｆā寮忔椂澶勭悊姝ラ
       if (settingsStore.settings.useCoT && assistantMessage.thinking) {
-        // 监听 step_start 事件
+        // 鐩戝惉 step_start 浜嬩欢
         if (event.event === 'step_start') {
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'thinking',
-            content: `开始步骤 ${event.step}/${event.max_steps}`,
+            content: `寮€濮嬫楠?${event.step}/${event.max_steps}`,
             timestamp: new Date().toISOString()
           })
         }
         
-        // 监听 thinking 事件（LLM 思考内容）
+        // 鐩戝惉 thinking 浜嬩欢锛圠LM 鎬濊€冨唴瀹癸級
         if (event.event === 'thinking' && event.content) {
           assistantMessage.thinking.steps.push({
             id: generateId(),
@@ -616,14 +742,14 @@ async function sendMessage() {
           scrollToBottom()
         }
         
-        // 监听工具调用
+        // 鐩戝惉宸ュ叿璋冪敤
         if (event.event === 'tool_call') {
           const toolName = event.tool_name || 'unknown'
           const args = event.arguments ? JSON.stringify(event.arguments, null, 2) : ''
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'tool_call',
-            content: `调用工具: ${toolName}`,
+            content: `璋冪敤宸ュ叿: ${toolName}`,
             toolName: toolName,
             toolOutput: args,
             timestamp: new Date().toISOString()
@@ -631,23 +757,23 @@ async function sendMessage() {
           scrollToBottom()
         }
         
-        // 监听工具结果
+        // 鐩戝惉宸ュ叿缁撴灉
         if (event.event === 'tool_result') {
           const resultContent = event.result || event.error || ''
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'tool_result',
-            content: event.success ? '工具执行成功' : '工具执行失败',
+            content: event.success ? '宸ュ叿鎵ц鎴愬姛' : '宸ュ叿鎵ц澶辫触',
             toolOutput: typeof resultContent === 'string' ? resultContent : JSON.stringify(resultContent, null, 2),
             timestamp: new Date().toISOString()
           })
           scrollToBottom()
         }
         
-        // 监听 step_end 事件
+        // 鐩戝惉 step_end 浜嬩欢
         if (event.event === 'step_end') {
-          const stepInfo = `步骤 ${event.step} 完成，耗时 ${event.elapsed?.toFixed(2) || 0}s`
-          // 更新最后一个步骤或添加新步骤
+          const stepInfo = `姝ラ ${event.step} 瀹屾垚锛岃€楁椂 ${event.elapsed?.toFixed(2) || 0}s`
+          // 鏇存柊鏈€鍚庝竴涓楠ゆ垨娣诲姞鏂版楠?
           const lastStep = assistantMessage.thinking.steps[assistantMessage.thinking.steps.length - 1]
           if (lastStep && lastStep.type === 'thinking') {
             lastStep.content += `\n${stepInfo}`
@@ -655,23 +781,23 @@ async function sendMessage() {
         }
       }
       
-      // 监听完成事件 - 这是获取最终回复的关键
+      // 鐩戝惉瀹屾垚浜嬩欢 - 杩欐槸鑾峰彇鏈€缁堝洖澶嶇殑鍏抽敭
       if (event.event === 'complete' && event.content) {
         assistantContent = event.content
-        // 完成时停止迭代状态
+        // 瀹屾垚鏃跺仠姝㈣凯浠ｇ姸鎬?
         if (settingsStore.settings.useCoT && assistantMessage.thinking) {
           assistantMessage.thinking.isThinking = false
         }
       }
       
-      // 监听错误事件
+      // 鐩戝惉閿欒浜嬩欢
       if (event.event === 'error' && event.error) {
         console.error('Agent error:', event.error)
         if (settingsStore.settings.useCoT && assistantMessage.thinking) {
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'observation',
-            content: `错误: ${event.error}`,
+            content: `閿欒: ${event.error}`,
             timestamp: new Date().toISOString()
           })
           assistantMessage.thinking.isThinking = false
@@ -679,7 +805,7 @@ async function sendMessage() {
       }
     })
     
-    // 更新 assistant 消息内容，加入一个本地打字机动画
+    // 鏇存柊 assistant 娑堟伅鍐呭锛屽姞鍏ヤ竴涓湰鍦版墦瀛楁満鍔ㄧ敾
     await typewriterReveal(
       assistantMessage,
       assistantContent || t('抱歉，没有收到回复。', 'Sorry, no response received.'),
@@ -697,23 +823,23 @@ async function sendMessage() {
     assistantMessage.content = t('抱歉，发生了错误。请重试。', 'Sorry, an error occurred. Please try again.')
   } finally {
     loading.value = false
-    // 保存消息到 localStorage
+    // 淇濆瓨娑堟伅鍒?localStorage
     saveMessages()
   }
 }
 
-// 清空聊天
+// 娓呯┖鑱婂ぉ
 function clearChat() {
   if (confirm(t('确定要清空对话记录吗？', 'Are you sure you want to clear the chat?'))) {
     messages.value = []
-    // 清空 localStorage 中的消息
+    // 娓呯┖ localStorage 涓殑娑堟伅
     if (runnerSessionId.value) {
       localStorage.removeItem(`messages_${runnerSessionId.value}`)
     }
   }
 }
 
-// 滚动到底部
+// 婊氬姩鍒板簳閮?
 function scrollToBottom() {
   nextTick(() => {
     if (messagesContainer.value) {
@@ -722,17 +848,17 @@ function scrollToBottom() {
   })
 }
 
-// 打开设置
+// 鎵撳紑璁剧疆
 function openSettings() {
   showSettings.value = true
 }
 
-// 关闭设置
+// 鍏抽棴璁剧疆
 function closeSettings() {
   showSettings.value = false
 }
 
-// 切换设置标签
+// 鍒囨崲璁剧疆鏍囩
 function switchSettingsTab(tab: string) {
   settingsTab.value = tab
 }
@@ -759,8 +885,8 @@ function normalizeBrowserUrl(rawUrl: string): string {
 
 function sanitizeBrowserUrlCandidate(rawUrl: string): string {
   let value = rawUrl.trim()
-  value = value.replace(/^[<([{'"“‘]+/, '')
-  value = value.replace(/[>\])}"'”’。、，。！？!?.,;:]+$/g, '')
+  value = value.replace(/^[<(\'"\\s]+/, '')
+  value = value.replace(/[>)\'"\\s.,;:!?]+$/g, '')
 
   try {
     const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`)
@@ -798,7 +924,7 @@ function createBrowserTab(rawUrl: string = BROWSER_HOME) {
   browserTabs.value.push(tab)
   activeBrowserTabId.value = tab.id
   browserAddress.value = url
-  currentView.value = 'browser'
+  activeWorkspacePanel.value = 'browser'
 }
 
 function openBrowserHome() {
@@ -808,7 +934,7 @@ function openBrowserHome() {
   }
 
   browserAddress.value = activeBrowserTab.value.url
-  currentView.value = 'browser'
+  activeWorkspacePanel.value = 'browser'
 }
 
 function openBrowserTab(rawUrl: string) {
@@ -837,7 +963,7 @@ function navigateActiveBrowserTab(rawUrl: string, replace = false) {
   }
 
   browserAddress.value = url
-  currentView.value = 'browser'
+  activeWorkspacePanel.value = 'browser'
 }
 
 function goBrowserAddress() {
@@ -850,7 +976,7 @@ function switchBrowserTab(tabId: string) {
 
   activeBrowserTabId.value = tab.id
   browserAddress.value = tab.url
-  currentView.value = 'browser'
+  activeWorkspacePanel.value = 'browser'
 }
 
 function closeBrowserTab(tabId: string) {
@@ -863,8 +989,13 @@ function closeBrowserTab(tabId: string) {
     const nextTab = browserTabs.value[index] || browserTabs.value[index - 1] || null
     activeBrowserTabId.value = nextTab?.id || ''
     browserAddress.value = nextTab?.url || ''
-    if (!nextTab) currentView.value = 'chat'
+    if (!nextTab) activeWorkspacePanel.value = ''
   }
+}
+
+function closeWorkspacePanel() {
+  stopWorkspaceResize()
+  activeWorkspacePanel.value = ''
 }
 
 function browserBack() {
@@ -927,7 +1058,7 @@ async function listenForDesktopNavigation() {
   }
 }
 
-// 初始化
+// 鍒濆鍖?
 onMounted(async () => {
   await listenForDesktopNavigation()
 
@@ -935,16 +1066,16 @@ onMounted(async () => {
   await agentStore.loadModelConfigs()
   await chatStore.loadChats()
   
-  // 尝试恢复之前选中的智能体
+  // 灏濊瘯鎭㈠涔嬪墠閫変腑鐨勬櫤鑳戒綋
   const savedAgentId = localStorage.getItem('selected_agent_id')
   let agentToSelect = null
   
   if (savedAgentId) {
-    // 验证保存的 agent ID 是否仍然有效
+    // 楠岃瘉淇濆瓨鐨?agent ID 鏄惁浠嶇劧鏈夋晥
     agentToSelect = agentStore.agents.find(a => a.id === savedAgentId)
   }
   
-  // 如果没有保存的 agent 或保存的 agent 不存在，选择第一个
+  // 濡傛灉娌℃湁淇濆瓨鐨?agent 鎴栦繚瀛樼殑 agent 涓嶅瓨鍦紝閫夋嫨绗竴涓?
   if (!agentToSelect && agentStore.agents.length > 0) {
     agentToSelect = agentStore.agents[0]
   }
@@ -954,15 +1085,19 @@ onMounted(async () => {
     if (agentToSelect.model_id) {
       selectedModelId.value = agentToSelect.model_id
     }
-    // 保存选中的 agent ID
+    // 淇濆瓨閫変腑鐨?agent ID
     localStorage.setItem('selected_agent_id', agentToSelect.id)
-    // 创建或恢复 runner 对话通道
+    // 鍒涘缓鎴栨仮澶?runner 瀵硅瘽閫氶亾
     await createOrGetSession()
     await loadChatHistory()
     
-    // 不再自动发送问候消息（避免与 CLI 重复）
-    // 用户可以主动输入消息开始对话
+    // 涓嶅啀鑷姩鍙戦€侀棶鍊欐秷鎭紙閬垮厤涓?CLI 閲嶅锛?
+    // 鐢ㄦ埛鍙互涓诲姩杈撳叆娑堟伅寮€濮嬪璇?
   }
+})
+
+onUnmounted(() => {
+  stopWorkspaceResize()
 })
 </script>
 
@@ -1026,7 +1161,7 @@ onMounted(async () => {
   }
 }
 
-/* 主聊天区域 */
+/* 涓昏亰澶╁尯鍩?*/
 .main-chat {
   flex: 1;
   display: flex;
@@ -1259,7 +1394,7 @@ onMounted(async () => {
   }
 }
 
-/* 顶部标题栏 */
+/* 椤堕儴鏍囬鏍?*/
 .chat-header {
   display: flex;
   align-items: center;
@@ -1359,12 +1494,19 @@ onMounted(async () => {
   transform: translateY(-1px);
 }
 
+.btn-settings.active {
+  background: var(--glass-bg-strong);
+  border-color: var(--primary-color);
+  color: var(--text-primary);
+  box-shadow: 0 10px 24px rgba(47, 110, 244, 0.1);
+}
+
 .btn-settings svg {
   width: 20px;
   height: 20px;
 }
 
-/* 聊天消息区域 */
+/* 鑱婂ぉ娑堟伅鍖哄煙 */
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -1532,7 +1674,7 @@ onMounted(async () => {
   }
 }
 
-/* 底部输入区域 */
+/* 搴曢儴杈撳叆鍖哄煙 */
 .chat-footer {
   padding: 16px 24px 14px;
   background: var(--footer-bg);
@@ -1579,7 +1721,7 @@ onMounted(async () => {
   color: var(--text-muted);
 }
 
-/* CoT 切换按钮样式 */
+/* CoT 鍒囨崲鎸夐挳鏍峰紡 */
 .cot-toggle-btn {
   width: 44px;
   height: 44px;
@@ -1618,7 +1760,7 @@ onMounted(async () => {
   height: 18px;
 }
 
-/* 输入提示 */
+/* 杈撳叆鎻愮ず */
 .input-hints {
   display: flex;
   justify-content: space-between;
@@ -1708,7 +1850,7 @@ onMounted(async () => {
   height: 18px;
 }
 
-/* 设置侧边栏 */
+/* 璁剧疆渚ц竟鏍?*/
 .settings-sidebar {
   position: fixed;
   top: 0;
@@ -1729,7 +1871,7 @@ onMounted(async () => {
   right: 0;
 }
 
-/* 设置遮罩 */
+/* 璁剧疆閬僵 */
 .settings-overlay {
   position: fixed;
   top: 0;
@@ -1742,7 +1884,7 @@ onMounted(async () => {
   z-index: 999;
 }
 
-/* 双面板布局 */
+/* 鍙岄潰鏉垮竷灞€ */
 .chat-body {
   flex: 1;
   display: flex;
@@ -1753,6 +1895,9 @@ onMounted(async () => {
 
 .chat-body.dual-panel {
   flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  min-height: 0;
 }
 
 .private-chat-panel {
@@ -1762,5 +1907,261 @@ onMounted(async () => {
   min-width: 0;
   overflow: hidden;
   position: relative;
+}
+
+.chat-body.dual-panel .private-chat-panel {
+  flex: 1 1 54%;
+  min-width: 420px;
+}
+
+.chat-body.dual-panel .chat-messages {
+  padding-right: 24px;
+}
+
+.chat-body.dual-panel .message {
+  max-width: min(92%, 760px);
+}
+
+.panel-chat-footer {
+  flex-shrink: 0;
+}
+
+.workspace-panel {
+  flex: 0 0 var(--workspace-width, clamp(420px, 42vw, 700px));
+  display: flex;
+  flex-direction: column;
+  min-width: 360px;
+  min-height: 0;
+  align-self: stretch;
+  position: relative;
+  overflow: hidden;
+  margin: 16px 18px 16px 0;
+  border: 1px solid var(--border-color);
+  border-radius: 22px;
+  background: var(--glass-bg-strong);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+}
+
+.workspace-resizer {
+  flex: 0 0 12px;
+  width: 12px;
+  margin: 16px 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--border-color);
+  cursor: col-resize;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  position: relative;
+  touch-action: none;
+  z-index: 2;
+}
+
+.workspace-resizer span {
+  width: 1px;
+  margin: 0 auto;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.45);
+  opacity: 0.85;
+  box-shadow:
+    -3px 0 0 rgba(255, 255, 255, 0.62),
+    3px 0 0 rgba(148, 163, 184, 0.16);
+  transition: transform 0.18s ease, opacity 0.18s ease, background 0.18s ease;
+}
+
+.workspace-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.workspace-resizer:hover span,
+.workspace-resizer.active span {
+  opacity: 1;
+  transform: scaleX(1.5);
+  background: rgba(47, 110, 244, 0.58);
+  box-shadow:
+    -3px 0 0 rgba(255, 255, 255, 0.72),
+    3px 0 0 rgba(47, 110, 244, 0.16);
+}
+
+.workspace-resizer:hover,
+.workspace-resizer.active {
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 48px;
+  min-height: 48px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: inset 0 1px 0 var(--glass-border);
+  flex-shrink: 0;
+}
+
+.workspace-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.workspace-panel-icon,
+.workspace-close svg {
+  display: block;
+  width: 18px !important;
+  height: 18px !important;
+  flex: 0 0 18px;
+  max-width: 18px !important;
+  max-height: 18px !important;
+  min-width: 18px;
+  min-height: 18px;
+}
+
+.workspace-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.workspace-close:hover {
+  background: var(--glass-bg-strong);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+
+.workspace-panel .browser-workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.workspace-panel .browser-tabs {
+  height: 46px;
+  min-height: 46px;
+  padding: 9px 12px 0;
+  background: rgba(255, 255, 255, 0.18);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.workspace-panel .browser-toolbar {
+  min-height: 52px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.18);
+  border-bottom: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.workspace-panel .browser-tab {
+  height: 32px;
+  min-width: 96px;
+  max-width: 170px;
+  border-radius: 10px 10px 0 0;
+  font-size: 12px;
+}
+
+.workspace-panel .browser-new-tab {
+  width: 30px;
+  height: 30px;
+  font-size: 18px;
+}
+
+.workspace-panel .browser-icon-btn,
+.workspace-panel .browser-go {
+  height: 34px;
+  border-radius: 10px;
+}
+
+.workspace-panel .browser-icon-btn {
+  width: 34px;
+}
+
+.workspace-panel .browser-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.workspace-panel .browser-address {
+  height: 34px;
+  min-width: 0;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.workspace-panel .browser-frame-area {
+  flex: 1;
+  min-height: 0;
+  margin: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 18px 36px rgba(17, 24, 39, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.workspace-panel .browser-empty {
+  flex: 1;
+  min-height: 0;
+}
+
+:global(body.workspace-resizing) {
+  user-select: none;
+  cursor: col-resize;
+}
+
+:global(body.workspace-resizing) .browser-frame {
+  pointer-events: none;
+}
+
+@media (max-width: 980px) {
+  .chat-body.dual-panel {
+    flex-direction: column;
+  }
+
+  .chat-body.dual-panel .private-chat-panel {
+    min-width: 0;
+    min-height: 48%;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .workspace-panel {
+    flex: 1 1 52%;
+    min-width: 0;
+    margin: 12px 16px 16px;
+  }
+
+  .workspace-resizer {
+    display: none;
+  }
 }
 </style>

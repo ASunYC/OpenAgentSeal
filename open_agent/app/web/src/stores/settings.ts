@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
+import { settingsApi } from '@/api'
 import type { SystemSettings } from '@/types'
 
-const SETTINGS_VERSION = 2
+const SETTINGS_VERSION = 3
 
 const defaultSettings: SystemSettings = {
   language: 'zh-CN',
@@ -12,70 +13,73 @@ const defaultSettings: SystemSettings = {
   workspace: '',
   autoSave: true,
   streamResponse: true,
-  useCoT: false  // 思考模式默认关闭
+  useCoT: false,
 }
 
 export const useSettingsStore = defineStore('settings', () => {
   const settings = ref<SystemSettings>({ ...defaultSettings })
+  const isHydrating = ref(true)
 
-  // 从localStorage加载设置
-  function loadSettings() {
+  async function loadSettings() {
+    isHydrating.value = true
     try {
       const saved = localStorage.getItem('open-agent-settings')
       if (saved) {
         const savedSettings = JSON.parse(saved) as Partial<SystemSettings>
-        const mergedSettings: SystemSettings = { ...defaultSettings, ...savedSettings }
-
-        if (savedSettings.settingsVersion !== SETTINGS_VERSION) {
-          mergedSettings.theme = 'light'
-          mergedSettings.settingsVersion = SETTINGS_VERSION
-        }
-
-        settings.value = mergedSettings
-        saveSettings()
+        settings.value = { ...defaultSettings, ...savedSettings }
       }
-    } catch (e) {
-      console.error('Failed to load settings:', e)
+
+      try {
+        const backendSettings = await settingsApi.get()
+        settings.value = {
+          ...settings.value,
+          ...backendSettings,
+          settingsVersion: SETTINGS_VERSION,
+        }
+        localStorage.setItem('open-agent-settings', JSON.stringify(settings.value))
+      } catch {
+        settings.value.settingsVersion = SETTINGS_VERSION
+        localStorage.setItem('open-agent-settings', JSON.stringify(settings.value))
+      }
+    } catch (error) {
+      console.error('Failed to load settings:', error)
+    } finally {
+      isHydrating.value = false
     }
   }
 
-  // 保存设置到localStorage
-  function saveSettings() {
+  async function saveSettings() {
+    if (isHydrating.value) return
     try {
       localStorage.setItem('open-agent-settings', JSON.stringify(settings.value))
-    } catch (e) {
-      console.error('Failed to save settings:', e)
+      await settingsApi.save(settings.value)
+    } catch (error) {
+      console.error('Failed to save settings:', error)
     }
   }
 
-  // 更新设置
   function updateSettings(newSettings: Partial<SystemSettings>) {
     settings.value = { ...settings.value, ...newSettings }
-    saveSettings()
   }
 
-  // 重置设置
   function resetSettings() {
     settings.value = { ...defaultSettings }
-    saveSettings()
   }
 
-  // 获取翻译文本
   function t(zhText: string, enText: string): string {
     return settings.value.language === 'zh-CN' ? zhText : enText
   }
 
-  // 切换思考模式
   function toggleCoT() {
     settings.value.useCoT = !settings.value.useCoT
-    saveSettings()
   }
 
-  // 监听设置变化自动保存
-  watch(settings, saveSettings, { deep: true })
+  watch(settings, () => {
+    if (isHydrating.value) return
+    void saveSettings()
+  }, { deep: true })
 
-  // 初始化加载
-  loadSettings()
+  void loadSettings()
 
   return {
     settings,
@@ -84,6 +88,6 @@ export const useSettingsStore = defineStore('settings', () => {
     updateSettings,
     resetSettings,
     t,
-    toggleCoT
+    toggleCoT,
   }
 })

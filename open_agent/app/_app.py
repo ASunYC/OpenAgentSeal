@@ -12,6 +12,8 @@ import logging
 import os
 import uuid
 import shutil
+import json
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, List
@@ -20,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from open_agent.version import get_version
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +55,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Open Agent",
         description="Intelligent Agent with Web UI",
-        version="0.1.0",
+        version=get_version(),
         lifespan=lifespan,
     )
 
@@ -565,10 +568,31 @@ def _setup_legacy_routes(app: FastAPI):
                 "workspace": settings.workspace,
                 "auto_save": settings.auto_save,
                 "stream_response": settings.stream_response,
+                "use_cot": settings.use_cot,
             }
         except Exception as e:
             logger.error(f"Failed to get settings: {e}")
-            return {"workspace": str(Path.cwd()), "language": "zh-CN", "theme": "dark"}
+            return {"workspace": str(Path.cwd()), "language": "zh-CN", "theme": "light"}
+
+    @app.get("/api/version")
+    async def get_app_version():
+        """Get application version info."""
+        try:
+            from open_agent.version import get_version, get_release_date
+
+            return {
+                "success": True,
+                "version": get_version(),
+                "release_date": get_release_date(),
+            }
+        except Exception as e:
+            logger.error(f"Failed to get version: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "version": get_version(),
+                "release_date": "",
+            }
 
     @app.post("/api/settings")
     async def update_settings(data: dict):
@@ -698,6 +722,137 @@ def _setup_legacy_routes(app: FastAPI):
             logger.error(f"Failed to list skills: {e}")
             return []
 
+    def _get_writable_mcp_config_path() -> Path:
+        """Return the MCP config path, creating a user-writable config when needed."""
+        from open_agent.config import Config, get_user_app_dir
+        from open_agent.utils.path_utils import get_external_config_dir, is_frozen
+
+        user_config_dir = get_user_app_dir() / "config"
+        user_config_dir.mkdir(parents=True, exist_ok=True)
+        user_config_path = user_config_dir / "mcp.json"
+        if user_config_path.exists():
+            return user_config_path
+
+        seed_paths = []
+        if is_frozen():
+            external_config_dir = get_external_config_dir()
+            if external_config_dir:
+                seed_paths.append(external_config_dir / "mcp.json")
+        seed_paths.extend([
+            Path.cwd() / "open_agent" / "config" / "mcp.json",
+            Config.get_package_dir() / "config" / "mcp.json",
+        ])
+
+        for seed_path in seed_paths:
+            if seed_path.exists() and seed_path.resolve() != user_config_path.resolve():
+                user_config_path.write_text(seed_path.read_text(encoding="utf-8"), encoding="utf-8")
+                return user_config_path
+
+        user_config_path.write_text(json.dumps({"mcpServers": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
+        return user_config_path
+
+    @app.get("/api/mcp/config")
+    async def get_mcp_config():
+        """Get MCP server configuration."""
+        try:
+            config_path = _get_writable_mcp_config_path()
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            servers = raw.get("mcpServers", {})
+            if not isinstance(servers, dict):
+                servers = {}
+
+            server_list = []
+            for name, config in servers.items():
+                if not isinstance(config, dict):
+                    continue
+                server_config = dict(config)
+                server_config.update({
+                    "name": name,
+                    "original_name": name,
+                    "type": config.get("type") or ("streamable_http" if config.get("url") else "stdio"),
+                    "command": config.get("command", ""),
+                    "url": config.get("url", ""),
+                    "args": config.get("args", []),
+                    "env": config.get("env", {}),
+                    "disabled": bool(config.get("disabled", False)),
+                })
+                server_list.append(server_config)
+
+            return {
+                "success": True,
+                "path": str(config_path),
+                "servers": server_list,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get MCP config: {e}")
+            return {"success": False, "error": str(e), "path": "", "servers": []}
+
+    @app.post("/api/mcp/config")
+    async def save_mcp_config(data: dict):
+        """Save MCP server configuration."""
+        try:
+            config_path = _get_writable_mcp_config_path()
+            servers_data = data.get("servers", [])
+            try:
+                raw = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                raw = {"mcpServers": {}}
+            if not isinstance(raw, dict):
+                raw = {"mcpServers": {}}
+            previous_servers = raw.get("mcpServers", {})
+            if not isinstance(previous_servers, dict):
+                previous_servers = {}
+            mcp_servers = {}
+
+            if not isinstance(servers_data, list):
+                raise ValueError("servers must be a list")
+
+            for server in servers_data:
+                if not isinstance(server, dict):
+                    continue
+
+                name = str(server.get("name", "")).strip()
+                if not name:
+                    continue
+
+                server_type = str(server.get("type", "stdio")).strip() or "stdio"
+                original_name = str(server.get("original_name") or name).strip()
+                original_config = previous_servers.get(original_name, {})
+                config = dict(original_config) if isinstance(original_config, dict) else {}
+                config["type"] = server_type
+                config["disabled"] = bool(server.get("disabled", False))
+
+                command = str(server.get("command", "")).strip()
+                url = str(server.get("url", "")).strip()
+                args = server.get("args", [])
+                env = server.get("env", {})
+
+                if command:
+                    config["command"] = command
+                else:
+                    config.pop("command", None)
+                if url:
+                    config["url"] = url
+                else:
+                    config.pop("url", None)
+                if isinstance(args, list):
+                    config["args"] = [str(arg) for arg in args]
+                if isinstance(env, dict):
+                    config["env"] = {str(key): str(value) for key, value in env.items()}
+
+                mcp_servers[name] = config
+
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            raw["mcpServers"] = mcp_servers
+            config_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return {"success": True, "path": str(config_path)}
+        except Exception as e:
+            logger.error(f"Failed to save MCP config: {e}")
+            return {"success": False, "error": str(e)}
+
     @app.get("/api/commands")
     async def list_commands():
         """List available commands - returns array directly for frontend compatibility"""
@@ -719,21 +874,116 @@ def _setup_legacy_routes(app: FastAPI):
         """Get dashboard statistics"""
         try:
             from open_agent.agent_service import get_agent_service
+            from open_agent.app.runner import get_chat_manager
 
             service = get_agent_service()
             agents = service.list_agents()
+            active_agents = [a for a in agents if getattr(a, "status", "") == "running"]
+            chat_manager = get_chat_manager()
+            chats = await chat_manager.list_chats()
+            runner_message_count = sum(len(chat_manager.get_messages(chat.session_id)) for chat in chats)
+            agent_message_count = sum(getattr(a, "message_count", 0) for a in agents)
+            total_messages = max(runner_message_count, agent_message_count)
+
+            today = datetime.now().date()
+            activity_by_date = {
+                (today - timedelta(days=offset)).isoformat(): 0
+                for offset in range(6, -1, -1)
+            }
+            for chat in chats:
+                updated_at = getattr(chat, "updated_at", None)
+                if isinstance(updated_at, str):
+                    try:
+                        updated_date = datetime.fromisoformat(updated_at).date()
+                    except ValueError:
+                        continue
+                elif updated_at:
+                    updated_date = updated_at.date()
+                else:
+                    continue
+
+                key = updated_date.isoformat()
+                if key in activity_by_date:
+                    activity_by_date[key] += max(len(chat_manager.get_messages(chat.session_id)), 1)
+
             return {
                 "total_sessions": len(agents),
-                "active_sessions": len([a for a in agents if a.status == "running"]),
-                "total_messages": sum(a.message_count for a in agents),
+                "total_chats": len(chats),
+                "active_sessions": len(active_agents),
+                "active_agents": len(active_agents),
+                "total_messages": total_messages,
+                "recent_activity": [
+                    {"date": date, "count": count}
+                    for date, count in activity_by_date.items()
+                ],
             }
         except Exception as e:
             return {
                 "total_sessions": 0,
+                "total_chats": 0,
                 "active_sessions": 0,
+                "active_agents": 0,
                 "total_messages": 0,
+                "recent_activity": [],
                 "error": str(e),
             }
+
+    @app.get("/api/logs")
+    async def list_logs():
+        """List recent log files and tails."""
+        try:
+            from open_agent.utils.path_utils import get_logs_dir
+
+            logs_dir = get_logs_dir()
+            files = []
+            log_files = [path for path in logs_dir.rglob("*.log") if path.is_file()]
+            for log_file in sorted(log_files, key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+                try:
+                    lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                except Exception:
+                    lines = []
+                files.append({
+                    "name": log_file.name,
+                    "path": str(log_file),
+                    "size": log_file.stat().st_size,
+                    "updated_at": datetime.fromtimestamp(log_file.stat().st_mtime).isoformat(),
+                    "tail": lines[-40:],
+                })
+
+            return {"success": True, "path": str(logs_dir), "files": files}
+        except Exception as e:
+            logger.error(f"Failed to list logs: {e}")
+            return {"success": False, "error": str(e), "path": "", "files": []}
+
+    @app.get("/api/tasks")
+    async def list_tasks():
+        """List current task dispatcher state."""
+        try:
+            from open_agent.task_queue import get_task_dispatcher
+
+            dispatcher = get_task_dispatcher()
+            if not dispatcher:
+                return {
+                    "success": True,
+                    "status": {"status": "idle", "status_message": "Dispatcher not initialized", "running": False, "queue_stats": {}, "worker_status": {}},
+                    "tasks": [],
+                    "running": [],
+                    "pending": [],
+                    "completed": [],
+                }
+
+            all_tasks = [task.to_dict() for task in dispatcher.get_all_tasks()]
+            return {
+                "success": True,
+                "status": dispatcher.get_status(),
+                "tasks": all_tasks,
+                "running": [task.to_dict() for task in dispatcher.get_running_tasks()],
+                "pending": [task.to_dict() for task in dispatcher.get_pending_tasks()],
+                "completed": [task.to_dict() for task in dispatcher.get_completed_tasks()],
+            }
+        except Exception as e:
+            logger.error(f"Failed to list tasks: {e}")
+            return {"success": False, "error": str(e), "status": {}, "tasks": [], "running": [], "pending": [], "completed": []}
 
 
 # MIME type mapping for static files

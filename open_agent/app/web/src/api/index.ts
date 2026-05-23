@@ -191,15 +191,43 @@ export const commandApi = {
 }
 
 // Settings API
+interface BackendAppSettings {
+  language?: string
+  theme?: string
+  font_size?: string
+  workspace?: string
+  auto_save?: boolean
+  stream_response?: boolean
+  use_cot?: boolean
+}
+
 export const settingsApi = {
   async get(): Promise<AppSettings> {
-    return request<AppSettings>('/settings')
+    const data = await request<BackendAppSettings>('/settings')
+    return {
+      language: (data.language as AppSettings['language']) || 'zh-CN',
+      theme: (data.theme as AppSettings['theme']) || 'light',
+      fontSize: (data.font_size as AppSettings['fontSize']) || 'medium',
+      workspace: data.workspace || '',
+      autoSave: data.auto_save ?? true,
+      streamResponse: data.stream_response ?? true,
+      useCoT: data.use_cot ?? false,
+    }
   },
 
   async save(settings: Partial<AppSettings>): Promise<ApiResponse<AppSettings>> {
+    const payload: Record<string, unknown> = {}
+    if (settings.language !== undefined) payload.language = settings.language
+    if (settings.theme !== undefined) payload.theme = settings.theme
+    if (settings.fontSize !== undefined) payload.font_size = settings.fontSize
+    if (settings.workspace !== undefined) payload.workspace = settings.workspace
+    if (settings.autoSave !== undefined) payload.auto_save = settings.autoSave
+    if (settings.streamResponse !== undefined) payload.stream_response = settings.streamResponse
+    if (settings.useCoT !== undefined) payload.use_cot = settings.useCoT
+
     return request<ApiResponse<AppSettings>>('/settings', {
       method: 'POST',
-      body: JSON.stringify(settings),
+      body: JSON.stringify(payload),
     })
   },
 
@@ -215,6 +243,62 @@ export const settingsApi = {
   },
 }
 
+export interface MCPServerConfig {
+  name: string
+  original_name?: string
+  type: 'stdio' | 'http' | 'sse' | string
+  command?: string
+  url?: string
+  args?: string[]
+  env?: Record<string, string>
+  disabled?: boolean
+  [key: string]: unknown
+}
+
+export const mcpApi = {
+  async getConfig(): Promise<{ success: boolean; path: string; servers: MCPServerConfig[]; error?: string }> {
+    return request('/mcp/config')
+  },
+
+  async saveConfig(servers: MCPServerConfig[]): Promise<ApiResponse<{ path: string }>> {
+    return request<ApiResponse<{ path: string }>>('/mcp/config', {
+      method: 'POST',
+      body: JSON.stringify({ servers }),
+    })
+  },
+}
+
+export const logsApi = {
+  async list(): Promise<{
+    success: boolean
+    path: string
+    files: { name: string; path: string; size: number; updated_at: string; tail: string[] }[]
+    error?: string
+  }> {
+    return request('/logs')
+  },
+}
+
+export const tasksApi = {
+  async list(): Promise<{
+    success: boolean
+    status: Record<string, unknown>
+    tasks: Record<string, unknown>[]
+    running: Record<string, unknown>[]
+    pending: Record<string, unknown>[]
+    completed: Record<string, unknown>[]
+    error?: string
+  }> {
+    return request('/tasks')
+  },
+}
+
+export const versionApi = {
+  async get(): Promise<{ success: boolean; version: string; release_date: string; error?: string }> {
+    return request('/version')
+  },
+}
+
 // Dashboard API
 export const dashboardApi = {
   async getStats(): Promise<{
@@ -223,7 +307,18 @@ export const dashboardApi = {
     activeAgents: number
     recentActivity: { date: string; count: number }[]
   }> {
-    return request('/dashboard/stats')
+    const data = await request<{
+      total_chats?: number
+      total_messages?: number
+      active_agents?: number
+      recent_activity?: { date: string; count: number }[]
+    }>('/dashboard/stats')
+    return {
+      totalChats: data.total_chats ?? 0,
+      totalMessages: data.total_messages ?? 0,
+      activeAgents: data.active_agents ?? 0,
+      recentActivity: data.recent_activity ?? [],
+    }
   },
 }
 
@@ -294,6 +389,17 @@ export const api = {
   saveSettings: settingsApi.save,
   getWorkDirectory: settingsApi.getWorkDirectory,
   setWorkDirectory: settingsApi.setWorkDirectory,
+
+  // MCP
+  getMcpConfig: mcpApi.getConfig,
+  saveMcpConfig: mcpApi.saveConfig,
+
+  // Logs / Tasks
+  getLogs: logsApi.list,
+  getTasks: tasksApi.list,
+
+  // Version
+  getVersion: versionApi.get,
 
   // Dashboard
   getDashboardStats: dashboardApi.getStats,

@@ -1,6 +1,6 @@
 <template>
   <div 
-    class="settings-panel"
+    class="settings-panel settings-shell"
     :style="{ width: panelWidth + 'px' }"
   >
     <!-- 左侧拖拽手柄 -->
@@ -13,9 +13,9 @@
       <div class="resizer-indicator"></div>
     </div>
     <!-- 面板头部 -->
-    <header class="panel-header">
+    <header class="panel-header settings-header">
       <h2>{{ t('设置', 'Settings') }}</h2>
-      <button class="btn-close" @click="$emit('close')">
+      <button class="btn-close settings-button" @click="$emit('close')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"/>
           <line x1="6" y1="6" x2="18" y2="18"/>
@@ -145,7 +145,6 @@
             <polyline points="10 9 9 9 8 9"/>
           </svg>
           <span>{{ t('日志', 'Logs') }}</span>
-          <span class="badge">{{ t('开发中', 'Dev') }}</span>
         </div>
         
         <div 
@@ -158,7 +157,6 @@
             <polyline points="12 6 12 12 16 16"/>
           </svg>
           <span>{{ t('定时任务', 'Tasks') }}</span>
-          <span class="badge">{{ t('开发中', 'Dev') }}</span>
         </div>
         
         <div 
@@ -175,7 +173,7 @@
       </nav>
       
       <!-- 内容区域 -->
-      <div class="settings-content">
+      <div class="settings-content settings-surface">
         <!-- 数据面板 -->
         <DashboardSettings v-if="currentTab === 'dashboard'" />
         
@@ -201,20 +199,10 @@
         <MCPSettings v-else-if="currentTab === 'mcp'" />
         
         <!-- 日志 -->
-        <div v-else-if="currentTab === 'logs'" class="tab-content">
-          <div class="content-header">
-            <h3>{{ t('日志', 'Logs') }}</h3>
-            <p>{{ t('功能开发中...', 'Feature under development...') }}</p>
-          </div>
-        </div>
+        <LogsSettings v-else-if="currentTab === 'logs'" />
         
         <!-- 定时任务 -->
-        <div v-else-if="currentTab === 'tasks'" class="tab-content">
-          <div class="content-header">
-            <h3>{{ t('定时任务', 'Scheduled Tasks') }}</h3>
-            <p>{{ t('功能开发中...', 'Feature under development...') }}</p>
-          </div>
-        </div>
+        <TasksSettings v-else-if="currentTab === 'tasks'" />
         
         <!-- 系统设置 -->
         <SystemSettings v-else-if="currentTab === 'system'" />
@@ -234,6 +222,8 @@ import AgentsSettings from '@/components/settings/AgentsSettings.vue'
 import ChatsSettings from '@/components/settings/ChatsSettings.vue'
 import SkillsSettings from '@/components/settings/SkillsSettings.vue'
 import MCPSettings from '@/components/settings/MCPSettings.vue'
+import LogsSettings from '@/components/settings/LogsSettings.vue'
+import TasksSettings from '@/components/settings/TasksSettings.vue'
 import SystemSettings from '@/components/settings/SystemSettings.vue'
 
 const props = defineProps<{
@@ -443,15 +433,6 @@ const stopDrag = () => {
   width: 18px;
   height: 18px;
   flex-shrink: 0;
-}
-
-.menu-item .badge {
-  margin-left: auto;
-  font-size: 10px;
-  padding: 2px 6px;
-  background: var(--active-bg);
-  border-radius: 999px;
-  color: var(--text-muted);
 }
 
 .settings-content {

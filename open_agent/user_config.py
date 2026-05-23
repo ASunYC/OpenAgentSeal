@@ -211,6 +211,7 @@ class AppSettings:
     workspace: str = field(default_factory=_get_default_workspace)  # 工作目录
     auto_save: bool = True               # 自动保存
     stream_response: bool = True         # 流式响应
+    use_cot: bool = False                # 思考/迭代模式
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -238,11 +239,12 @@ class UserConfigManager:
         "agents": [],
         "settings": {
             "language": "zh-CN",
-            "theme": "dark",
+            "theme": "light",
             "font_size": "medium",
             "workspace": "./workspace",
             "auto_save": True,
-            "stream_response": True
+            "stream_response": True,
+            "use_cot": False
         },
         "default_model_id": None,
         "default_agent_id": None
@@ -575,7 +577,10 @@ class UserConfigManager:
     def get_settings(self) -> AppSettings:
         """获取应用设置"""
         settings_data = self._config.get("settings", {})
-        return AppSettings.from_dict(settings_data)
+        settings = AppSettings.from_dict(settings_data)
+        if not settings.theme:
+            settings.theme = "light"
+        return settings
     
     def update_settings(self, settings: AppSettings):
         """更新应用设置"""

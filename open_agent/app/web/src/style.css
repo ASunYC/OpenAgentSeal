@@ -270,6 +270,193 @@ code {
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
+/* Settings system surfaces */
+.settings-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-header h3 {
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings-header p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.settings-surface {
+  border: 1px solid var(--border-color) !important;
+  border-radius: 16px !important;
+  background: var(--glass-bg-strong) !important;
+  box-shadow: var(--soft-shadow) !important;
+  backdrop-filter: blur(18px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(160%) !important;
+}
+
+.settings-surface-soft {
+  border: 1px solid var(--border-color) !important;
+  border-radius: 14px !important;
+  background: var(--main-bg) !important;
+}
+
+.settings-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.settings-state.error {
+  color: #ef4444;
+}
+
+.settings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--hover-bg);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.2s ease, color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+}
+
+.settings-button:hover {
+  border-color: var(--primary-color);
+  color: var(--text-primary);
+}
+
+.settings-button:active {
+  transform: translateY(1px);
+}
+
+.settings-button-primary {
+  border-color: var(--primary-color);
+  background: var(--primary-color);
+  color: #fff;
+}
+
+.settings-button-primary:hover {
+  opacity: 0.94;
+}
+
+.settings-button-danger {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: transparent;
+  color: #ef4444;
+}
+
+.settings-control {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--input-bg);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.settings-control:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(47, 110, 244, 0.1);
+}
+
+.settings-label {
+  display: block;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settings-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--hover-bg);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Settings page normalization */
+.settings-content :is(.content-header, .card-heading, .chart-heading, .toolbar, .mcp-header, .log-header, .task-header, .skill-header, .workspace-info, .user-profile) {
+  gap: 12px;
+}
+
+.settings-content :is(.loading-state, .error-state, .empty-state, .state-card, .settings-card, .stat-card, .skill-card, .mcp-card, .log-card, .task-card, .workspace-card, .info-card, .actions-card, .chart-section, .path-pill) {
+  border: 1px solid var(--border-color) !important;
+  border-radius: 14px !important;
+  background: var(--glass-bg-strong) !important;
+  box-shadow: var(--soft-shadow) !important;
+  backdrop-filter: blur(16px) saturate(155%) !important;
+  -webkit-backdrop-filter: blur(16px) saturate(155%) !important;
+}
+
+.settings-content :is(.loading-state, .error-state, .empty-state, .state-card) {
+  min-height: 120px;
+  padding: 20px;
+  color: var(--text-muted);
+}
+
+.settings-content :is(.stat-card, .skill-card, .mcp-card, .log-card, .task-card, .workspace-card, .info-card, .actions-card, .settings-card, .chart-section) {
+  padding: 16px;
+}
+
+.settings-content :is(.btn-secondary, .btn-danger, .btn-primary, .refresh-button, .btn-toggle, .btn-change-avatar, .btn-browse, .btn-icon, .btn-action, .add-mcp, .mcp-status, .settings-button) {
+  border-radius: 10px;
+  transition: transform 0.18s ease, background 0.2s ease, color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+}
+
+.settings-content :is(.btn-secondary, .refresh-button, .btn-change-avatar, .btn-browse, .btn-icon, .btn-action, .mcp-status, .settings-button, .btn-toggle) {
+  background: var(--hover-bg) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-color) !important;
+}
+
+.settings-content :is(.btn-primary, .add-mcp) {
+  border: 1px solid var(--primary-color) !important;
+  background: var(--primary-color) !important;
+  color: #fff !important;
+}
+
+.settings-content :is(.btn-danger) {
+  border: 1px solid rgba(239, 68, 68, 0.28) !important;
+  background: transparent !important;
+  color: #ef4444 !important;
+}
+
+.settings-content :is(.input, .select, .textarea, input[type='text'], input[type='email'], input[type='number'], textarea, select) {
+  border-radius: 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+}
+
 /* Textarea styles */
 .textarea {
   width: 100%;

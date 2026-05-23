@@ -222,6 +222,13 @@ class Config(BaseModel):
         # Get user app directory (~/.open-agent)
         user_app_dir = get_user_app_dir()
         
+        # MCP is edited by the desktop UI, so prefer the user-writable copy
+        # whenever it exists. Other config files keep their existing priority.
+        if filename == "mcp.json":
+            user_config = user_app_dir / "config" / filename
+            if user_config.exists():
+                return user_config
+
         # When frozen (PyInstaller), prioritize external config directory
         if is_frozen():
             # Priority 1: External config directory next to executable
