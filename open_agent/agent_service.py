@@ -697,7 +697,23 @@ class AgentService:
         
         # 选择工具
         tools.append(AskUserChoiceTool())
-        
+
+        # 联网搜索工具
+        try:
+            from open_agent.config import Config
+            config_path = Config.get_default_config_path()
+            if config_path and config_path.exists():
+                config_obj = Config.from_yaml(config_path)
+                if config_obj.tools.enable_web_search:
+                    from open_agent.tools.web_search import (
+                        WebSearchTool,
+                        WebBrowseTool,
+                    )
+                    tools.append(WebSearchTool())
+                    tools.append(WebBrowseTool())
+        except Exception:
+            pass
+
         return tools
     
     def _get_system_prompt(self, config: Dict[str, Any] = None) -> str:
