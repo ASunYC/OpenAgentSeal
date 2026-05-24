@@ -356,23 +356,25 @@ const stopDrag = () => {
 }
 
 .btn-close {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-secondary);
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s;
+  box-shadow: inset 0 1px 0 var(--glass-border), 0 8px 18px rgba(17, 24, 39, 0.08);
+  transition: transform 0.18s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 
 .btn-close:hover {
-  background: var(--glass-bg-strong);
-  border-color: var(--border-color);
-  color: var(--text-primary);
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.42);
+  color: #ef4444;
+  transform: translateY(-1px);
 }
 
 .btn-close svg {

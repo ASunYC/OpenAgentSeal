@@ -1,22 +1,28 @@
 ﻿<template>
   <div class="app-container" :class="settingsStore.settings.theme">
-    <!-- 涓昏亰澶╅潰鏉?-->
+    <!-- 主聊天面板-->
     <main class="main-chat">
-      <!-- 椤堕儴鏍囬鏍?-->
+      <!-- 顶部标题栏-->
       <header class="chat-header">
         <div class="header-left">
           <div class="logo">
-            <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"/>
-              <circle cx="12" cy="10" r="3"/>
-              <path d="M7 16c0-2 2-3 5-3s5 1 5 3"/>
-            </svg>
+            <span class="logo-icon seal-avatar logo-seal" aria-hidden="true">
+              <span class="seal-avatar-body">
+                <span class="seal-avatar-face">
+                  <span class="seal-avatar-eye left"></span>
+                  <span class="seal-avatar-eye right"></span>
+                  <span class="seal-avatar-nose"></span>
+                </span>
+                <span class="seal-avatar-flipper left"></span>
+                <span class="seal-avatar-flipper right"></span>
+              </span>
+            </span>
             <span class="logo-text">OpenAgentSeal</span>
           </div>
         </div>
         
         <div class="header-center">
-          <!-- 鏅鸿兘浣撻€夋嫨鍣?-->
+          <!-- 智能体选择器-->
           <div class="selector agent-selector">
             <select v-model="selectedAgentId" @change="onAgentChange">
               <option v-for="agent in agentStore.agents" :key="agent.id" :value="agent.id">
@@ -25,7 +31,7 @@
             </select>
           </div>
           
-          <!-- 妯″瀷閫夋嫨鍣?-->
+          <!-- 模型选择器-->
           <div class="selector model-selector">
             <select v-model="selectedModelId" @change="onModelChange">
               <option v-for="model in availableModels" :key="model.id" :value="model.id">
@@ -36,7 +42,7 @@
         </div>
         
         <div class="header-right">
-          <button class="btn-settings" @click="forkCurrentTask" :disabled="loading || isForking" :title="t('澶嶅埗涓烘柊浠诲姟', 'Fork into new task')">
+          <button class="btn-settings" @click="forkCurrentTask" :disabled="loading || isForking" :title="t('复制为新任务', 'Fork into new task')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="9" y="9" width="10" height="10" rx="2"/>
               <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
@@ -54,7 +60,7 @@
               <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
             </svg>
           </button>
-          <button class="btn-settings" @click="openSettings" :title="t('璁剧疆', 'Settings')">
+          <button class="btn-settings" @click="openSettings" :title="t('设置', 'Settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"/>
               <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
@@ -63,9 +69,9 @@
         </div>
       </header>
       
-      <!-- 涓棿鑱婂ぉ鍖哄煙 -->
+      <!-- 中间聊天区域 -->
       <div class="chat-body" :class="{ 'dual-panel': isWorkspaceOpen }" :style="workspaceLayoutStyle">
-        <!-- 绉佷汉瀵硅瘽鍖?-->
+        <!-- 私人对话区-->
         <div class="private-chat-panel">
           <div class="chat-messages" ref="messagesContainer" @click="handleChatClick">
             <div
@@ -80,8 +86,16 @@
                     <circle cx="12" cy="7" r="4"/>
                   </svg>
                 </div>
-                <div v-else class="avatar agent-avatar" :style="{ background: getAgentColor() }">
-                  {{ getAgentName().charAt(0).toUpperCase() }}
+                <div v-else class="avatar agent-avatar seal-avatar" :style="{ background: getAgentColor() }" :aria-label="getAgentName()">
+                  <span class="seal-avatar-body">
+                    <span class="seal-avatar-face">
+                      <span class="seal-avatar-eye left"></span>
+                      <span class="seal-avatar-eye right"></span>
+                      <span class="seal-avatar-nose"></span>
+                    </span>
+                    <span class="seal-avatar-flipper left"></span>
+                    <span class="seal-avatar-flipper right"></span>
+                  </span>
                 </div>
               </div>
               <div class="message-content">
@@ -89,7 +103,7 @@
                   <span class="sender">{{ msg.role === 'user' ? t('你', 'You') : getAgentName() }}</span>
                   <span class="time">{{ formatTime(msg.timestamp) }}</span>
                 </div>
-                <!-- 鎬濊€冭繃绋嬫樉绀?- 璺熼殢姣忎釜 assistant 娑堟伅 -->
+                <!-- 思考过程显示 - 跟随每个 assistant 消息 -->
                 <ThinkingProcess
                   v-if="msg.role === 'assistant' && settingsStore.settings.useCoT && msg.thinking && (msg.thinking.steps.length > 0 || msg.thinking.isThinking)"
                   :thinking="msg.thinking"
@@ -97,13 +111,28 @@
                   :user-query="msg.userQuery || ''"
                   :current-step="msg.thinking.steps.length"
                 />
-                <!-- 姝ｅ湪杈撳叆鎸囩ず鍣?- 褰撴秷鎭唴瀹逛负绌轰笖姝ｅ湪鍔犺浇鏃舵樉绀?-->
-                <div v-if="msg.role === 'assistant' && !msg.content && msg.thinking?.isThinking" class="typing-indicator">
-                  <span></span>
-                  <span></span>
-                  <span></span>
+                <!-- 正在输入指示器 - 当消息内容为空且正在加载时显示-->
+                <div v-if="msg.role === 'assistant' && !msg.content && msg.isLoading" class="typing-indicator" :aria-label="t('小海豹正在思考', 'Seal is thinking')">
+                  <span class="seal-swimmer" aria-hidden="true">
+                    <span class="seal-body">
+                      <span class="seal-face">
+                        <span class="seal-eye left"></span>
+                        <span class="seal-eye right"></span>
+                        <span class="seal-nose"></span>
+                      </span>
+                      <span class="seal-flipper left"></span>
+                      <span class="seal-flipper right"></span>
+                    </span>
+                    <span class="seal-ripple"></span>
+                  </span>
+                  <span class="typing-text">{{ t('正在努力思考', 'Thinking hard') }}</span>
+                  <span class="typing-dots" aria-hidden="true">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </span>
                 </div>
-                <!-- 娑堟伅鍐呭 -->
+                <!-- 消息内容 -->
                 <div v-if="msg.content" class="message-text" v-html="renderMarkdown(msg.content)"></div>
               </div>
             </div>
@@ -248,14 +277,14 @@
         </aside>
       </div>
       
-      <!-- 搴曢儴宸ュ叿鏍?-->
+      <!-- 底部工具栏-->
       <footer v-if="!isWorkspaceOpen" class="chat-footer">
         <div class="input-area">
-          <!-- 杩唬妯″紡鍒囨崲鎸夐挳 -->
+          <!-- 迭代模式切换按钮 -->
           <button
             class="cot-toggle-btn"
             :class="{ active: settingsStore.settings.useCoT }"
-            :title="t('杩唬妯″紡', 'Iteration Mode')"
+            :title="t('迭代模式', 'Iteration Mode')"
             @click="settingsStore.toggleCoT"
           >
             <svg class="cot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -299,7 +328,7 @@
     </main>
 
 
-    <!-- 璁剧疆闈㈡澘 -->
+    <!-- 设置闈㈡澘 -->
     <aside 
       class="settings-sidebar" 
       :class="{ open: showSettings }"
@@ -314,7 +343,7 @@
       />
     </aside>
     
-    <!-- 璁剧疆闈㈡澘閬僵 -->
+    <!-- 设置闈㈡澘閬僵 -->
     <div class="settings-overlay" v-if="showSettings" @click="closeSettings"></div>
   </div>
 </template>
@@ -438,12 +467,12 @@ const canBrowserForward = computed(() => {
   return !!activeBrowserTab.value && activeBrowserTab.value.historyIndex < activeBrowserTab.value.history.length - 1
 })
 
-// 璁剧疆闈㈡澘鐘舵€?
+// 设置闈㈡澘鐘舵€?
 const showSettings = ref(false)
 const settingsTab = ref('dashboard') // 榛樿閫変腑鏁版嵁闈㈡澘
 const settingsWidth = ref(900) // 榛樿瀹藉害 900px
 
-// 澶勭悊璁剧疆闈㈡澘瀹藉害鍙樺寲
+// 澶勭悊设置闈㈡澘瀹藉害鍙樺寲
 const onSettingsWidthChange = (width: number) => {
   settingsWidth.value = width
 }
@@ -696,7 +725,8 @@ async function sendMessage() {
   const assistantMessage: Message = reactive({
     role: 'assistant' as const,
     content: '',
-    userQuery: userMessage,  // 淇濆瓨鐢ㄦ埛鏌ヨ
+    userQuery: userMessage,  // 用户输入的查询
+    isLoading: true,
     timestamp: new Date().toISOString(),
     thinking: settingsStore.settings.useCoT ? {
       isThinking: true,
@@ -715,18 +745,19 @@ async function sendMessage() {
 
       if (event.event === 'message' && event.content) {
         assistantContent = event.content
+        assistantMessage.isLoading = false
         assistantMessage.content = event.content
         scrollToBottom()
       }
       
-      // 浠呭湪寮€鍚凯浠ｆā寮忔椂澶勭悊姝ラ
+      // 浠呭湪寮€鍚凯浠ｆā寮忔椂澶勭悊步骤
       if (settingsStore.settings.useCoT && assistantMessage.thinking) {
         // 鐩戝惉 step_start 浜嬩欢
         if (event.event === 'step_start') {
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'thinking',
-            content: `寮€濮嬫楠?${event.step}/${event.max_steps}`,
+            content: `开始步骤${event.step}/${event.max_steps}`,
             timestamp: new Date().toISOString()
           })
         }
@@ -749,7 +780,7 @@ async function sendMessage() {
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'tool_call',
-            content: `璋冪敤宸ュ叿: ${toolName}`,
+            content: `调用工具: ${toolName}`,
             toolName: toolName,
             toolOutput: args,
             timestamp: new Date().toISOString()
@@ -763,7 +794,7 @@ async function sendMessage() {
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'tool_result',
-            content: event.success ? '宸ュ叿鎵ц鎴愬姛' : '宸ュ叿鎵ц澶辫触',
+            content: event.success ? '工具执行成功' : '工具执行失败',
             toolOutput: typeof resultContent === 'string' ? resultContent : JSON.stringify(resultContent, null, 2),
             timestamp: new Date().toISOString()
           })
@@ -772,7 +803,7 @@ async function sendMessage() {
         
         // 鐩戝惉 step_end 浜嬩欢
         if (event.event === 'step_end') {
-          const stepInfo = `姝ラ ${event.step} 瀹屾垚锛岃€楁椂 ${event.elapsed?.toFixed(2) || 0}s`
+          const stepInfo = `步骤 ${event.step} 完成，耗时 ${event.elapsed?.toFixed(2) || 0}s`
           // 鏇存柊鏈€鍚庝竴涓楠ゆ垨娣诲姞鏂版楠?
           const lastStep = assistantMessage.thinking.steps[assistantMessage.thinking.steps.length - 1]
           if (lastStep && lastStep.type === 'thinking') {
@@ -784,7 +815,8 @@ async function sendMessage() {
       // 鐩戝惉瀹屾垚浜嬩欢 - 杩欐槸鑾峰彇鏈€缁堝洖澶嶇殑鍏抽敭
       if (event.event === 'complete' && event.content) {
         assistantContent = event.content
-        // 瀹屾垚鏃跺仠姝㈣凯浠ｇ姸鎬?
+        assistantMessage.isLoading = false
+        // 完成时停止迭代状态
         if (settingsStore.settings.useCoT && assistantMessage.thinking) {
           assistantMessage.thinking.isThinking = false
         }
@@ -793,11 +825,12 @@ async function sendMessage() {
       // 鐩戝惉閿欒浜嬩欢
       if (event.event === 'error' && event.error) {
         console.error('Agent error:', event.error)
+        assistantMessage.isLoading = false
         if (settingsStore.settings.useCoT && assistantMessage.thinking) {
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'observation',
-            content: `閿欒: ${event.error}`,
+            content: `错误: ${event.error}`,
             timestamp: new Date().toISOString()
           })
           assistantMessage.thinking.isThinking = false
@@ -805,7 +838,8 @@ async function sendMessage() {
       }
     })
     
-    // 鏇存柊 assistant 娑堟伅鍐呭锛屽姞鍏ヤ竴涓湰鍦版墦瀛楁満鍔ㄧ敾
+    assistantMessage.isLoading = false
+    // 更新 assistant 消息内容，加入本地打字机动画
     await typewriterReveal(
       assistantMessage,
       assistantContent || t('抱歉，没有收到回复。', 'Sorry, no response received.'),
@@ -817,6 +851,7 @@ async function sendMessage() {
     scrollToBottom()
   } catch (error) {
     console.error('Failed to send message:', error)
+    assistantMessage.isLoading = false
     if (settingsStore.settings.useCoT && assistantMessage.thinking) {
       assistantMessage.thinking.isThinking = false
     }
@@ -848,17 +883,17 @@ function scrollToBottom() {
   })
 }
 
-// 鎵撳紑璁剧疆
+// 鎵撳紑设置
 function openSettings() {
   showSettings.value = true
 }
 
-// 鍏抽棴璁剧疆
+// 鍏抽棴设置
 function closeSettings() {
   showSettings.value = false
 }
 
-// 鍒囨崲璁剧疆鏍囩
+// 鍒囨崲设置鏍囩
 function switchSettingsTab(tab: string) {
   settingsTab.value = tab
 }
@@ -1394,7 +1429,7 @@ onUnmounted(() => {
   }
 }
 
-/* 椤堕儴鏍囬鏍?*/
+/* 顶部标题栏*/
 .chat-header {
   display: flex;
   align-items: center;
@@ -1569,6 +1604,83 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
+.seal-avatar {
+  position: relative;
+  overflow: visible;
+  background: linear-gradient(145deg, #dff3ff 0%, #9cc4df 100%) !important;
+}
+
+.logo-seal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58), 0 8px 16px rgba(47, 110, 244, 0.18);
+}
+
+.seal-avatar-body {
+  position: relative;
+  width: 72%;
+  height: 58%;
+  border-radius: 60% 58% 52% 54%;
+  background: linear-gradient(145deg, #f7fbff 0%, #cbddeb 62%, #91a9bd 100%);
+  box-shadow: inset 0 1px 3px rgba(255, 255, 255, 0.85), 0 3px 8px rgba(72, 104, 132, 0.18);
+}
+
+.seal-avatar-face {
+  position: absolute;
+  top: 24%;
+  right: 17%;
+  width: 45%;
+  height: 46%;
+}
+
+.seal-avatar-eye {
+  position: absolute;
+  top: 6%;
+  width: 18%;
+  height: 18%;
+  border-radius: 50%;
+  background: #263746;
+}
+
+.seal-avatar-eye.left {
+  left: 8%;
+}
+
+.seal-avatar-eye.right {
+  right: 8%;
+}
+
+.seal-avatar-nose {
+  position: absolute;
+  left: 42%;
+  top: 50%;
+  width: 20%;
+  height: 16%;
+  border-radius: 50%;
+  background: #38495a;
+}
+
+.seal-avatar-flipper {
+  position: absolute;
+  bottom: -14%;
+  width: 32%;
+  height: 30%;
+  border-radius: 999px;
+  background: #91a9bd;
+}
+
+.seal-avatar-flipper.left {
+  left: 8%;
+  transform: rotate(-24deg);
+}
+
+.seal-avatar-flipper.right {
+  right: 8%;
+  transform: rotate(24deg);
+}
+
 .message-content {
   display: flex;
   flex-direction: column;
@@ -1640,37 +1752,191 @@ onUnmounted(() => {
 }
 
 .typing-indicator {
-  display: flex;
-  gap: 4px;
-  padding: 12px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  padding: 10px 14px 10px 12px;
   background: var(--glass-bg-strong);
   border: 1px solid var(--border-color);
-  border-radius: 16px;
+  border-radius: 999px;
   box-shadow: var(--soft-shadow);
+  overflow: hidden;
 }
 
-.typing-indicator span {
-  width: 8px;
-  height: 8px;
-  background: var(--text-muted);
+.seal-swimmer {
+  position: relative;
+  width: 52px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  animation: seal-swim 2.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.seal-body {
+  position: relative;
+  width: 36px;
+  height: 22px;
+  border-radius: 60% 58% 52% 54%;
+  background: linear-gradient(145deg, #eef7ff 0%, #c8d9e8 62%, #9fb4c7 100%);
+  box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.85), 0 6px 14px rgba(82, 116, 146, 0.18);
+  z-index: 2;
+}
+
+.seal-face {
+  position: absolute;
+  inset: 5px 7px auto auto;
+  width: 17px;
+  height: 12px;
+}
+
+.seal-eye {
+  position: absolute;
+  top: 1px;
+  width: 3px;
+  height: 3px;
   border-radius: 50%;
-  animation: typing 1.4s infinite ease-in-out;
+  background: #263746;
+  animation: seal-blink 3.8s infinite;
 }
 
-.typing-indicator span:nth-child(2) {
-  animation-delay: 0.2s;
+.seal-eye.left {
+  left: 2px;
 }
 
-.typing-indicator span:nth-child(3) {
-  animation-delay: 0.4s;
+.seal-eye.right {
+  right: 2px;
 }
 
-@keyframes typing {
-  0%, 60%, 100% {
-    transform: translateY(0);
+.seal-nose {
+  position: absolute;
+  left: 7px;
+  top: 6px;
+  width: 4px;
+  height: 3px;
+  border-radius: 50%;
+  background: #38495a;
+}
+
+.seal-flipper {
+  position: absolute;
+  bottom: -3px;
+  width: 12px;
+  height: 7px;
+  border-radius: 999px;
+  background: #9fb4c7;
+  transform-origin: center;
+}
+
+.seal-flipper.left {
+  left: 3px;
+  transform: rotate(-22deg);
+  animation: flipper-left 1.2s ease-in-out infinite;
+}
+
+.seal-flipper.right {
+  right: 3px;
+  transform: rotate(22deg);
+  animation: flipper-right 1.2s ease-in-out infinite;
+}
+
+.seal-ripple {
+  position: absolute;
+  left: 3px;
+  bottom: 1px;
+  width: 44px;
+  height: 8px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at center, rgba(47, 110, 244, 0.18), transparent 68%);
+  animation: ripple-pulse 1.6s ease-in-out infinite;
+}
+
+.typing-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.typing-dots span {
+  width: 6px;
+  height: 6px;
+  background: var(--primary-color);
+  border-radius: 50%;
+  animation: typing-dot 1.2s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.typing-dots span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes seal-swim {
+  0%, 100% {
+    transform: translateX(-4px) translateY(1px) rotate(-2deg);
   }
-  30% {
-    transform: translateY(-4px);
+  50% {
+    transform: translateX(5px) translateY(-2px) rotate(2deg);
+  }
+}
+
+@keyframes seal-blink {
+  0%, 92%, 100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.18);
+  }
+}
+
+@keyframes flipper-left {
+  0%, 100% {
+    transform: rotate(-20deg) translateY(0);
+  }
+  50% {
+    transform: rotate(-38deg) translateY(1px);
+  }
+}
+
+@keyframes flipper-right {
+  0%, 100% {
+    transform: rotate(20deg) translateY(0);
+  }
+  50% {
+    transform: rotate(38deg) translateY(1px);
+  }
+}
+
+@keyframes ripple-pulse {
+  0%, 100% {
+    opacity: 0.48;
+    transform: scaleX(0.8);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scaleX(1.08);
+  }
+}
+
+@keyframes typing-dot {
+  0%, 70%, 100% {
+    opacity: 0.35;
+    transform: translateY(0) scale(0.92);
+  }
+  35% {
+    opacity: 1;
+    transform: translateY(-4px) scale(1.08);
   }
 }
 
@@ -1850,7 +2116,7 @@ onUnmounted(() => {
   height: 18px;
 }
 
-/* 璁剧疆渚ц竟鏍?*/
+/* 设置渚ц竟鏍?*/
 .settings-sidebar {
   position: fixed;
   top: 0;
@@ -1871,7 +2137,7 @@ onUnmounted(() => {
   right: 0;
 }
 
-/* 璁剧疆閬僵 */
+/* 设置閬僵 */
 .settings-overlay {
   position: fixed;
   top: 0;

@@ -18,6 +18,7 @@ export interface Message {
   content: string
   timestamp?: string
   userQuery?: string  // 用户输入的查询摘要
+  isLoading?: boolean
   thinking?: {
     isThinking: boolean
     steps: ThinkingStep[]

@@ -129,7 +129,7 @@ class MiniMaxACPAgent:
         for _ in range(agent.max_steps):
             if state.cancelled:
                 return "cancelled"
-            tool_schemas = [tool.to_schema() for tool in agent.tools.values()]
+            tool_schemas = agent.tool_registry.schemas()
             try:
                 response = await agent.llm.generate(messages=agent.messages, tools=tool_schemas)
             except Exception as exc:
@@ -152,14 +152,21 @@ class MiniMaxACPAgent:
                 tool = agent.tools.get(name)
                 if not tool:
                     text, status = f"[ERROR] Unknown tool: {name}", "failed"
+                elif "_approved" in args:
+                    args.pop("_approved", None)
+                    status, text = "failed", "[ERROR] Tool approval cannot be supplied by model-controlled arguments."
                 else:
-                    try:
-                        result = await tool.execute(**args)
-                        status = "completed" if result.success else "failed"
-                        prefix = "[OK]" if result.success else "[ERROR]"
-                        text = f"{prefix} {result.content if result.success else result.error or 'Tool execution failed'}"
-                    except Exception as exc:
-                        status, text = "failed", f"[ERROR] Tool error: {exc}"
+                    allowed, policy_error = agent.tool_registry.check_call(name, args, approved=False)
+                    if not allowed:
+                        status, text = "failed", f"[ERROR] {policy_error}"
+                    else:
+                        try:
+                            result = await tool.execute(**args)
+                            status = "completed" if result.success else "failed"
+                            prefix = "[OK]" if result.success else "[ERROR]"
+                            text = f"{prefix} {result.content if result.success else result.error or 'Tool execution failed'}"
+                        except Exception as exc:
+                            status, text = "failed", f"[ERROR] Tool error: {exc}"
                 await self._send(session_id, update_tool_call(call.id, status=status, content=[tool_content(text_block(text))], raw_output=text))
                 agent.messages.append(Message(role="tool", content=text, tool_call_id=call.id, name=name))
         return "max_turn_requests"

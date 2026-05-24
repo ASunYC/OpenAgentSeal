@@ -76,3 +76,5 @@ static/
 desktop/src-tauri/gen/
 .ecc/
 desktop/.tauri-dev-*.json
+
+.claude/

@@ -18,6 +18,7 @@ from .logger import AgentLogger
 from .log_memory_worker import get_log_memory_worker, LogMemoryWorker
 from .schema import Message
 from .tools.base import Tool, ToolResult
+from .tools.registry import build_tool_registry
 from .utils import calculate_display_width
 
 
@@ -66,6 +67,7 @@ class Agent:
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
+        self.tool_registry = build_tool_registry(tools)
         self.max_steps = max_steps
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
@@ -598,21 +600,28 @@ Requirements:
                         content="",
                         error=f"Unknown tool: {function_name}",
                     )
+                elif "_approved" in arguments:
+                    arguments.pop("_approved", None)
+                    result = ToolResult(success=False, content="", error="Tool approval cannot be supplied by model-controlled arguments.")
                 else:
-                    try:
-                        tool = self.tools[function_name]
-                        result = await tool.execute(**arguments)
-                    except Exception as e:
-                        # Catch all exceptions during tool execution, convert to failed ToolResult
-                        import traceback
+                    allowed, policy_error = self.tool_registry.check_call(function_name, arguments, approved=False)
+                    if not allowed:
+                        result = ToolResult(success=False, content="", error=policy_error)
+                    else:
+                        try:
+                            tool = self.tools[function_name]
+                            result = await tool.execute(**arguments)
+                        except Exception as e:
+                            # Catch all exceptions during tool execution, convert to failed ToolResult
+                            import traceback
 
-                        error_detail = f"{type(e).__name__}: {str(e)}"
-                        error_trace = traceback.format_exc()
-                        result = ToolResult(
-                            success=False,
-                            content="",
-                            error=f"Tool execution failed: {error_detail}\n\nTraceback:\n{error_trace}",
-                        )
+                            error_detail = f"{type(e).__name__}: {str(e)}"
+                            error_trace = traceback.format_exc()
+                            result = ToolResult(
+                                success=False,
+                                content="",
+                                error=f"Tool execution failed: {error_detail}\n\nTraceback:\n{error_trace}",
+                            )
 
                 # Log tool execution result
                 self.logger.log_tool_result(

@@ -11,8 +11,16 @@
         v-for="agent in agentStore.agents" 
         :key="agent.id"
       >
-        <div class="agent-avatar" :style="{ background: getAgentColor(agent.id) }">
-          {{ agent.name?.charAt(0)?.toUpperCase() }}
+        <div class="agent-avatar seal-avatar" :style="{ background: getAgentColor(agent.id) }" :aria-label="agent.name">
+          <span class="seal-avatar-body">
+            <span class="seal-avatar-face">
+              <span class="seal-avatar-eye left"></span>
+              <span class="seal-avatar-eye right"></span>
+              <span class="seal-avatar-nose"></span>
+            </span>
+            <span class="seal-avatar-flipper left"></span>
+            <span class="seal-avatar-flipper right"></span>
+          </span>
         </div>
         <div class="agent-info">
           <h4>{{ agent.name }}</h4>
@@ -251,7 +259,7 @@ onMounted(async () => {
 .agent-avatar {
   width: 48px;
   height: 48px;
-  border-radius: 12px;
+  border-radius: 14px;
   color: white;
   display: flex;
   align-items: center;
@@ -259,6 +267,76 @@ onMounted(async () => {
   font-size: 20px;
   font-weight: 600;
   flex-shrink: 0;
+}
+
+.seal-avatar {
+  position: relative;
+  overflow: visible;
+  background: linear-gradient(145deg, #dff3ff 0%, #9cc4df 100%) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58), 0 8px 18px rgba(72, 104, 132, 0.16);
+}
+
+.seal-avatar-body {
+  position: relative;
+  width: 72%;
+  height: 58%;
+  border-radius: 60% 58% 52% 54%;
+  background: linear-gradient(145deg, #f7fbff 0%, #cbddeb 62%, #91a9bd 100%);
+  box-shadow: inset 0 1px 3px rgba(255, 255, 255, 0.85), 0 3px 8px rgba(72, 104, 132, 0.18);
+}
+
+.seal-avatar-face {
+  position: absolute;
+  top: 24%;
+  right: 17%;
+  width: 45%;
+  height: 46%;
+}
+
+.seal-avatar-eye {
+  position: absolute;
+  top: 6%;
+  width: 18%;
+  height: 18%;
+  border-radius: 50%;
+  background: #263746;
+}
+
+.seal-avatar-eye.left {
+  left: 8%;
+}
+
+.seal-avatar-eye.right {
+  right: 8%;
+}
+
+.seal-avatar-nose {
+  position: absolute;
+  left: 42%;
+  top: 50%;
+  width: 20%;
+  height: 16%;
+  border-radius: 50%;
+  background: #38495a;
+}
+
+.seal-avatar-flipper {
+  position: absolute;
+  bottom: -14%;
+  width: 32%;
+  height: 30%;
+  border-radius: 999px;
+  background: #91a9bd;
+}
+
+.seal-avatar-flipper.left {
+  left: 8%;
+  transform: rotate(-24deg);
+}
+
+.seal-avatar-flipper.right {
+  right: 8%;
+  transform: rotate(24deg);
 }
 
 .agent-info {
