@@ -41,7 +41,7 @@ tools:
   # - JINA_API_KEY: Get from https://jina.ai/ (Web page content extraction)
   # - BRAVE_API_KEY: Get from https://brave.com/search/api/
   # - TAVILY_API_KEY: Get from https://tavily.com/
-  enable_web_search: false  # Enable web search tools (web_search, web_browse). Default: false
+  enable_web_search: true  # Enable web search tools (web_search, web_browse). Default: true
   
   # Claude Skills
   enable_skills: true      # Enable Skills

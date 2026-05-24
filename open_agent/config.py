@@ -79,7 +79,7 @@ class ToolsConfig(BaseModel):
     enable_note: bool = True
 
     # Web search tools
-    enable_web_search: bool = False  # Enable web search tools (web_search, web_browse)
+    enable_web_search: bool = True  # Enable web search tools (web_search, web_browse)
 
     # Skills
     enable_skills: bool = True
@@ -174,7 +174,7 @@ class Config(BaseModel):
             enable_file_tools=tools_data.get("enable_file_tools", True),
             enable_bash=tools_data.get("enable_bash", True),
             enable_note=tools_data.get("enable_note", True),
-            enable_web_search=tools_data.get("enable_web_search", False),
+            enable_web_search=tools_data.get("enable_web_search", True),
             enable_skills=tools_data.get("enable_skills", True),
             skills_dir=tools_data.get("skills_dir", "./skills"),
             enable_mcp=tools_data.get("enable_mcp", True),
