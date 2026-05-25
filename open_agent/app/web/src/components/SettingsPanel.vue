@@ -147,8 +147,20 @@
           <span>{{ t('日志', 'Logs') }}</span>
         </div>
         
-        <div 
-          class="menu-item" 
+        <div
+          class="menu-item"
+          :class="{ active: currentTab === 'knowledge' }"
+          @click="switchTab('knowledge')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+          </svg>
+          <span>{{ t('知识库', 'Knowledge') }}</span>
+        </div>
+
+        <div
+          class="menu-item"
           :class="{ active: currentTab === 'tasks' }"
           @click="switchTab('tasks')"
         >
@@ -201,6 +213,9 @@
         <!-- 日志 -->
         <LogsSettings v-else-if="currentTab === 'logs'" />
         
+        <!-- 知识库 -->
+        <KnowledgeSettings v-else-if="currentTab === 'knowledge'" />
+
         <!-- 定时任务 -->
         <TasksSettings v-else-if="currentTab === 'tasks'" />
         
@@ -224,6 +239,7 @@ import SkillsSettings from '@/components/settings/SkillsSettings.vue'
 import MCPSettings from '@/components/settings/MCPSettings.vue'
 import LogsSettings from '@/components/settings/LogsSettings.vue'
 import TasksSettings from '@/components/settings/TasksSettings.vue'
+import KnowledgeSettings from '@/components/settings/KnowledgeSettings.vue'
 import SystemSettings from '@/components/settings/SystemSettings.vue'
 
 const props = defineProps<{

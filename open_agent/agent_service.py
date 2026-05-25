@@ -699,6 +699,7 @@ class AgentService:
         tools.append(AskUserChoiceTool())
 
         # 联网搜索工具
+        config_obj = None
         try:
             from open_agent.config import Config
             config_path = Config.get_default_config_path()
@@ -711,6 +712,43 @@ class AgentService:
                     )
                     tools.append(WebSearchTool())
                     tools.append(WebBrowseTool())
+        except Exception:
+            pass
+
+        # Skills 工具
+        try:
+            if config_obj and config_obj.tools.enable_skills:
+                skills_path = Path(config_obj.tools.skills_dir).expanduser()
+                if not skills_path.is_absolute():
+                    from open_agent.config import Config as Cfg
+                    candidates = [
+                        skills_path,
+                        Path("open_agent") / skills_path,
+                        Cfg.get_package_dir() / skills_path,
+                    ]
+                    for path in candidates:
+                        if path.exists():
+                            skills_path = path.resolve()
+                            break
+                if skills_path and Path(skills_path).exists():
+                    from open_agent.tools.skill_tool import create_skill_tools
+                    skill_tools, _ = create_skill_tools(str(skills_path))
+                    if skill_tools:
+                        tools.extend(skill_tools)
+        except Exception:
+            pass
+
+        # MCP 工具
+        try:
+            if config_obj and config_obj.tools.enable_mcp:
+                from open_agent.config import Config as Cfg
+                mcp_config_path = Cfg.find_config_file(config_obj.tools.mcp_config_path)
+                if mcp_config_path:
+                    from open_agent.tools.mcp_loader import load_mcp_tools_async
+                    import asyncio
+                    mcp_tools = asyncio.run(load_mcp_tools_async(str(mcp_config_path)))
+                    if mcp_tools:
+                        tools.extend(mcp_tools)
         except Exception:
             pass
 
