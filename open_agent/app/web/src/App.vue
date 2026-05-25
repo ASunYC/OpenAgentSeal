@@ -48,6 +48,18 @@
               <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
             </svg>
           </button>
+          <!-- 技能开关 -->
+          <button
+            class="btn-settings skill-toggle"
+            :class="{ active: skillsEnabled }"
+            :title="skillsEnabled ? t('技能已开启', 'Skills On') : t('技能已关闭', 'Skills Off')"
+            @click="toggleSkills"
+          >
+            <svg viewBox="0 0 24 24" fill="none" :stroke="skillsEnabled ? 'currentColor' : 'currentColor'" stroke-width="2">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+            </svg>
+            <span class="toggle-label">{{ skillsEnabled ? '' : '' }}</span>
+          </button>
           <button
             class="btn-settings"
             :class="{ active: activeWorkspacePanel === 'browser' }"
@@ -485,6 +497,7 @@ const messages = ref<Message[]>([])
 const inputMessage = ref('')
 const loading = ref(false)
 const isForking = ref(false)
+const skillsEnabled = ref(true)  // 技能开关状态
 const messagesContainer = ref<HTMLElement | null>(null)
 
 // 缈昏瘧鍑芥暟
@@ -694,7 +707,20 @@ async function forkCurrentTask() {
   }
 }
 
-// 鐢熸垚鍞竴ID
+async function toggleSkills() {
+  skillsEnabled.value = !skillsEnabled.value
+  try {
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enable_skills: skillsEnabled.value }),
+    })
+  } catch {
+    // toggle works locally even if API is unavailable
+  }
+}
+
+// 生成唯一ID
 function generateId(): string {
   return `step_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 }
@@ -1541,7 +1567,22 @@ onUnmounted(() => {
   height: 20px;
 }
 
-/* 鑱婂ぉ娑堟伅鍖哄煙 */
+.skill-toggle {
+  position: relative;
+}
+
+.skill-toggle.active {
+  background: var(--glass-bg-strong);
+  border-color: #10b981;
+  color: #10b981;
+  box-shadow: 0 10px 24px rgba(16, 185, 129, 0.12);
+}
+
+.skill-toggle .toggle-label {
+  display: none;
+}
+
+/* 聊天消息区域 */
 .chat-messages {
   flex: 1;
   overflow-y: auto;

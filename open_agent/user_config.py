@@ -212,10 +212,11 @@ class AppSettings:
     auto_save: bool = True               # 自动保存
     stream_response: bool = True         # 流式响应
     use_cot: bool = False                # 思考/迭代模式
-    
+    enable_skills: bool = True             # 技能开关
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppSettings":
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})

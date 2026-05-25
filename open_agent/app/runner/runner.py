@@ -398,7 +398,10 @@ class AgentRunner:
 
             # Skills tools
             try:
-                if config_obj and config_obj.tools.enable_skills:
+                # Check user settings first (UI toggle), then config.yaml
+                user_settings = config_manager.get_settings()
+                enable_skills = getattr(user_settings, 'enable_skills', True) if user_settings else True
+                if enable_skills and config_obj and config_obj.tools.enable_skills:
                     skills_path = Path(config_obj.tools.skills_dir).expanduser()
                     if not skills_path.is_absolute():
                         from open_agent.config import Config as Cfg
