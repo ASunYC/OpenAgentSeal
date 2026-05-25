@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run web:dev",
     "beforeBuildCommand": "npm run web:build",
-    "devUrl": "http://127.0.0.1:3000",
+    "devUrl": "http://127.0.0.1:10086",
     "frontendDist": "../../open_agent/app/static"
   },
   "app": {
