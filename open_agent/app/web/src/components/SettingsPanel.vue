@@ -16,7 +16,7 @@
     <header class="panel-header settings-header">
       <h2>{{ t('设置', 'Settings') }}</h2>
       <button class="btn-close settings-button" @click="$emit('close')">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <svg class="close-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
           <line x1="18" y1="6" x2="6" y2="18"/>
           <line x1="6" y1="6" x2="18" y2="18"/>
         </svg>
@@ -393,9 +393,10 @@ const stopDrag = () => {
   transform: translateY(-1px);
 }
 
-.btn-close svg {
-  width: 18px;
-  height: 18px;
+.btn-close .close-icon {
+  width: 20px !important;
+  height: 20px !important;
+  flex-shrink: 0;
 }
 
 .panel-body {
