@@ -85,6 +85,10 @@ class AgentEvent(BaseModel):
     """Event emitted during agent processing"""
     event: str  # step_start, thinking, tool_call, tool_result, step_end, complete, error
     session_id: str
+    thread_id: Optional[str] = None
+    turn_id: Optional[str] = None
+    seq: Optional[int] = None
+    created_at: Optional[str] = None
     step: Optional[int] = None
     content: Optional[str] = None
     tool_name: Optional[str] = None

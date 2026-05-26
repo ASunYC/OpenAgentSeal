@@ -25,7 +25,7 @@ class ControlPlane:
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn"):
-            conn = sqlite3.connect(str(self.db_path))
+            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
@@ -56,6 +56,50 @@ class ControlPlane:
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     metadata TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS runtime_threads (
+                    thread_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL DEFAULT 'default',
+                    title TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    latest_event_seq INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS runtime_turns (
+                    turn_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    user_input TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    result TEXT,
+                    error TEXT,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(thread_id) REFERENCES runtime_threads(thread_id) ON DELETE CASCADE,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS runtime_events (
+                    event_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    turn_id TEXT,
+                    session_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    UNIQUE(thread_id, seq),
+                    FOREIGN KEY(thread_id) REFERENCES runtime_threads(thread_id) ON DELETE CASCADE,
+                    FOREIGN KEY(turn_id) REFERENCES runtime_turns(turn_id) ON DELETE SET NULL,
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                 );
 
@@ -153,6 +197,9 @@ class ControlPlane:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_runtime_threads_session_updated ON runtime_threads(session_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_runtime_turns_thread_started ON runtime_turns(thread_id, started_at);
+                CREATE INDEX IF NOT EXISTS idx_runtime_events_thread_seq ON runtime_events(thread_id, seq);
                 CREATE INDEX IF NOT EXISTS idx_goals_session_status ON goals(session_id, status);
                 CREATE INDEX IF NOT EXISTS idx_tool_calls_session_created ON tool_calls(session_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_status_next_run ON scheduler_jobs(status, next_run_at);
@@ -227,6 +274,251 @@ class ControlPlane:
         rows = self._get_conn().execute(
             "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, message_id",
             (session_id,),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def create_runtime_thread(
+        self,
+        session_id: str | None = None,
+        user_id: str = "default",
+        title: str = "",
+        status: str = "active",
+        thread_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        session_id = session_id or f"session_{uuid.uuid4().hex[:8]}"
+        if self.get_session(session_id) is None:
+            self.create_session(session_id=session_id, channel="web", user_id=user_id)
+
+        now = datetime.now().isoformat()
+        thread_id = thread_id or f"thread_{uuid.uuid4().hex[:8]}"
+        conn = self._get_conn()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_threads (
+                    thread_id, session_id, user_id, title, status, created_at, updated_at, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    session_id=excluded.session_id,
+                    user_id=excluded.user_id,
+                    title=excluded.title,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at,
+                    metadata=excluded.metadata
+                """,
+                (
+                    thread_id,
+                    session_id,
+                    user_id,
+                    title,
+                    status,
+                    now,
+                    now,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+        return self.get_runtime_thread(thread_id) or {}
+
+    def get_runtime_thread(self, thread_id: str) -> dict[str, Any] | None:
+        row = self._get_conn().execute(
+            "SELECT * FROM runtime_threads WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def get_runtime_thread_by_session(self, session_id: str) -> dict[str, Any] | None:
+        row = self._get_conn().execute(
+            """
+            SELECT * FROM runtime_threads
+            WHERE session_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_runtime_threads(
+        self,
+        user_id: str | None = None,
+        include_archived: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if user_id:
+            clauses.append("user_id = ?")
+            values.append(user_id)
+        if not include_archived:
+            clauses.append("status != 'archived'")
+        query = "SELECT * FROM runtime_threads"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        values.append(limit)
+        rows = self._get_conn().execute(query, values).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def start_runtime_turn(
+        self,
+        thread_id: str,
+        session_id: str | None = None,
+        user_input: str = "",
+        turn_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        thread = self.get_runtime_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Runtime thread not found: {thread_id}")
+
+        session_id = session_id or thread["session_id"]
+        if self.get_session(session_id) is None:
+            self.create_session(session_id=session_id)
+
+        now = datetime.now().isoformat()
+        turn_id = turn_id or f"turn_{uuid.uuid4().hex[:8]}"
+        conn = self._get_conn()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_turns (
+                    turn_id, thread_id, session_id, user_input, status, started_at, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    turn_id,
+                    thread_id,
+                    session_id,
+                    user_input,
+                    "running",
+                    now,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                "UPDATE runtime_threads SET status = ?, updated_at = ? WHERE thread_id = ?",
+                ("active", now, thread_id),
+            )
+        row = conn.execute("SELECT * FROM runtime_turns WHERE turn_id = ?", (turn_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def complete_runtime_turn(
+        self,
+        turn_id: str,
+        status: str = "completed",
+        result: Any = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = datetime.now().isoformat()
+        conn = self._get_conn()
+        current = conn.execute("SELECT * FROM runtime_turns WHERE turn_id = ?", (turn_id,)).fetchone()
+        if current is None:
+            raise KeyError(f"Runtime turn not found: {turn_id}")
+
+        metadata_value = json.dumps(metadata, ensure_ascii=False) if metadata is not None else current["metadata"]
+        with conn:
+            conn.execute(
+                """
+                UPDATE runtime_turns
+                SET status = ?, result = ?, error = ?, completed_at = ?, metadata = ?
+                WHERE turn_id = ?
+                """,
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False, default=str) if result is not None else None,
+                    error,
+                    now,
+                    metadata_value,
+                    turn_id,
+                ),
+            )
+            conn.execute(
+                "UPDATE runtime_threads SET updated_at = ? WHERE thread_id = ?",
+                (now, current["thread_id"]),
+            )
+        row = conn.execute("SELECT * FROM runtime_turns WHERE turn_id = ?", (turn_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def append_runtime_event(
+        self,
+        thread_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        turn_id: str | None = None,
+        session_id: str | None = None,
+        event_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        thread = self.get_runtime_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Runtime thread not found: {thread_id}")
+
+        session_id = session_id or thread["session_id"]
+        now = datetime.now().isoformat()
+        event_id = event_id or f"event_{uuid.uuid4().hex[:8]}"
+        seq = int(thread["latest_event_seq"]) + 1
+        conn = self._get_conn()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_events (
+                    event_id, thread_id, turn_id, session_id, seq, event_type, payload, created_at, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    thread_id,
+                    turn_id,
+                    session_id,
+                    seq,
+                    event_type,
+                    json.dumps(payload or {}, ensure_ascii=False, default=str),
+                    now,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE runtime_threads
+                SET latest_event_seq = ?, updated_at = ?
+                WHERE thread_id = ?
+                """,
+                (seq, now, thread_id),
+            )
+        row = conn.execute("SELECT * FROM runtime_events WHERE event_id = ?", (event_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def list_runtime_events(
+        self,
+        thread_id: str,
+        since_seq: int = 0,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        rows = self._get_conn().execute(
+            """
+            SELECT * FROM runtime_events
+            WHERE thread_id = ? AND seq > ?
+            ORDER BY seq ASC
+            LIMIT ?
+            """,
+            (thread_id, since_seq, limit),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def list_runtime_turns(self, thread_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._get_conn().execute(
+            """
+            SELECT * FROM runtime_turns
+            WHERE thread_id = ?
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (thread_id, limit),
         ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 

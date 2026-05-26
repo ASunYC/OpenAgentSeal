@@ -194,13 +194,48 @@ class AgentRunner:
         
         # Add message to agent
         agent.add_user_message(user_content)
+
+        from open_agent.control_plane import get_control_plane
+
+        control_plane = get_control_plane()
+        runtime_thread = control_plane.get_runtime_thread_by_session(session_id)
+        if runtime_thread is None:
+            runtime_thread = control_plane.create_runtime_thread(
+                session_id=session_id,
+                user_id=user_id,
+                title=user_content[:80],
+                metadata={"chat_id": chat.id, "source": "runner"},
+            )
+        runtime_turn = control_plane.start_runtime_turn(
+            runtime_thread["thread_id"],
+            user_input=user_content,
+            metadata={"agent_id": agent_id},
+        )
+
+        def persist_event(event: AgentEvent) -> AgentEvent:
+            payload = event.model_dump(exclude_none=True)
+            stored = control_plane.append_runtime_event(
+                runtime_thread["thread_id"],
+                event.event,
+                payload=payload,
+                turn_id=runtime_turn["turn_id"],
+                session_id=session_id,
+            )
+            return event.model_copy(
+                update={
+                    "thread_id": runtime_thread["thread_id"],
+                    "turn_id": runtime_turn["turn_id"],
+                    "seq": stored["seq"],
+                    "created_at": stored["created_at"],
+                }
+            )
         
         # Yield start event
-        yield AgentEvent(
+        yield persist_event(AgentEvent(
             event="run_start",
             session_id=session_id,
             status="running",
-        )
+        ))
         
         # Create event collector for status callback
         event_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
@@ -258,14 +293,14 @@ class AgentRunner:
                 # Check for events with a small timeout
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
-                    yield event
+                    yield persist_event(event)
                 except asyncio.TimeoutError:
                     # No event available, continue waiting
                     pass
             
             # Agent is done, drain any remaining events
             while not event_queue.empty():
-                yield await event_queue.get()
+                yield persist_event(await event_queue.get())
             
             # Get the result (this will raise if agent raised an exception)
             result = agent_task.result()
@@ -283,31 +318,45 @@ class AgentRunner:
                 self.chat_manager.add_message(session_id, assistant_message)
             
             # Yield completion event
-            yield AgentEvent(
+            complete_event = persist_event(AgentEvent(
                 event="complete",
                 session_id=session_id,
                 status="idle",
                 content=last_assistant_msg,
+            ))
+            control_plane.complete_runtime_turn(
+                runtime_turn["turn_id"],
+                status="completed",
+                result={"content": last_assistant_msg, "agent_result": str(result)},
             )
+            yield complete_event
             
             # Update chat
             await self.chat_manager.update_chat(chat)
         
         except asyncio.CancelledError:
             agent_task.cancel()
-            yield AgentEvent(
+            cancelled_event = persist_event(AgentEvent(
                 event="cancelled",
                 session_id=session_id,
                 status="idle",
-            )
+            ))
+            control_plane.complete_runtime_turn(runtime_turn["turn_id"], status="cancelled")
+            yield cancelled_event
         except Exception as e:
             logger.error(f"Agent execution error: {e}")
-            yield AgentEvent(
+            error_event = persist_event(AgentEvent(
                 event="error",
                 session_id=session_id,
                 error=str(e),
                 status="error",
+            ))
+            control_plane.complete_runtime_turn(
+                runtime_turn["turn_id"],
+                status="error",
+                error=str(e),
             )
+            yield error_event
         finally:
             agent.status_callback = None
             agent.llm.stream_callback = None

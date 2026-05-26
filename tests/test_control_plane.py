@@ -78,6 +78,59 @@ class TestControlPlane(unittest.TestCase):
         self.assertEqual(job["status"], "active")
         self.assertEqual(Path(self.temp_dir.name, "control_plane.db").exists(), True)
 
+    def test_runtime_thread_turn_events_persist_and_replay(self):
+        thread = self.store.create_runtime_thread(
+            session_id="session_runtime",
+            user_id="user_1",
+            title="Runtime test",
+            metadata={"source": "test"},
+        )
+        turn = self.store.start_runtime_turn(
+            thread["thread_id"],
+            user_input="hello",
+            metadata={"request_id": "req_1"},
+        )
+
+        first = self.store.append_runtime_event(
+            thread["thread_id"],
+            turn_id=turn["turn_id"],
+            event_type="run_start",
+            payload={"status": "running"},
+        )
+        second = self.store.append_runtime_event(
+            thread["thread_id"],
+            turn_id=turn["turn_id"],
+            event_type="tool_call",
+            payload={"tool_name": "read_file", "arguments": {"path": "README.md"}},
+        )
+        completed = self.store.complete_runtime_turn(
+            turn["turn_id"],
+            status="completed",
+            result={"message": "done"},
+        )
+
+        self.assertEqual(first["seq"], 1)
+        self.assertEqual(second["seq"], 2)
+        self.assertEqual(completed["result"], {"message": "done"})
+        self.assertEqual(self.store.get_runtime_thread(thread["thread_id"])["latest_event_seq"], 2)
+
+        self.store.close()
+        reopened = ControlPlane(self.temp_dir.name)
+        try:
+            restored_thread = reopened.get_runtime_thread(thread["thread_id"])
+            self.assertEqual(restored_thread["session_id"], "session_runtime")
+            self.assertEqual(restored_thread["metadata"]["source"], "test")
+
+            all_events = reopened.list_runtime_events(thread["thread_id"])
+            self.assertEqual([event["seq"] for event in all_events], [1, 2])
+            self.assertEqual(all_events[1]["payload"]["arguments"]["path"], "README.md")
+
+            replay_events = reopened.list_runtime_events(thread["thread_id"], since_seq=1)
+            self.assertEqual(len(replay_events), 1)
+            self.assertEqual(replay_events[0]["event_type"], "tool_call")
+        finally:
+            reopened.close()
+
 
 if __name__ == "__main__":
     unittest.main()

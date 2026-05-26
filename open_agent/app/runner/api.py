@@ -51,6 +51,12 @@ class RunRequest(BaseModel):
     stream: bool = True
 
 
+def _get_control_plane():
+    from open_agent.control_plane import get_control_plane
+
+    return get_control_plane()
+
+
 # Chat endpoints
 @router.get("/chats")
 async def list_chats(user_id: str = Query(None)) -> List[dict]:
@@ -193,6 +199,74 @@ async def fork_chat(request: ForkChatRequest) -> dict:
         },
         "source_session_id": request.session_id,
         "copied_message_count": copied_message_count,
+    }
+
+
+@router.get("/runtime/threads")
+async def list_runtime_threads(
+    user_id: str = Query(None),
+    include_archived: bool = Query(False),
+    limit: int = Query(50, ge=1, le=500),
+) -> dict:
+    """List durable runtime threads."""
+    control_plane = _get_control_plane()
+    return {
+        "threads": control_plane.list_runtime_threads(
+            user_id=user_id,
+            include_archived=include_archived,
+            limit=limit,
+        )
+    }
+
+
+@router.get("/runtime/threads/session/{session_id}")
+async def get_runtime_thread_by_session(session_id: str) -> dict:
+    """Get the latest durable runtime thread for a chat session."""
+    control_plane = _get_control_plane()
+    thread = control_plane.get_runtime_thread_by_session(session_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Runtime thread not found")
+    return thread
+
+
+@router.get("/runtime/threads/{thread_id}")
+async def get_runtime_thread(thread_id: str) -> dict:
+    """Get durable runtime thread metadata."""
+    control_plane = _get_control_plane()
+    thread = control_plane.get_runtime_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Runtime thread not found")
+    return thread
+
+
+@router.get("/runtime/threads/{thread_id}/turns")
+async def list_runtime_turns(
+    thread_id: str,
+    limit: int = Query(50, ge=1, le=500),
+) -> dict:
+    """List durable turns for a runtime thread."""
+    control_plane = _get_control_plane()
+    if not control_plane.get_runtime_thread(thread_id):
+        raise HTTPException(status_code=404, detail="Runtime thread not found")
+    return {"turns": control_plane.list_runtime_turns(thread_id, limit=limit)}
+
+
+@router.get("/runtime/threads/{thread_id}/events")
+async def list_runtime_events(
+    thread_id: str,
+    since_seq: int = Query(0, ge=0),
+    limit: int = Query(1000, ge=1, le=5000),
+) -> dict:
+    """Replay durable runtime events after a sequence number."""
+    control_plane = _get_control_plane()
+    if not control_plane.get_runtime_thread(thread_id):
+        raise HTTPException(status_code=404, detail="Runtime thread not found")
+    return {
+        "events": control_plane.list_runtime_events(
+            thread_id,
+            since_seq=since_seq,
+            limit=limit,
+        )
     }
 
 
