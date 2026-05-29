@@ -47,6 +47,10 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application"""
+    from open_agent.utils.stdio import configure_utf8_stdio
+
+    configure_utf8_stdio()
+
     global _app
 
     if _app is not None:
@@ -609,6 +613,38 @@ def _setup_legacy_routes(app: FastAPI):
             return {"success": True}
         except Exception as e:
             logger.error(f"Failed to update settings: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/smart-routing")
+    async def get_smart_routing():
+        """Get smart routing configuration."""
+        try:
+            from open_agent.user_config import get_user_config
+
+            manager = get_user_config()
+            return manager.get_smart_routing()
+        except Exception as e:
+            logger.error(f"Failed to get smart routing config: {e}")
+            return {
+                "enabled": False,
+                "text_model_id": "",
+                "vision_model_id": "",
+                "audio_model_id": "",
+                "fallback_model_id": "",
+                "error": str(e),
+            }
+
+    @app.post("/api/smart-routing")
+    async def update_smart_routing(data: dict):
+        """Update smart routing configuration."""
+        try:
+            from open_agent.user_config import get_user_config
+
+            manager = get_user_config()
+            config = manager.update_smart_routing(data)
+            return {"success": True, "data": config}
+        except Exception as e:
+            logger.error(f"Failed to update smart routing config: {e}")
             return {"success": False, "error": str(e)}
 
     @app.get("/api/settings/work-directory")

@@ -42,23 +42,16 @@
         </div>
         
         <div class="header-right">
-          <button class="btn-settings" @click="forkCurrentTask" :disabled="loading || isForking" :title="t('复制为新任务', 'Fork into new task')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="10" height="10" rx="2"/>
-              <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
-            </svg>
-          </button>
-          <!-- 技能开关 -->
           <button
-            class="btn-settings skill-toggle"
-            :class="{ active: skillsEnabled }"
-            :title="skillsEnabled ? t('技能已开启', 'Skills On') : t('技能已关闭', 'Skills Off')"
-            @click="toggleSkills"
+            class="btn-settings"
+            :class="{ active: activeWorkspacePanel === 'runtime' }"
+            @click="openRuntimePanel"
+            :title="t('对话与运行', 'Chats & runtime')"
           >
-            <svg viewBox="0 0 24 24" fill="none" :stroke="skillsEnabled ? 'currentColor' : 'currentColor'" stroke-width="2">
-              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M8 15.5 4 19v-4.4A6.6 6.6 0 0 1 10.6 4H13a6.6 6.6 0 0 1 6.4 5"/>
+              <path d="M10 14a5 5 0 0 0 5 5h3.2L21 21.5V19a5 5 0 0 0-3-9h-3a5 5 0 0 0-5 5Z"/>
             </svg>
-            <span class="toggle-label">{{ skillsEnabled ? '' : '' }}</span>
           </button>
           <button
             class="btn-settings"
@@ -146,53 +139,128 @@
                 </div>
                 <!-- 消息内容 -->
                 <div v-if="msg.content" class="message-text" v-html="renderMarkdown(msg.content)"></div>
+                <div v-if="msg.attachments?.length" class="message-attachments">
+                  <template v-for="attachment in msg.attachments" :key="attachment.id">
+                    <img
+                      v-if="isImageAttachment(attachment)"
+                      :src="attachmentPreview(attachment)"
+                      :alt="attachment.name"
+                    />
+                    <div v-else class="message-file-attachment">
+                      <span class="attachment-file-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                          <path d="M14 2v6h6"/>
+                        </svg>
+                      </span>
+                      <span>{{ attachment.name }}</span>
+                    </div>
+                  </template>
+                </div>
               </div>
             </div>
           </div>
           <footer v-if="isWorkspaceOpen" class="chat-footer panel-chat-footer">
-            <div class="input-area">
-              <button
-                class="cot-toggle-btn"
-                :class="{ active: settingsStore.settings.useCoT }"
-                :title="t('迭代模式', 'Iteration Mode')"
-                @click="settingsStore.toggleCoT"
-              >
-                <svg class="cot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M21 12a9 9 0 0 1-15.31 6.36"/>
-                  <path d="M3 12A9 9 0 0 1 18.31 5.64"/>
-                  <path d="M6 18H3v3"/>
-                  <path d="M18 6h3V3"/>
-                </svg>
-              </button>
+            <div
+              class="input-area composer-shell"
+              :class="{ 'drag-over': isComposerDragging }"
+              @dragenter.prevent="onComposerDragEnter"
+              @dragover.prevent="onComposerDragOver"
+              @dragleave.prevent="onComposerDragLeave"
+              @drop.prevent="onComposerDrop"
+            >
               <textarea
                 v-model="inputMessage"
+                class="composer-textarea"
                 :placeholder="t('输入消息...', 'Type a message...')"
                 @keydown.enter.exact.prevent="sendMessage"
+                @paste="onComposerPaste"
                 rows="3"
               ></textarea>
-              <div class="input-actions">
-                <button class="btn-clear" @click="clearChat">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="3,6 5,6 21,6"/>
-                    <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
-                  </svg>
-                </button>
-                <button class="btn-send" @click="sendMessage" :disabled="!inputMessage.trim() || loading" :title="t('发送', 'Send')">
+              <div v-if="pendingAttachments.length" class="pending-attachments">
+                <div v-for="attachment in pendingAttachments" :key="attachment.id" class="attachment-chip">
+                  <img v-if="isImageAttachment(attachment)" :src="attachmentPreview(attachment)" :alt="attachment.name" />
+                  <span v-else class="attachment-file-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                      <path d="M14 2v6h6"/>
+                    </svg>
+                  </span>
+                  <span>{{ attachment.name }}</span>
+                  <button @click="removeAttachment(attachment.id)" :title="t('移除', 'Remove')">x</button>
+                </div>
+              </div>
+              <div class="composer-toolbar">
+                <div class="composer-left">
+                  <div class="composer-menu-wrap" @click.stop>
+                    <button class="composer-plus" @click="toggleComposerMenu" :title="t('更多操作', 'More actions')">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                        <path d="M12 5v14"/>
+                        <path d="M5 12h14"/>
+                      </svg>
+                    </button>
+                    <div v-if="composerMenuOpen" class="composer-menu">
+                      <button @click="runComposerAction('image')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                        </svg>
+                        <span>{{ t('添加图片和文件', 'Attach images and files') }}</span>
+                      </button>
+                      <div class="composer-menu-divider"></div>
+                      <button @click="runComposerAction('new')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                          <path d="M12 7v6"/>
+                          <path d="M9 10h6"/>
+                        </svg>
+                        <span>{{ t('新开会话', 'New chat') }}</span>
+                      </button>
+                      <button @click="runComposerAction('fork')" :disabled="loading || isForking || !runnerSessionId">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <rect x="9" y="9" width="10" height="10" rx="2"/>
+                          <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
+                        </svg>
+                        <span>{{ t('复制为新会话', 'Copy to new chat') }}</span>
+                      </button>
+                      <button @click="runComposerAction('clear')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <polyline points="3,6 5,6 21,6"/>
+                          <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
+                        </svg>
+                        <span>{{ t('清空会话', 'Clear chat') }}</span>
+                      </button>
+                      <div class="composer-menu-divider"></div>
+                      <button :class="{ active: settingsStore.settings.useCoT }" @click="runComposerAction('cot')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M21 12a9 9 0 0 1-15.31 6.36"/>
+                          <path d="M3 12A9 9 0 0 1 18.31 5.64"/>
+                          <path d="M6 18H3v3"/>
+                          <path d="M18 6h3V3"/>
+                        </svg>
+                        <span>{{ settingsStore.settings.useCoT ? t('关闭迭代模式', 'Disable iteration') : t('开启迭代模式', 'Enable iteration') }}</span>
+                      </button>
+                      <button :class="{ active: skillsEnabled }" @click="runComposerAction('skills')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                        </svg>
+                        <span>{{ skillsEnabled ? t('关闭技能', 'Disable skills') : t('开启技能', 'Enable skills') }}</span>
+                      </button>
+                    </div>
+                  </div>
+                  <span
+                    :class="{ 'cot-active': settingsStore.settings.useCoT }"
+                    class="cot-status"
+                  >
+                    {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
+                  </span>
+                </div>
+                <button class="btn-send" @click="sendMessage" :disabled="(!inputMessage.trim() && pendingAttachments.length === 0) || loading" :title="t('发送', 'Send')">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="22" y1="2" x2="11" y2="13"/>
                     <polygon points="22,2 15,22 11,13 2,9"/>
                   </svg>
                 </button>
               </div>
-            </div>
-            <div class="input-hints">
-              <span>{{ t('Enter 发送 · Shift+Enter 换行', 'Enter to send · Shift+Enter for new line') }}</span>
-              <span
-                :class="{ 'cot-active': settingsStore.settings.useCoT }"
-                class="cot-status"
-              >
-                {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
-              </span>
             </div>
           </footer>
         </div>
@@ -217,6 +285,10 @@
                 <circle cx="12" cy="12" r="10"/>
                 <path d="M2 12h20"/>
                 <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+              <svg v-if="activeWorkspacePanel === 'runtime'" class="workspace-panel-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M8 15.5 4 19v-4.4A6.6 6.6 0 0 1 10.6 4H13a6.6 6.6 0 0 1 6.4 5"/>
+                <path d="M10 14a5 5 0 0 0 5 5h3.2L21 21.5V19a5 5 0 0 0-3-9h-3a5 5 0 0 0-5 5Z"/>
               </svg>
               <span>{{ workspacePanelTitle }}</span>
             </div>
@@ -286,55 +358,242 @@
               <button class="browser-go" @click="createBrowserTab()">Open browser tab</button>
             </div>
           </section>
+
+          <section v-if="activeWorkspacePanel === 'runtime'" class="runtime-workspace">
+            <div class="workspace-tabs">
+              <button
+                class="workspace-tab"
+                :class="{ active: runtimePanelTab === 'chats' }"
+                @click="switchRuntimePanelTab('chats')"
+              >
+                {{ t('对话管理', 'Chat management') }}
+              </button>
+              <button
+                class="workspace-tab"
+                :class="{ active: runtimePanelTab === 'runtime' }"
+                @click="switchRuntimePanelTab('runtime')"
+              >
+                {{ t('运行事件', 'Runtime events') }}
+              </button>
+            </div>
+
+            <div v-if="runtimePanelTab === 'chats'" class="workspace-chats">
+              <div class="runtime-toolbar">
+                <div class="runtime-summary">
+                  <span class="runtime-summary-value">{{ chatStore.chats.length }}</span>
+                  <span>{{ t('对话', 'Chats') }}</span>
+                </div>
+                <button class="runtime-refresh" @click="chatStore.loadChats()" :title="t('刷新', 'Refresh')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                    <path d="M21 3v6h-6"/>
+                  </svg>
+                </button>
+              </div>
+
+              <div v-if="!chatStore.chats.length" class="runtime-empty">
+                {{ t('暂无对话记录', 'No chat history yet') }}
+              </div>
+              <div v-else class="workspace-chat-list">
+                <article
+                  v-for="chat in chatStore.chats"
+                  :key="chat.id"
+                  class="workspace-chat-item"
+                  :class="{ active: chat.session_id === runnerSessionId }"
+                  @click="openManagedChat(chat)"
+                >
+                  <div class="workspace-chat-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                  </div>
+                  <div class="workspace-chat-info">
+                    <h4>{{ chat.name || t('未命名对话', 'Untitled chat') }}</h4>
+                    <p>{{ formatChatDate(chat.updated_at) }}</p>
+                    <span>{{ chat.session_id }}</span>
+                  </div>
+                  <button
+                    class="workspace-chat-delete"
+                    @click.stop="deleteManagedChat(chat)"
+                    :title="t('删除对话', 'Delete chat')"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="3,6 5,6 21,6"/>
+                      <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
+                    </svg>
+                  </button>
+                </article>
+              </div>
+            </div>
+
+            <template v-else>
+              <div class="runtime-toolbar">
+                <div class="runtime-summary">
+                  <span class="runtime-summary-value">{{ runtimeEvents.length }}</span>
+                  <span>{{ t('事件', 'Events') }}</span>
+                </div>
+                <button class="runtime-refresh" @click="loadRuntimeReplay" :disabled="runtimeLoading" :title="t('刷新', 'Refresh')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                    <path d="M21 3v6h-6"/>
+                  </svg>
+                </button>
+              </div>
+
+              <div class="runtime-meta" v-if="runtimeThread">
+                <div>
+                  <span>{{ t('线程', 'Thread') }}</span>
+                  <strong>{{ runtimeThread.thread_id }}</strong>
+                </div>
+                <div>
+                  <span>{{ t('状态', 'Status') }}</span>
+                  <strong>{{ runtimeThread.status }}</strong>
+                </div>
+                <div>
+                  <span>{{ t('序号', 'Seq') }}</span>
+                  <strong>{{ runtimeThread.latest_event_seq }}</strong>
+                </div>
+              </div>
+
+              <div v-if="runtimeError" class="runtime-empty">{{ runtimeError }}</div>
+              <div v-else-if="runtimeLoading" class="runtime-empty">{{ t('加载中...', 'Loading...') }}</div>
+              <div v-else-if="!runtimeThread" class="runtime-empty">{{ t('当前会话还没有运行事件', 'No runtime events for this session') }}</div>
+
+              <div v-else class="runtime-content">
+                <div class="runtime-turns" v-if="runtimeTurns.length">
+                  <div
+                    v-for="turn in runtimeTurns"
+                    :key="turn.turn_id"
+                    class="runtime-turn"
+                  >
+                    <span class="runtime-turn-status">{{ turn.status }}</span>
+                    <span class="runtime-turn-input">{{ turn.user_input }}</span>
+                  </div>
+                </div>
+
+                <div class="runtime-events">
+                  <article
+                    v-for="event in runtimeEvents"
+                    :key="event.event_id"
+                    class="runtime-event"
+                  >
+                    <div class="runtime-event-head">
+                      <span class="runtime-seq">#{{ event.seq }}</span>
+                      <span class="runtime-event-type">{{ event.event_type }}</span>
+                      <time>{{ formatTime(event.created_at) }}</time>
+                    </div>
+                    <p class="runtime-event-summary">{{ formatRuntimeEventSummary(event) }}</p>
+                    <pre v-if="formatRuntimeEventDetail(event)" class="runtime-event-detail">{{ formatRuntimeEventDetail(event) }}</pre>
+                  </article>
+                </div>
+              </div>
+            </template>
+          </section>
         </aside>
       </div>
       
       <!-- 底部工具栏-->
       <footer v-if="!isWorkspaceOpen" class="chat-footer">
-        <div class="input-area">
-          <!-- 迭代模式切换按钮 -->
-          <button
-            class="cot-toggle-btn"
-            :class="{ active: settingsStore.settings.useCoT }"
-            :title="t('迭代模式', 'Iteration Mode')"
-            @click="settingsStore.toggleCoT"
-          >
-            <svg class="cot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 0 1-15.31 6.36"/>
-              <path d="M3 12A9 9 0 0 1 18.31 5.64"/>
-              <path d="M6 18H3v3"/>
-              <path d="M18 6h3V3"/>
-            </svg>
-          </button>
+        <div
+          class="input-area composer-shell"
+          :class="{ 'drag-over': isComposerDragging }"
+          @dragenter.prevent="onComposerDragEnter"
+          @dragover.prevent="onComposerDragOver"
+          @dragleave.prevent="onComposerDragLeave"
+          @drop.prevent="onComposerDrop"
+        >
           <textarea
             v-model="inputMessage"
+            class="composer-textarea"
             :placeholder="t('输入消息...', 'Type a message...')"
             @keydown.enter.exact.prevent="sendMessage"
+            @paste="onComposerPaste"
             rows="3"
           ></textarea>
-          <div class="input-actions">
-            <button class="btn-clear" @click="clearChat">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="3,6 5,6 21,6"/>
-                <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
-              </svg>
-            </button>
-            <button class="btn-send" @click="sendMessage" :disabled="!inputMessage.trim() || loading" :title="t('发送', 'Send')">
+          <div v-if="pendingAttachments.length" class="pending-attachments">
+            <div v-for="attachment in pendingAttachments" :key="attachment.id" class="attachment-chip">
+              <img v-if="isImageAttachment(attachment)" :src="attachmentPreview(attachment)" :alt="attachment.name" />
+              <span v-else class="attachment-file-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <path d="M14 2v6h6"/>
+                </svg>
+              </span>
+              <span>{{ attachment.name }}</span>
+              <button @click="removeAttachment(attachment.id)" :title="t('移除', 'Remove')">x</button>
+            </div>
+          </div>
+          <div class="composer-toolbar">
+            <div class="composer-left">
+              <div class="composer-menu-wrap" @click.stop>
+                <button class="composer-plus" @click="toggleComposerMenu" :title="t('更多操作', 'More actions')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                    <path d="M12 5v14"/>
+                    <path d="M5 12h14"/>
+                  </svg>
+                </button>
+                <div v-if="composerMenuOpen" class="composer-menu">
+                  <button @click="runComposerAction('image')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                    </svg>
+                    <span>{{ t('添加图片和文件', 'Attach images and files') }}</span>
+                  </button>
+                  <div class="composer-menu-divider"></div>
+                  <button @click="runComposerAction('new')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                      <path d="M12 7v6"/>
+                      <path d="M9 10h6"/>
+                    </svg>
+                    <span>{{ t('新开会话', 'New chat') }}</span>
+                  </button>
+                  <button @click="runComposerAction('fork')" :disabled="loading || isForking || !runnerSessionId">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="9" y="9" width="10" height="10" rx="2"/>
+                      <path d="M5 15V5a2 2 0 0 1 2-2h10"/>
+                    </svg>
+                    <span>{{ t('复制为新会话', 'Copy to new chat') }}</span>
+                  </button>
+                  <button @click="runComposerAction('clear')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="3,6 5,6 21,6"/>
+                      <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
+                    </svg>
+                    <span>{{ t('清空会话', 'Clear chat') }}</span>
+                  </button>
+                  <div class="composer-menu-divider"></div>
+                  <button :class="{ active: settingsStore.settings.useCoT }" @click="runComposerAction('cot')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 12a9 9 0 0 1-15.31 6.36"/>
+                      <path d="M3 12A9 9 0 0 1 18.31 5.64"/>
+                      <path d="M6 18H3v3"/>
+                      <path d="M18 6h3V3"/>
+                    </svg>
+                    <span>{{ settingsStore.settings.useCoT ? t('关闭迭代模式', 'Disable iteration') : t('开启迭代模式', 'Enable iteration') }}</span>
+                  </button>
+                  <button :class="{ active: skillsEnabled }" @click="runComposerAction('skills')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                    </svg>
+                    <span>{{ skillsEnabled ? t('关闭技能', 'Disable skills') : t('开启技能', 'Enable skills') }}</span>
+                  </button>
+                </div>
+              </div>
+              <span
+                :class="{ 'cot-active': settingsStore.settings.useCoT }"
+                class="cot-status"
+              >
+                {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
+              </span>
+            </div>
+            <button class="btn-send" @click="sendMessage" :disabled="(!inputMessage.trim() && pendingAttachments.length === 0) || loading" :title="t('发送', 'Send')">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="22" y1="2" x2="11" y2="13"/>
                 <polygon points="22,2 15,22 11,13 2,9"/>
               </svg>
             </button>
           </div>
-        </div>
-        <div class="input-hints">
-          <span>{{ t('Enter 发送 · Shift+Enter 换行', 'Enter to send · Shift+Enter for new line') }}</span>
-          <span
-            :class="{ 'cot-active': settingsStore.settings.useCoT }"
-            class="cot-status"
-          >
-            {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
-          </span>
         </div>
       </footer>
     </main>
@@ -357,6 +616,14 @@
     
     <!-- 设置闈㈡澘閬僵 -->
     <div class="settings-overlay" v-if="showSettings" @click="closeSettings"></div>
+    <input
+      ref="attachmentInput"
+      class="hidden-input"
+      type="file"
+      accept="image/*,.txt,.md,.markdown,.json,.csv,.tsv,.pdf,.docx,.xlsx,.py,.js,.jsx,.ts,.tsx,.vue,.css,.html,.xml,.yaml,.yml,.toml,.ini,.log,.sql,.java,.kt,.go,.rs,.c,.cpp,.h,.hpp,.cs,.php,.rb,.sh,.ps1"
+      multiple
+      @change="onFilesSelected"
+    />
   </div>
 </template>
 
@@ -369,7 +636,7 @@ import { api } from '@/api'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import { marked } from 'marked'
-import type { Message, ThinkingStep } from '@/types'
+import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
@@ -377,9 +644,11 @@ const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
 
 // 褰撳墠瑙嗗浘
-type WorkspacePanel = '' | 'browser'
+type WorkspacePanel = '' | 'browser' | 'runtime'
+type RuntimePanelTab = 'chats' | 'runtime'
 
 const activeWorkspacePanel = ref<WorkspacePanel>('')
+const runtimePanelTab = ref<RuntimePanelTab>('chats')
 const isWorkspaceOpen = computed(() => activeWorkspacePanel.value !== '')
 const workspaceWidth = ref(560)
 const isResizingWorkspace = ref(false)
@@ -397,6 +666,7 @@ const workspaceLayoutStyle = computed<Record<string, string>>(() => {
 
 const workspacePanelTitle = computed(() => {
   if (activeWorkspacePanel.value === 'browser') return t('浏览器', 'Browser')
+  if (activeWorkspacePanel.value === 'runtime') return t('对话与运行', 'Chats & runtime')
   return t('工作区', 'Workspace')
 })
 
@@ -495,10 +765,21 @@ const selectedModelId = ref('')
 const runnerSessionId = ref('')
 const messages = ref<Message[]>([])
 const inputMessage = ref('')
+const attachmentInput = ref<HTMLInputElement | null>(null)
+const pendingAttachments = ref<ChatAttachment[]>([])
+const composerMenuOpen = ref(false)
+const composerDragDepth = ref(0)
+const isComposerDragging = computed(() => composerDragDepth.value > 0)
 const loading = ref(false)
 const isForking = ref(false)
 const skillsEnabled = ref(true)  // 技能开关状态
 const messagesContainer = ref<HTMLElement | null>(null)
+const runtimeThread = ref<RuntimeThread | null>(null)
+const runtimeTurns = ref<RuntimeTurn[]>([])
+const runtimeEvents = ref<RuntimeEvent[]>([])
+const runtimeLoading = ref(false)
+const runtimeError = ref('')
+let unlistenDesktopFileDrops: (() => void) | null = null
 
 // 缈昏瘧鍑芥暟
 function t(zh: string, en: string): string {
@@ -532,6 +813,16 @@ function formatTime(timestamp?: string): string {
   return date.toLocaleTimeString(settingsStore.settings.language === 'zh-CN' ? 'zh-CN' : 'en-US', {
     hour: '2-digit',
     minute: '2-digit'
+  })
+}
+
+function formatChatDate(timestamp?: string): string {
+  if (!timestamp) return ''
+  return new Date(timestamp).toLocaleString(settingsStore.settings.language === 'zh-CN' ? 'zh-CN' : 'en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
   })
 }
 
@@ -606,6 +897,10 @@ async function onAgentChange() {
     await createOrGetSession()
   }
   loadChatHistory()
+  resetRuntimeReplay()
+  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
+    await loadRuntimeReplay()
+  }
 }
 
 // 鍒涘缓鎴栬幏鍙?runner 瀵硅瘽閫氶亾
@@ -685,6 +980,159 @@ function saveMessages() {
   }
 }
 
+function resetRuntimeReplay() {
+  runtimeThread.value = null
+  runtimeTurns.value = []
+  runtimeEvents.value = []
+  runtimeError.value = ''
+}
+
+async function openRuntimePanel() {
+  activeWorkspacePanel.value = 'runtime'
+  runtimePanelTab.value = 'chats'
+  await chatStore.loadChats()
+}
+
+async function switchRuntimePanelTab(tab: RuntimePanelTab) {
+  runtimePanelTab.value = tab
+  if (tab === 'chats') {
+    await chatStore.loadChats()
+    return
+  }
+  await loadRuntimeReplay()
+}
+
+async function openManagedChat(chat: Chat) {
+  if (loading.value) return
+  if (runnerSessionId.value && messages.value.length > 0) {
+    saveMessages()
+  }
+
+  runnerSessionId.value = chat.session_id
+  if (selectedAgentId.value) {
+    localStorage.setItem(`session_${selectedAgentId.value}`, chat.session_id)
+  }
+  pendingAttachments.value = []
+  inputMessage.value = ''
+  resetRuntimeReplay()
+
+  await chatStore.selectChat(chat.id)
+  await loadChatHistory()
+  if (runtimePanelTab.value === 'runtime') {
+    await loadRuntimeReplay()
+  }
+}
+
+async function deleteManagedChat(chat: Chat) {
+  if (!confirm(t('确定要删除此对话吗？', 'Are you sure you want to delete this chat?'))) return
+
+  await chatStore.deleteChat(chat.id)
+  localStorage.removeItem(`messages_${chat.session_id}`)
+
+  if (runnerSessionId.value === chat.session_id) {
+    messages.value = []
+    pendingAttachments.value = []
+    resetRuntimeReplay()
+    if (selectedAgentId.value) {
+      localStorage.removeItem(`session_${selectedAgentId.value}`)
+      await createOrGetSession()
+      await loadChatHistory()
+    }
+  }
+}
+
+async function loadRuntimeReplay() {
+  if (!runnerSessionId.value) {
+    resetRuntimeReplay()
+    return
+  }
+
+  runtimeLoading.value = true
+  runtimeError.value = ''
+  try {
+    const thread = await api.getRuntimeThreadBySession(runnerSessionId.value)
+    runtimeThread.value = thread
+    const [turns, events] = await Promise.all([
+      api.getRuntimeTurns(thread.thread_id),
+      api.getRuntimeEvents(thread.thread_id, 0),
+    ])
+    runtimeTurns.value = turns
+    runtimeEvents.value = events
+  } catch (error) {
+    resetRuntimeReplay()
+    const message = error instanceof Error ? error.message : String(error)
+    if (!message.includes('404')) {
+      runtimeError.value = message
+    }
+  } finally {
+    runtimeLoading.value = false
+  }
+}
+
+function syncRuntimeEventFromStream(event: AgentEvent) {
+  if (!event.thread_id || !event.seq) return
+
+  if (!runtimeThread.value || runtimeThread.value.thread_id !== event.thread_id) {
+    runtimeThread.value = {
+      thread_id: event.thread_id,
+      session_id: event.session_id || runnerSessionId.value,
+      user_id: 'default',
+      title: '',
+      status: event.status === 'idle' ? 'active' : (event.status || 'active'),
+      latest_event_seq: event.seq,
+      created_at: event.created_at || new Date().toISOString(),
+      updated_at: event.created_at || new Date().toISOString(),
+      metadata: {},
+    }
+    runtimeTurns.value = []
+    runtimeEvents.value = []
+  } else {
+    runtimeThread.value.latest_event_seq = Math.max(runtimeThread.value.latest_event_seq, event.seq)
+    runtimeThread.value.updated_at = event.created_at || new Date().toISOString()
+  }
+
+  const runtimeEvent: RuntimeEvent = {
+    event_id: `live_${event.thread_id}_${event.seq}`,
+    thread_id: event.thread_id,
+    turn_id: event.turn_id,
+    session_id: event.session_id || runnerSessionId.value,
+    seq: event.seq,
+    event_type: event.event,
+    payload: event,
+    created_at: event.created_at || new Date().toISOString(),
+    metadata: { source: 'stream' },
+  }
+
+  const existingIndex = runtimeEvents.value.findIndex(item => item.seq === runtimeEvent.seq)
+  if (existingIndex >= 0) {
+    runtimeEvents.value.splice(existingIndex, 1, runtimeEvent)
+  } else {
+    runtimeEvents.value.push(runtimeEvent)
+    runtimeEvents.value.sort((a, b) => a.seq - b.seq)
+  }
+}
+
+function formatRuntimeEventSummary(event: RuntimeEvent): string {
+  const payload = event.payload as AgentEvent
+  if (payload.error) return payload.error
+  if (payload.tool_name) return payload.tool_name
+  if (payload.content) return payload.content
+  if (payload.status) return payload.status
+  return event.event_type
+}
+
+function formatRuntimeEventDetail(event: RuntimeEvent): string {
+  const payload = event.payload as AgentEvent
+  const detail = payload.arguments ?? payload.result
+  if (detail === undefined || detail === null || detail === '') return ''
+  if (typeof detail === 'string') return detail
+  try {
+    return JSON.stringify(detail, null, 2)
+  } catch {
+    return String(detail)
+  }
+}
+
 async function forkCurrentTask() {
   if (!runnerSessionId.value || isForking.value || !selectedAgentId.value) return
 
@@ -698,6 +1146,10 @@ async function forkCurrentTask() {
     localStorage.setItem(`session_${selectedAgentId.value}`, nextRunnerSessionId)
     localStorage.setItem(`messages_${nextRunnerSessionId}`, JSON.stringify(currentMessages))
     saveMessages()
+    resetRuntimeReplay()
+    if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
+      await chatStore.loadChats()
+    }
 
     console.log('[Task Fork] Created new task runner channel:', nextRunnerSessionId, 'copied messages:', forked.copied_message_count)
   } catch (error) {
@@ -725,9 +1177,163 @@ function generateId(): string {
   return `step_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 }
 
+function openAttachmentPicker() {
+  attachmentInput.value?.click()
+}
+
+function toggleComposerMenu() {
+  composerMenuOpen.value = !composerMenuOpen.value
+}
+
+function closeComposerMenu() {
+  composerMenuOpen.value = false
+}
+
+async function runComposerAction(action: 'image' | 'clear' | 'new' | 'fork' | 'cot' | 'skills') {
+  closeComposerMenu()
+  if (action === 'image') {
+    openAttachmentPicker()
+    return
+  }
+  if (action === 'clear') {
+    clearChat()
+    return
+  }
+  if (action === 'new') {
+    await startNewChat()
+    return
+  }
+  if (action === 'fork') {
+    await forkCurrentTask()
+    return
+  }
+  if (action === 'skills') {
+    await toggleSkills()
+    return
+  }
+  settingsStore.toggleCoT()
+}
+
+async function startNewChat() {
+  if (!selectedAgentId.value) return
+  if (runnerSessionId.value && messages.value.length > 0) {
+    saveMessages()
+  }
+  runnerSessionId.value = `session_agent_${selectedAgentId.value}_${Date.now()}`
+  localStorage.setItem(`session_${selectedAgentId.value}`, runnerSessionId.value)
+  messages.value = []
+  pendingAttachments.value = []
+  inputMessage.value = ''
+  resetRuntimeReplay()
+  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
+    await loadRuntimeReplay()
+  } else if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
+    await chatStore.loadChats()
+  }
+  scrollToBottom()
+}
+
+async function onFilesSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  await addFiles(Array.from(input.files || []))
+  input.value = ''
+}
+
+async function onComposerPaste(event: ClipboardEvent) {
+  const imageFiles = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/'))
+  if (!imageFiles.length) return
+  event.preventDefault()
+  await addFiles(imageFiles)
+}
+
+function hasDraggedFiles(event: DragEvent) {
+  return Array.from(event.dataTransfer?.types || []).includes('Files')
+}
+
+function onComposerDragEnter(event: DragEvent) {
+  if (!hasDraggedFiles(event)) return
+  composerDragDepth.value += 1
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onComposerDragOver(event: DragEvent) {
+  if (!hasDraggedFiles(event)) return
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onComposerDragLeave(event: DragEvent) {
+  if (!hasDraggedFiles(event)) return
+  composerDragDepth.value = Math.max(0, composerDragDepth.value - 1)
+}
+
+async function onComposerDrop(event: DragEvent) {
+  composerDragDepth.value = 0
+  const files = Array.from(event.dataTransfer?.files || [])
+  if (!files.length) return
+  await addFiles(files)
+}
+
+async function addDroppedFilePaths(paths: string[]) {
+  if (!paths.length) return
+  try {
+    const result = await api.createLocalAttachments(paths)
+    pendingAttachments.value.push(...(result.attachments || []))
+    if (result.rejected?.length) {
+      const first = result.rejected[0]
+      alert(t(`部分文件未添加：${first.reason}`, `Some files were not added: ${first.reason}`))
+    }
+  } catch (error) {
+    console.error('Failed to add dropped files:', error)
+    alert(t('拖拽文件添加失败，请重试。', 'Failed to add dropped files. Please try again.'))
+  }
+}
+
+async function addFiles(files: File[]) {
+  const maxFileSize = 10 * 1024 * 1024
+  const acceptedFiles = files.filter((file) => {
+    if (file.size <= maxFileSize) return true
+    alert(t(`文件 ${file.name} 超过 10MB，暂不支持添加。`, `File ${file.name} is larger than 10MB.`))
+    return false
+  })
+  const attachments = await Promise.all(acceptedFiles.map(fileToAttachment))
+  pendingAttachments.value.push(...attachments)
+}
+
+function fileToAttachment(file: File): Promise<ChatAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '')
+      const data = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
+      resolve({
+        id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        name: file.name,
+        mime_type: file.type || 'image/png',
+        data,
+        size: file.size,
+      })
+    }
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
+
+function removeAttachment(id: string) {
+  pendingAttachments.value = pendingAttachments.value.filter((attachment) => attachment.id !== id)
+}
+
+function isImageAttachment(attachment: ChatAttachment) {
+  return attachment.mime_type.startsWith('image/')
+}
+
+function attachmentPreview(attachment: ChatAttachment) {
+  if (attachment.data.startsWith('data:')) return attachment.data
+  return `data:${attachment.mime_type};base64,${attachment.data}`
+}
+
 // 鍙戦€佹秷鎭?
 async function sendMessage() {
-  if (!inputMessage.value.trim() || loading.value || !selectedAgentId.value) return
+  if ((!inputMessage.value.trim() && pendingAttachments.value.length === 0) || loading.value || !selectedAgentId.value) return
   
   // Ensure the runner channel exists before sending.
   if (!runnerSessionId.value) {
@@ -735,11 +1341,14 @@ async function sendMessage() {
   }
   
   const userMessage = inputMessage.value.trim()
+  const attachments = [...pendingAttachments.value]
   inputMessage.value = ''
+  pendingAttachments.value = []
   
   messages.value.push({
     role: 'user',
-    content: userMessage,
+    content: userMessage || t('[图片]', '[image]'),
+    attachments,
     timestamp: new Date().toISOString()
   })
   
@@ -768,6 +1377,7 @@ async function sendMessage() {
     // 鐩戝惉鍚庣鍙戦€佺殑浜嬩欢锛歵hinking, tool_call, tool_result, complete, error
     await api.chat(runnerSessionId.value, userMessage, (event) => {
       console.log('[Iteration Debug] Received event:', event)
+      syncRuntimeEventFromStream(event)
 
       if (event.event === 'message' && event.content) {
         assistantContent = event.content
@@ -862,7 +1472,11 @@ async function sendMessage() {
           assistantMessage.thinking.isThinking = false
         }
       }
-    })
+    }, attachments)
+
+    if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
+      await loadRuntimeReplay()
+    }
     
     assistantMessage.isLoading = false
     // 更新 assistant 消息内容，加入本地打字机动画
@@ -886,6 +1500,9 @@ async function sendMessage() {
     loading.value = false
     // 淇濆瓨娑堟伅鍒?localStorage
     saveMessages()
+    if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
+      await chatStore.loadChats()
+    }
   }
 }
 
@@ -1119,9 +1736,32 @@ async function listenForDesktopNavigation() {
   }
 }
 
+async function listenForDesktopFileDrops() {
+  try {
+    const tauriWebview = await import('@tauri-apps/api/webview')
+    const webview = tauriWebview.getCurrentWebview()
+    unlistenDesktopFileDrops = await webview.onDragDropEvent((event: any) => {
+      if (event.payload?.type === 'over') {
+        composerDragDepth.value = 1
+        return
+      }
+      if (event.payload?.type === 'drop') {
+        composerDragDepth.value = 0
+        void addDroppedFilePaths(event.payload.paths || [])
+        return
+      }
+      composerDragDepth.value = 0
+    })
+  } catch (error) {
+    console.debug('Tauri file drop bridge is not available in web mode:', error)
+  }
+}
+
 // 鍒濆鍖?
 onMounted(async () => {
+  window.addEventListener('click', closeComposerMenu)
   await listenForDesktopNavigation()
+  await listenForDesktopFileDrops()
 
   await agentStore.loadAgents()
   await agentStore.loadModelConfigs()
@@ -1158,6 +1798,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('click', closeComposerMenu)
+  unlistenDesktopFileDrops?.()
+  unlistenDesktopFileDrops = null
   stopWorkspaceResize()
 })
 </script>
@@ -1567,21 +2210,6 @@ onUnmounted(() => {
   height: 20px;
 }
 
-.skill-toggle {
-  position: relative;
-}
-
-.skill-toggle.active {
-  background: var(--glass-bg-strong);
-  border-color: #10b981;
-  color: #10b981;
-  box-shadow: 0 10px 24px rgba(16, 185, 129, 0.12);
-}
-
-.skill-toggle .toggle-label {
-  display: none;
-}
-
 /* 聊天消息区域 */
 .chat-messages {
   flex: 1;
@@ -1983,7 +2611,7 @@ onUnmounted(() => {
 
 /* 搴曢儴杈撳叆鍖哄煙 */
 .chat-footer {
-  padding: 16px 24px 14px;
+  padding: 14px 24px 12px;
   background: var(--footer-bg);
   border-top: 1px solid var(--border-color);
   backdrop-filter: blur(22px) saturate(170%);
@@ -1991,137 +2619,262 @@ onUnmounted(() => {
   box-shadow: inset 0 1px 0 var(--glass-border);
 }
 
-.input-area {
+.composer-shell {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 44px;
-  gap: 12px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  position: relative;
+  max-width: 1280px;
+  margin: 0 auto;
 }
 
-.input-area textarea {
-  flex: 1;
+.composer-shell.drag-over .composer-textarea {
+  border-color: rgba(47, 110, 244, 0.58);
+  background: color-mix(in srgb, var(--glass-bg-strong) 88%, rgba(47, 110, 244, 0.16));
+  box-shadow: 0 18px 55px rgba(47, 110, 244, 0.16), 0 0 0 3px rgba(47, 110, 244, 0.14);
+}
+
+.hidden-input {
+  display: none;
+}
+
+.composer-textarea {
   width: 100%;
-  height: 96px;
-  min-height: 96px;
-  padding: 14px 16px;
+  height: 92px;
+  min-height: 92px;
+  padding: 16px 18px;
   background: var(--glass-bg-strong);
   border: 1px solid var(--border-color);
-  border-radius: 18px;
+  border-radius: 20px;
   color: var(--text-primary);
   font-size: 14px;
   line-height: 1.5;
   resize: none;
   box-sizing: border-box;
-  box-shadow: var(--glass-shadow);
+  box-shadow: 0 18px 55px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.72);
   backdrop-filter: blur(18px) saturate(160%);
   -webkit-backdrop-filter: blur(18px) saturate(160%);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.input-area textarea:focus {
+.composer-textarea:focus {
   outline: none;
   border-color: var(--primary-color);
-  box-shadow: var(--glass-shadow), 0 0 0 3px rgba(47, 110, 244, 0.12);
+  box-shadow: 0 18px 55px rgba(15, 23, 42, 0.09), 0 0 0 3px rgba(47, 110, 244, 0.12);
 }
 
-.input-area textarea::placeholder {
+.composer-textarea::placeholder {
   color: var(--text-muted);
 }
 
-/* CoT 鍒囨崲鎸夐挳鏍峰紡 */
-.cot-toggle-btn {
-  width: 44px;
-  height: 44px;
-  padding: 0;
-  background: var(--glass-bg-strong);
-  border: 1px solid var(--border-color);
-  border-radius: 16px;
-  cursor: pointer;
+.pending-attachments {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary);
-  box-shadow: var(--soft-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.62);
-  transition: transform 0.18s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
-  flex-shrink: 0;
-}
-
-.cot-toggle-btn:hover {
-  background: var(--hover-bg);
-  transform: translateY(-1px);
-  color: var(--text-primary);
-}
-
-.cot-toggle-btn.active {
-  background: var(--primary-color);
-  border-color: var(--primary-color);
-  box-shadow: 0 14px 30px rgba(47, 110, 244, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.22);
-}
-
-.cot-toggle-btn.active .cot-icon {
-  color: white;
-}
-
-.cot-icon {
-  width: 18px;
-  height: 18px;
-}
-
-/* 杈撳叆鎻愮ず */
-.input-hints {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-top: 8px;
-  padding: 0 4px;
-  font-size: 11px;
-  color: var(--text-secondary);
   flex-wrap: wrap;
+  gap: 8px;
 }
 
-.cot-status {
-  transition: color 0.2s ease;
-}
-
-.cot-status.cot-active {
-  color: var(--primary-color);
-  font-weight: 500;
-}
-
-.input-actions {
+.attachment-chip {
   display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  align-self: center;
-  height: 96px;
-  gap: 0;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--glass-bg-strong);
 }
 
-.btn-clear {
+.attachment-chip img {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.attachment-file-icon {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(47, 110, 244, 0.1);
+  color: var(--primary-color);
+}
+
+.attachment-file-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.attachment-chip span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-attachments img {
+  max-width: min(280px, 100%);
+  max-height: 220px;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.message-file-attachment {
+  max-width: min(320px, 100%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--glass-bg-strong);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.message-file-attachment span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+}
+
+.composer-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 12px;
+}
+
+.composer-menu-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.composer-plus {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  background: var(--glass-bg-strong);
+  width: 40px;
+  height: 40px;
+  padding: 0;
   border: 1px solid var(--border-color);
-  border-radius: 16px;
+  border-radius: 14px;
+  background: var(--glass-bg-strong);
   color: var(--text-secondary);
   cursor: pointer;
   box-shadow: var(--soft-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.62);
   transition: transform 0.18s ease, background 0.2s ease, color 0.2s ease;
 }
 
-.btn-clear:hover {
+.composer-plus:hover {
   background: var(--hover-bg);
   color: var(--text-primary);
   transform: translateY(-1px);
 }
 
-.btn-clear svg {
+.composer-plus svg,
+.composer-menu svg,
+.btn-send svg {
   width: 18px;
   height: 18px;
+}
+
+.composer-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 190px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--glass-bg-strong);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(18px) saturate(170%);
+  -webkit-backdrop-filter: blur(18px) saturate(170%);
+}
+
+.composer-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.composer-menu button:hover,
+.composer-menu button.active {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.composer-menu button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-menu button:disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.composer-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-color);
+}
+
+.cot-status {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.2s ease;
+}
+
+.cot-status.cot-active {
+  color: var(--primary-color);
+  font-weight: 500;
 }
 
 .btn-send {
@@ -2438,6 +3191,370 @@ onUnmounted(() => {
 .workspace-panel .browser-empty {
   flex: 1;
   min-height: 0;
+}
+
+.runtime-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.22);
+  overflow: hidden;
+}
+
+.workspace-tabs {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--glass-bg);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.workspace-tab {
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.workspace-tab:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.workspace-tab.active {
+  border-color: rgba(47, 110, 244, 0.24);
+  background: var(--glass-bg-strong);
+  color: var(--primary-color);
+  box-shadow: 0 8px 18px rgba(17, 24, 39, 0.06);
+}
+
+.workspace-chats {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-chat-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.workspace-chat-item {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--glass-bg-strong);
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.05);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.workspace-chat-item:hover,
+.workspace-chat-item.active {
+  border-color: rgba(47, 110, 244, 0.28);
+  background: var(--glass-bg-strong);
+  transform: translateY(-1px);
+}
+
+.workspace-chat-item.active {
+  box-shadow: inset 3px 0 0 var(--primary-color), 0 10px 24px rgba(47, 110, 244, 0.08);
+}
+
+.workspace-chat-icon {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+  background: rgba(47, 110, 244, 0.1);
+  color: var(--primary-color);
+}
+
+.workspace-chat-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.workspace-chat-info {
+  min-width: 0;
+}
+
+.workspace-chat-info h4 {
+  margin: 0 0 3px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-chat-info p,
+.workspace-chat-info span {
+  display: block;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-chat-info span {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+
+.workspace-chat-delete {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.workspace-chat-delete:hover {
+  border-color: rgba(239, 68, 68, 0.24);
+  background: rgba(239, 68, 68, 0.08);
+  color: #dc2626;
+}
+
+.workspace-chat-delete svg {
+  width: 16px;
+  height: 16px;
+}
+
+.runtime-toolbar {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.18);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.runtime-summary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.runtime-summary-value {
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.runtime-refresh {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.runtime-refresh:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.runtime-refresh svg {
+  width: 15px;
+  height: 15px;
+}
+
+.runtime-meta {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.runtime-meta div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.runtime-meta strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-empty {
+  margin: 16px;
+  padding: 18px;
+  border: 1px dashed var(--border-color);
+  border-radius: 14px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.42);
+  font-size: 13px;
+  text-align: center;
+}
+
+.runtime-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.runtime-turns {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+}
+
+.runtime-turn {
+  min-width: 180px;
+  max-width: 260px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.runtime-turn-status {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(47, 110, 244, 0.12);
+  color: #245bd2;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.runtime-turn-input {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-events {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.runtime-event {
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.66);
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.06);
+  overflow: hidden;
+}
+
+.runtime-event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.runtime-event-head time {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.runtime-seq {
+  color: #245bd2;
+  font-weight: 750;
+}
+
+.runtime-event-type {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-event-summary {
+  margin: 0;
+  padding: 10px;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.runtime-event-detail {
+  max-height: 180px;
+  margin: 0 10px 10px;
+  padding: 10px;
+  overflow: auto;
+  border-radius: 10px;
+  background: rgba(17, 24, 39, 0.06);
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 :global(body.workspace-resizing) {

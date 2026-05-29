@@ -469,7 +469,7 @@ def print_banner():
     """Print welcome banner with proper alignment"""
     BOX_WIDTH = 58
     banner_text = (
-        f"{Colors.BOLD}🤖 Smart Agent Seal - Multi-turn Interactive Session{Colors.RESET}"
+        f"{Colors.BOLD}🤖 OpenAgentSeal - Multi-turn Interactive Session{Colors.RESET}"
     )
     banner_width = calculate_display_width(banner_text)
 
@@ -2339,6 +2339,10 @@ async def run_unified(
 
 def main():
     """Main entry point for CLI"""
+    from open_agent.utils.stdio import configure_utf8_stdio
+
+    configure_utf8_stdio()
+
     # Enable ANSI escape sequences on Windows
     enable_windows_ansi()
 

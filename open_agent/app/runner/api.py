@@ -12,6 +12,10 @@ Provides endpoints for:
 
 import json
 import logging
+import base64
+import mimetypes
+import uuid
+from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -20,6 +24,7 @@ from pydantic import BaseModel
 from open_agent.app.runner.models import ChatSpec, ChatHistory, AgentRequest, AgentEvent
 from open_agent.app.runner.manager import get_chat_manager
 from open_agent.app.runner.runner import get_runner
+from open_agent.app.runner.file_parser import MAX_FILE_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +54,10 @@ class RunRequest(BaseModel):
     user_id: str = "default"
     messages: List[dict] = []
     stream: bool = True
+
+
+class LocalAttachmentRequest(BaseModel):
+    paths: List[str]
 
 
 def _get_control_plane():
@@ -170,6 +179,41 @@ async def get_chat_history(chat_id: str) -> dict:
         "total": history.total,
         "messages": [m.to_api_format() for m in history.messages],
     }
+
+
+@router.post("/files/local-attachments")
+async def create_local_attachments(request: LocalAttachmentRequest) -> dict:
+    """Read local files dropped into the Tauri webview and return chat attachments."""
+    attachments = []
+    rejected = []
+
+    for raw_path in request.paths[:20]:
+        path = Path(raw_path)
+        try:
+            if not path.exists() or not path.is_file():
+                rejected.append({"path": raw_path, "reason": "not a file"})
+                continue
+
+            size = path.stat().st_size
+            if size > MAX_FILE_BYTES:
+                rejected.append({"path": raw_path, "reason": "file larger than 10MB"})
+                continue
+
+            data = path.read_bytes()
+            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            attachments.append(
+                {
+                    "id": f"att_{uuid.uuid4().hex[:12]}",
+                    "name": path.name,
+                    "mime_type": mime_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                    "size": size,
+                }
+            )
+        except Exception as exc:
+            rejected.append({"path": raw_path, "reason": str(exc)})
+
+    return {"attachments": attachments, "rejected": rejected}
 
 
 @router.post("/chats/fork")

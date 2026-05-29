@@ -9,7 +9,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Optional
+from typing import Any, Optional
 
 import tiktoken
 
@@ -129,7 +129,7 @@ class Agent:
         elif not enabled and self._log_memory_worker is not None:
             self._log_memory_worker = None
 
-    def add_user_message(self, content: str):
+    def add_user_message(self, content: str | list[dict[str, Any]]):
         """Add a user message to history."""
         self.messages.append(Message(role="user", content=content))
 

@@ -16,6 +16,7 @@ export interface Chat {
 export interface Message {
   role: 'user' | 'assistant' | 'system'
   content: string
+  attachments?: ChatAttachment[]
   timestamp?: string
   userQuery?: string  // 用户输入的查询摘要
   isLoading?: boolean
@@ -31,6 +32,14 @@ export interface ChatHistory {
   messages: Message[]
 }
 
+export interface ChatAttachment {
+  id: string
+  name: string
+  mime_type: string
+  data: string
+  size?: number
+}
+
 export interface ForkChatResponse {
   chat: Chat
   source_session_id: string
@@ -40,6 +49,10 @@ export interface ForkChatResponse {
 export interface AgentEvent {
   event: string
   session_id?: string
+  thread_id?: string
+  turn_id?: string
+  seq?: number
+  created_at?: string
   status?: string
   content?: string
   step?: number
@@ -59,6 +72,43 @@ export interface RunRequest {
   user_id?: string
   messages: Message[]
   stream?: boolean
+}
+
+export interface RuntimeThread {
+  thread_id: string
+  session_id: string
+  user_id: string
+  title: string
+  status: string
+  latest_event_seq: number
+  created_at: string
+  updated_at: string
+  metadata?: Record<string, any>
+}
+
+export interface RuntimeTurn {
+  turn_id: string
+  thread_id: string
+  session_id: string
+  user_input: string
+  status: string
+  started_at: string
+  completed_at?: string
+  result?: any
+  error?: string
+  metadata?: Record<string, any>
+}
+
+export interface RuntimeEvent {
+  event_id: string
+  thread_id: string
+  turn_id?: string
+  session_id: string
+  seq: number
+  event_type: string
+  payload: AgentEvent | Record<string, any>
+  created_at: string
+  metadata?: Record<string, any>
 }
 
 // 大模型提供商
@@ -189,6 +239,14 @@ export interface AppSettings {
   autoSave: boolean
   streamResponse: boolean
   useCoT: boolean
+}
+
+export interface SmartRoutingConfig {
+  enabled: boolean
+  text_model_id: string
+  vision_model_id: string
+  audio_model_id: string
+  fallback_model_id: string
 }
 
 // 思考步骤

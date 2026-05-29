@@ -77,6 +77,20 @@
         
         <div 
           class="menu-item" 
+          :class="{ active: currentTab === 'smart-routing' }"
+          @click="switchTab('smart-routing')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 7h7a4 4 0 0 1 4 4v6"/>
+            <path d="M4 17h7a4 4 0 0 0 4-4V7"/>
+            <path d="M18 4l3 3-3 3"/>
+            <path d="M18 14l3 3-3 3"/>
+          </svg>
+          <span>{{ t('智能路由', 'Smart Routing') }}</span>
+        </div>
+        
+        <div 
+          class="menu-item" 
           :class="{ active: currentTab === 'agents' }"
           @click="switchTab('agents')"
         >
@@ -87,18 +101,6 @@
             <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
           </svg>
           <span>{{ t('智能体', 'Agents') }}</span>
-        </div>
-        
-        <div 
-          class="menu-item" 
-          :class="{ active: currentTab === 'chats' }"
-          @click="switchTab('chats')"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <polyline points="12 6 12 12 16 14"/>
-          </svg>
-          <span>{{ t('对话', 'Chats') }}</span>
         </div>
         
         <div 
@@ -197,12 +199,12 @@
         
         <!-- 模型设置 -->
         <ModelsSettings v-else-if="currentTab === 'models'" />
+
+        <!-- 智能路由 -->
+        <SmartRoutingSettings v-else-if="currentTab === 'smart-routing'" />
         
         <!-- 智能体设置 -->
         <AgentsSettings v-else-if="currentTab === 'agents'" />
-        
-        <!-- 对话 -->
-        <ChatsSettings v-else-if="currentTab === 'chats'" />
         
         <!-- 技能 -->
         <SkillsSettings v-else-if="currentTab === 'skills'" />
@@ -233,8 +235,8 @@ import DashboardSettings from '@/components/settings/DashboardSettings.vue'
 import WorkspaceSettings from '@/components/settings/WorkspaceSettings.vue'
 import UserSettings from '@/components/settings/UserSettings.vue'
 import ModelsSettings from '@/components/settings/ModelsSettings.vue'
+import SmartRoutingSettings from '@/components/settings/SmartRoutingSettings.vue'
 import AgentsSettings from '@/components/settings/AgentsSettings.vue'
-import ChatsSettings from '@/components/settings/ChatsSettings.vue'
 import SkillsSettings from '@/components/settings/SkillsSettings.vue'
 import MCPSettings from '@/components/settings/MCPSettings.vue'
 import LogsSettings from '@/components/settings/LogsSettings.vue'

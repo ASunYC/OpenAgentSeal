@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse } from '@/types'
+import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment } from '@/types'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
 const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -118,6 +118,38 @@ export async function cancelRunnerChat(runnerSessionId: string): Promise<boolean
     method: 'POST',
   })
   return result.success
+}
+
+export const runtimeApi = {
+  async listThreads(userId?: string): Promise<RuntimeThread[]> {
+    const query = userId ? `?user_id=${encodeURIComponent(userId)}` : ''
+    const result = await request<{ threads: RuntimeThread[] }>(`/runtime/threads${query}`)
+    return result.threads
+  },
+
+  async getThreadBySession(runnerSessionId: string): Promise<RuntimeThread> {
+    return request<RuntimeThread>(`/runtime/threads/session/${encodeURIComponent(runnerSessionId)}`)
+  },
+
+  async getThread(threadId: string): Promise<RuntimeThread> {
+    return request<RuntimeThread>(`/runtime/threads/${encodeURIComponent(threadId)}`)
+  },
+
+  async listTurns(threadId: string): Promise<RuntimeTurn[]> {
+    const result = await request<{ turns: RuntimeTurn[] }>(`/runtime/threads/${encodeURIComponent(threadId)}/turns`)
+    return result.turns
+  },
+
+  async listEvents(threadId: string, sinceSeq = 0, limit = 1000): Promise<RuntimeEvent[]> {
+    const params = new URLSearchParams({
+      since_seq: String(sinceSeq),
+      limit: String(limit),
+    })
+    const result = await request<{ events: RuntimeEvent[] }>(
+      `/runtime/threads/${encodeURIComponent(threadId)}/events?${params.toString()}`,
+    )
+    return result.events
+  },
 }
 
 // Agent API
@@ -243,6 +275,19 @@ export const settingsApi = {
   },
 }
 
+export const smartRoutingApi = {
+  async get(): Promise<SmartRoutingConfig> {
+    return request<SmartRoutingConfig>('/smart-routing')
+  },
+
+  async save(config: SmartRoutingConfig): Promise<ApiResponse<SmartRoutingConfig>> {
+    return request<ApiResponse<SmartRoutingConfig>>('/smart-routing', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  },
+}
+
 export interface MCPServerConfig {
   name: string
   original_name?: string
@@ -326,9 +371,10 @@ export const dashboardApi = {
 export async function chatWithAgent(
   agentId: string,
   message: string,
-  onEvent: (event: AgentEvent) => void
+  onEvent: (event: AgentEvent) => void,
+  attachments: ChatAttachment[] = []
 ): Promise<void> {
-  const messages: Message[] = [{ role: 'user' as const, content: message }]
+  const messages: Message[] = [{ role: 'user' as const, content: message, attachments }]
   
   for await (const event of runAgentStream(agentId, messages)) {
     onEvent(event)
@@ -351,6 +397,13 @@ export const fileApi = {
       throw new Error(`Upload failed: ${response.status}`)
     }
     return response.json()
+  },
+
+  async createLocalAttachments(paths: string[]): Promise<{ attachments: ChatAttachment[]; rejected: Array<{ path: string; reason: string }> }> {
+    return request<{ attachments: ChatAttachment[]; rejected: Array<{ path: string; reason: string }> }>('/files/local-attachments', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    })
   }
 }
 
@@ -389,6 +442,8 @@ export const api = {
   saveSettings: settingsApi.save,
   getWorkDirectory: settingsApi.getWorkDirectory,
   setWorkDirectory: settingsApi.setWorkDirectory,
+  getSmartRouting: smartRoutingApi.get,
+  saveSmartRouting: smartRoutingApi.save,
 
   // MCP
   getMcpConfig: mcpApi.getConfig,
@@ -397,6 +452,13 @@ export const api = {
   // Logs / Tasks
   getLogs: logsApi.list,
   getTasks: tasksApi.list,
+
+  // Runtime event replay
+  getRuntimeThreads: runtimeApi.listThreads,
+  getRuntimeThreadBySession: runtimeApi.getThreadBySession,
+  getRuntimeThread: runtimeApi.getThread,
+  getRuntimeTurns: runtimeApi.listTurns,
+  getRuntimeEvents: runtimeApi.listEvents,
 
   // Version
   getVersion: versionApi.get,
@@ -409,4 +471,5 @@ export const api = {
 
   // File Upload
   uploadFile: fileApi.upload,
+  createLocalAttachments: fileApi.createLocalAttachments,
 }

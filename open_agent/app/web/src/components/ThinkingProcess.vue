@@ -146,40 +146,64 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 
 <style scoped>
 .thinking-process {
-  background: rgba(59, 130, 246, 0.1);
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  border-radius: 8px;
-  margin: 8px 0;
+  --iteration-accent: var(--primary-color);
+  --iteration-accent-soft: color-mix(in srgb, var(--primary-color) 12%, transparent);
+  --iteration-accent-border: color-mix(in srgb, var(--primary-color) 28%, var(--border-color));
+  --iteration-surface: var(--glass-bg);
+  --iteration-surface-strong: var(--glass-bg-strong);
+  --iteration-step-surface: color-mix(in srgb, var(--glass-bg-strong) 88%, var(--bg-secondary));
+  --iteration-output-bg: color-mix(in srgb, var(--bg-tertiary) 58%, transparent);
+
+  background: var(--iteration-surface);
+  border: 1px solid var(--iteration-accent-border);
+  border-radius: 14px;
+  margin: 8px 0 10px;
   overflow: hidden;
+  color: var(--text-primary);
+  box-shadow: var(--soft-shadow), inset 0 1px 0 var(--glass-border);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
 }
 
 .thinking-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: rgba(59, 130, 246, 0.2);
+  padding: 9px 12px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--iteration-accent) 10%, transparent),
+    color-mix(in srgb, var(--iteration-accent) 5%, transparent)
+  );
+  border-bottom: 1px solid color-mix(in srgb, var(--iteration-accent) 18%, transparent);
   cursor: pointer;
   user-select: none;
-  transition: background 0.2s ease;
+  transition: background 0.2s ease, color 0.2s ease;
 }
 
 .thinking-header:hover {
-  background: rgba(59, 130, 246, 0.3);
+  background: color-mix(in srgb, var(--iteration-accent) 12%, transparent);
 }
 
 .thinking-icon {
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 8px;
+  background: var(--iteration-accent-soft);
 }
 
 .thinking-title {
   font-size: 12px;
   font-weight: 600;
-  color: #60a5fa;
+  color: var(--iteration-accent);
 }
 
 .query-summary {
-  color: #1e40af;
+  color: var(--iteration-accent);
   font-weight: 500;
 }
 
@@ -192,16 +216,17 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 
 .thinking-count {
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--text-secondary);
   font-weight: 500;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 2px 6px;
-  border-radius: 4px;
+  background: color-mix(in srgb, var(--iteration-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--iteration-accent) 16%, transparent);
+  padding: 2px 7px;
+  border-radius: 999px;
 }
 
 .thinking-status {
   font-size: 11px;
-  color: #60a5fa;
+  color: var(--iteration-accent);
   animation: pulse 1.5s infinite;
 }
 
@@ -216,7 +241,7 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 
 .thinking-toggle {
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--text-muted);
   margin-left: auto;
 }
 
@@ -232,23 +257,24 @@ const getStepTitle = (type: ThinkingStep['type']) => {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 10px;
-  background: rgba(59, 130, 246, 0.15);
-  border-radius: 6px;
+  padding: 9px 10px;
+  background: var(--iteration-accent-soft);
+  border-radius: 10px;
   margin-bottom: 12px;
-  border-left: 3px solid #3b82f6;
+  border: 1px solid color-mix(in srgb, var(--iteration-accent) 14%, transparent);
+  border-left: 3px solid var(--iteration-accent);
 }
 
 .query-label {
   font-size: 11px;
   font-weight: 600;
-  color: #60a5fa;
+  color: var(--iteration-accent);
   flex-shrink: 0;
 }
 
 .query-text {
   font-size: 12px;
-  color: #e5e7eb;
+  color: var(--text-primary);
   line-height: 1.5;
   word-break: break-word;
 }
@@ -267,7 +293,7 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 .thinking-text {
   font-size: 13px;
   line-height: 1.6;
-  color: #d1d5db;
+  color: var(--text-secondary);
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
   white-space: pre-wrap;
   word-wrap: break-word;
@@ -281,28 +307,30 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 }
 
 .thinking-step {
-  background: rgba(31, 41, 55, 0.8);
-  border-radius: 6px;
+  background: var(--iteration-step-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
   padding: 10px 12px;
-  border-left: 3px solid #3b82f6;
+  border-left: 3px solid var(--iteration-accent);
+  box-shadow: inset 0 1px 0 var(--glass-border);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .thinking-step:hover {
   transform: translateX(2px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--soft-shadow), inset 0 1px 0 var(--glass-border);
 }
 
 .thinking-step.step-tool_call {
-  border-left-color: #f59e0b;
+  border-left-color: var(--warning-color);
 }
 
 .thinking-step.step-tool_result {
-  border-left-color: #10b981;
+  border-left-color: var(--success-color);
 }
 
 .thinking-step.step-observation {
-  border-left-color: #8b5cf6;
+  border-left-color: color-mix(in srgb, var(--primary-color) 68%, var(--text-secondary));
 }
 
 .step-header {
@@ -316,7 +344,7 @@ const getStepTitle = (type: ThinkingStep['type']) => {
   font-size: 10px;
   font-weight: 700;
   color: #fff;
-  background: #3b82f6;
+  background: var(--iteration-accent);
   width: 18px;
   height: 18px;
   border-radius: 50%;
@@ -327,15 +355,15 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 }
 
 .thinking-step.step-tool_call .step-number {
-  background: #f59e0b;
+  background: var(--warning-color);
 }
 
 .thinking-step.step-tool_result .step-number {
-  background: #10b981;
+  background: var(--success-color);
 }
 
 .thinking-step.step-observation .step-number {
-  background: #8b5cf6;
+  background: color-mix(in srgb, var(--primary-color) 68%, var(--text-secondary));
 }
 
 .step-icon {
@@ -345,23 +373,24 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 .step-title {
   font-size: 11px;
   font-weight: 600;
-  color: #9ca3af;
+  color: var(--text-secondary);
   text-transform: uppercase;
 }
 
 .step-tool-name {
   font-size: 11px;
-  color: #60a5fa;
-  background: rgba(59, 130, 246, 0.2);
-  padding: 2px 6px;
-  border-radius: 4px;
+  color: var(--iteration-accent);
+  background: var(--iteration-accent-soft);
+  border: 1px solid color-mix(in srgb, var(--iteration-accent) 14%, transparent);
+  padding: 2px 7px;
+  border-radius: 999px;
   margin-left: auto;
 }
 
 .step-content {
   font-size: 13px;
   line-height: 1.5;
-  color: #e5e7eb;
+  color: var(--text-primary);
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
   white-space: pre-wrap;
   word-wrap: break-word;
@@ -370,22 +399,23 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 
 .step-output {
   margin-top: 8px;
-  padding: 8px;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 4px;
+  padding: 9px 10px;
+  background: var(--iteration-output-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
   margin-left: 24px;
 }
 
 .output-label {
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--text-muted);
   margin-bottom: 4px;
 }
 
 .output-content {
   font-size: 12px;
   line-height: 1.4;
-  color: #d1d5db;
+  color: var(--text-secondary);
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
   white-space: pre-wrap;
   word-wrap: break-word;
@@ -397,16 +427,16 @@ const getStepTitle = (type: ThinkingStep['type']) => {
 }
 
 .thinking-content::-webkit-scrollbar-track {
-  background: rgba(31, 41, 55, 0.5);
+  background: transparent;
   border-radius: 3px;
 }
 
 .thinking-content::-webkit-scrollbar-thumb {
-  background: #4b5563;
+  background: color-mix(in srgb, var(--text-muted) 32%, transparent);
   border-radius: 3px;
 }
 
 .thinking-content::-webkit-scrollbar-thumb:hover {
-  background: #6b7280;
+  background: color-mix(in srgb, var(--text-muted) 48%, transparent);
 }
 </style>

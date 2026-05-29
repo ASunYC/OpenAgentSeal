@@ -230,6 +230,41 @@ class OpenAIClient(LLMClientBase):
                 raise TypeError(f"Unsupported tool type: {type(tool)}")
         return result
 
+    def _convert_content(self, content: str | list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        """Convert internal multimodal content blocks to OpenAI chat format."""
+        if not isinstance(content, list):
+            return content
+
+        converted: list[dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+
+            block_type = block.get("type")
+            if block_type == "text":
+                converted.append({"type": "text", "text": block.get("text", "")})
+                continue
+
+            if block_type == "image":
+                source = block.get("source") or {}
+                if isinstance(source, dict):
+                    media_type = source.get("media_type") or source.get("mediaType") or "image/png"
+                    data = source.get("data")
+                    if data:
+                        converted.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{data}",
+                                },
+                            }
+                        )
+                continue
+
+            converted.append(block)
+
+        return converted
+
     def _convert_messages(self, messages: list[Message]) -> tuple[str | None, list[dict[str, Any]]]:
         """Convert internal messages to OpenAI format.
 
@@ -250,7 +285,7 @@ class OpenAIClient(LLMClientBase):
 
             # For user messages
             if msg.role == "user":
-                api_messages.append({"role": "user", "content": msg.content})
+                api_messages.append({"role": "user", "content": self._convert_content(msg.content)})
 
             # For assistant messages
             elif msg.role == "assistant":

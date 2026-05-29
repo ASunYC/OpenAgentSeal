@@ -203,7 +203,7 @@ class TestRealWorldScenarios:
 
     def test_banner_text(self):
         """Test banner text from cli.py."""
-        banner = "🤖 Smart Agent Seal - Multi-turn Interactive Session"
+        banner = "🤖 OpenAgentSeal - Multi-turn Interactive Session"
         width = calculate_display_width(banner)
-        # "🤖" (2) + " Smart Agent Seal - Multi-turn Interactive Session" (44) = 46
-        assert width == 46
+        # "🤖" (2) + " OpenAgentSeal - Multi-turn Interactive Session" (47) = 49
+        assert width == 49

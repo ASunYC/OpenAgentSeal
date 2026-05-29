@@ -11,6 +11,7 @@ Open Agent - 用户配置管理模块
 配置文件: ~/.open-agent/open_agent.json
 """
 
+import copy
 import json
 import uuid
 from datetime import datetime
@@ -245,7 +246,15 @@ class UserConfigManager:
             "workspace": "./workspace",
             "auto_save": True,
             "stream_response": True,
-            "use_cot": False
+            "use_cot": False,
+            "enable_skills": True
+        },
+        "smart_routing": {
+            "enabled": False,
+            "text_model_id": "",
+            "vision_model_id": "",
+            "audio_model_id": "",
+            "fallback_model_id": ""
         },
         "default_model_id": None,
         "default_agent_id": None
@@ -280,7 +289,7 @@ class UserConfigManager:
             self._config = self._load_config()
         else:
             # 创建默认配置
-            self._config = self.DEFAULT_CONFIG.copy()
+            self._config = copy.deepcopy(self.DEFAULT_CONFIG)
             
             # 首次创建时，自动创建一个默认 agent
             self._create_default_agent_on_init()
@@ -330,7 +339,7 @@ class UserConfigManager:
                 return json.load(f)
         except Exception as e:
             print(f"⚠️  加载配置文件失败: {e}")
-            return self.DEFAULT_CONFIG.copy()
+            return copy.deepcopy(self.DEFAULT_CONFIG)
     
     def _save_config(self):
         """保存配置文件"""
@@ -594,6 +603,71 @@ class UserConfigManager:
         settings[key] = value
         self._config["settings"] = settings
         self._save_config()
+
+    # ==================== 智能路由配置 ====================
+
+    def get_smart_routing(self) -> Dict[str, Any]:
+        """Get smart routing configuration with defaults filled in."""
+        defaults = copy.deepcopy(self.DEFAULT_CONFIG["smart_routing"])
+        data = self._config.get("smart_routing", {})
+
+        if isinstance(data, dict):
+            for key in defaults:
+                defaults[key] = data.get(key, defaults[key])
+
+        defaults["enabled"] = bool(defaults.get("enabled", False))
+        for key in ("text_model_id", "vision_model_id", "audio_model_id", "fallback_model_id"):
+            defaults[key] = str(defaults.get(key) or "")
+
+        return defaults
+
+    def update_smart_routing(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist smart routing configuration."""
+        current = self.get_smart_routing()
+        if not isinstance(config, dict):
+            config = {}
+
+        if "enabled" in config:
+            current["enabled"] = bool(config.get("enabled"))
+
+        for key in ("text_model_id", "vision_model_id", "audio_model_id", "fallback_model_id"):
+            if key in config:
+                current[key] = str(config.get(key) or "")
+
+        self._config["smart_routing"] = current
+        self._save_config()
+        return current
+
+    def resolve_smart_model_id(
+        self,
+        modality: str,
+        default_model_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Resolve the model id for a modality using smart routing settings."""
+        routing = self.get_smart_routing()
+        if not routing.get("enabled"):
+            return default_model_id
+
+        normalized_modality = (modality or "text").lower()
+        modality_key_map = {
+            "text": "text_model_id",
+            "image": "vision_model_id",
+            "vision": "vision_model_id",
+            "audio": "audio_model_id",
+        }
+        preferred_key = modality_key_map.get(normalized_modality, "fallback_model_id")
+
+        candidates = [
+            routing.get(preferred_key),
+            routing.get("fallback_model_id"),
+            routing.get("text_model_id"),
+            default_model_id,
+        ]
+        for model_id in candidates:
+            if model_id and self.get_model(str(model_id)):
+                return str(model_id)
+
+        return default_model_id
     
     # ==================== 导出/导入 ====================
     
@@ -610,7 +684,7 @@ class UserConfigManager:
     
     def get_full_config(self) -> Dict[str, Any]:
         """获取完整配置（用于 API 返回）"""
-        return self._config.copy()
+        return copy.deepcopy(self._config)
 
 
 # ==================== 兼容旧接口 ====================

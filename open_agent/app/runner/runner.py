@@ -6,6 +6,7 @@ Following CoPaw's Runner pattern for SSE-based streaming responses.
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import AsyncGenerator, Optional, Callable, Any, Dict, List
 
@@ -13,6 +14,7 @@ from open_agent.app.runner.models import (
     ChatSpec, Message, AgentRequest, AgentEvent
 )
 from open_agent.app.runner.manager import ChatManager, get_chat_manager
+from open_agent.app.runner.file_parser import attachment_to_context
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,112 @@ class AgentRunner:
         if self._chat_manager is None:
             self._chat_manager = get_chat_manager()
         return self._chat_manager
+
+    def _extract_user_input(
+        self,
+        request: AgentRequest,
+    ) -> tuple[str, str | List[Dict[str, Any]], str]:
+        """Extract display text, model content, and modality from the last message."""
+        if not request.messages:
+            return "", "", "text"
+
+        last_msg = request.messages[-1]
+        if isinstance(last_msg, dict):
+            content = last_msg.get("content", "")
+            attachments = last_msg.get("attachments", [])
+        else:
+            content = getattr(last_msg, "content", "")
+            attachments = getattr(last_msg, "attachments", [])
+
+        if isinstance(content, list):
+            display_text = self._display_text_from_blocks(content)
+            modality = "vision" if self._contains_image_block(content) else "text"
+            return display_text or "[image]", content, modality
+
+        text = str(content or "")
+        file_contexts: List[str] = []
+        file_names: List[str] = []
+        image_blocks: List[Dict[str, Any]] = []
+        has_image = False
+        if isinstance(attachments, list):
+            for attachment in attachments:
+                image_block = self._attachment_to_image_block(attachment)
+                if image_block:
+                    has_image = True
+                    image_blocks.append(image_block)
+                    continue
+
+                file_context = attachment_to_context(attachment)
+                if file_context:
+                    file_contexts.append(file_context)
+                    if isinstance(attachment, dict):
+                        file_names.append(str(attachment.get("name") or "file"))
+
+        model_text = "\n".join(part for part in [text, *file_contexts] if part).strip()
+        blocks: List[Dict[str, Any]] = []
+        if model_text:
+            blocks.append({"type": "text", "text": model_text})
+        blocks.extend(image_blocks)
+
+        display_text = text
+        if not display_text and file_names:
+            display_text = "已上传文件：" + "、".join(file_names[:3])
+
+        if has_image:
+            return display_text or "[image]", blocks, "vision"
+
+        return display_text, model_text or text, "text"
+
+    def _attachment_to_image_block(self, attachment: Any) -> Optional[Dict[str, Any]]:
+        """Convert a frontend attachment into an Anthropic-style image block."""
+        if not isinstance(attachment, dict):
+            return None
+
+        media_type = (
+            attachment.get("mime_type")
+            or attachment.get("mimeType")
+            or attachment.get("type")
+            or "image/png"
+        )
+        data = attachment.get("data") or attachment.get("base64") or ""
+        source = attachment.get("source")
+        if isinstance(source, dict):
+            media_type = source.get("media_type") or source.get("mediaType") or media_type
+            data = source.get("data") or data
+
+        if not str(media_type).startswith("image/") or not data:
+            return None
+
+        data = str(data)
+        if data.startswith("data:"):
+            header, _, payload = data.partition(",")
+            if ";base64" in header:
+                media_type = header[5:].split(";", 1)[0] or media_type
+                data = payload
+
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }
+
+    def _display_text_from_blocks(self, blocks: List[Any]) -> str:
+        texts = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                texts.append(str(block.get("text")))
+        return "\n".join(texts).strip()
+
+    def _contains_image_block(self, blocks: List[Any]) -> bool:
+        return any(isinstance(block, dict) and block.get("type") == "image" for block in blocks)
+
+    def _has_content(self, content: str | List[Dict[str, Any]]) -> bool:
+        if isinstance(content, str):
+            return bool(content.strip())
+        return bool(content)
     
     async def process_message(
         self,
@@ -67,6 +175,16 @@ class AgentRunner:
                 event="error",
                 session_id=session_id,
                 error="User config not available",
+                status="error",
+            )
+            return
+
+        user_content, agent_user_content, input_modality = self._extract_user_input(request)
+        if not self._has_content(agent_user_content):
+            yield AgentEvent(
+                event="error",
+                session_id=session_id,
+                error="No message content provided",
                 status="error",
             )
             return
@@ -107,7 +225,16 @@ class AgentRunner:
             else:
                 logger.warning(f"Invalid session_id format: {session_id}, cannot extract agent_id")
         
-        if agent_id:
+        session_agent_config = config_manager.get_agent(agent_id) if agent_id else None
+        can_reuse_agent = True
+        if session_agent_config:
+            routed_model_id = config_manager.resolve_smart_model_id(
+                input_modality,
+                session_agent_config.model_id,
+            )
+            can_reuse_agent = routed_model_id == session_agent_config.model_id
+
+        if agent_id and can_reuse_agent:
             # Try to get existing agent from AgentService
             try:
                 from open_agent.agent_service import get_agent_service
@@ -152,11 +279,25 @@ class AgentRunner:
                     
                     agent_config = AgentConfig.create(
                         name="默认助手",
+                        model_id="",
                         system_prompt=system_prompt
                     )
                     config_manager.add_agent(agent_config)
                     agent_id = agent_config.id
                     self.chat_manager.set_session_agent(session_id, agent_id)
+
+            routed_model_id = config_manager.resolve_smart_model_id(
+                input_modality,
+                agent_config.model_id if agent_config else None,
+            )
+            if agent_config and routed_model_id and routed_model_id != agent_config.model_id:
+                logger.info(
+                    "Smart routing selected model_id=%s for modality=%s (agent default=%s)",
+                    routed_model_id,
+                    input_modality,
+                    agent_config.model_id,
+                )
+                agent_config = replace(agent_config, model_id=routed_model_id)
             
             # Create agent instance from config
             agent = self._create_agent_from_config(agent_config)
@@ -170,30 +311,12 @@ class AgentRunner:
             )
             return
         
-        # Get the last user message
-        user_content = ""
-        if request.messages:
-            last_msg = request.messages[-1]
-            if isinstance(last_msg, dict):
-                user_content = last_msg.get("content", "")
-            elif hasattr(last_msg, "content"):
-                user_content = last_msg.content
-        
-        if not user_content:
-            yield AgentEvent(
-                event="error",
-                session_id=session_id,
-                error="No message content provided",
-                status="error",
-            )
-            return
-        
         # Add user message to history
         user_message = Message(role="user", content=user_content)
         self.chat_manager.add_message(session_id, user_message)
         
         # Add message to agent
-        agent.add_user_message(user_content)
+        agent.add_user_message(agent_user_content)
 
         from open_agent.control_plane import get_control_plane
 
