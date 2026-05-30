@@ -208,7 +208,7 @@
                 />
                 <!-- 正在输入指示器 - 当消息内容为空且正在加载时显示-->
                 <div v-if="msg.role === 'assistant' && !msg.content && msg.isLoading" class="typing-indicator" :aria-label="t('小海豹正在思考', 'Seal is thinking')">
-                  <img class="thinking-seal-gif" :src="thinkingSealPatUrl" alt="" aria-hidden="true" />
+                  <img class="typing-agent-icon" :src="appIconUrl" alt="" aria-hidden="true" />
                   <span class="typing-text">{{ t('正在努力思考', 'Thinking hard') }}</span>
                   <span class="typing-dots" aria-hidden="true">
                     <span></span>
@@ -812,7 +812,6 @@ import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
 import appIconUrl from '@/assets/icon.png'
-import thinkingSealPatUrl from '@/assets/thinking-seal-pat.gif'
 import { marked } from 'marked'
 import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
@@ -3072,10 +3071,10 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.thinking-seal-gif {
-  width: 48px;
+.typing-agent-icon {
+  width: 34px;
   height: 34px;
-  flex: 0 0 48px;
+  flex: 0 0 34px;
   display: block;
   object-fit: contain;
   image-rendering: auto;
