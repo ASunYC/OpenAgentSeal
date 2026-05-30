@@ -6,17 +6,7 @@
       <header class="chat-header">
         <div class="header-left">
           <div class="logo">
-            <span class="logo-icon seal-avatar logo-seal" aria-hidden="true">
-              <span class="seal-avatar-body">
-                <span class="seal-avatar-face">
-                  <span class="seal-avatar-eye left"></span>
-                  <span class="seal-avatar-eye right"></span>
-                  <span class="seal-avatar-nose"></span>
-                </span>
-                <span class="seal-avatar-flipper left"></span>
-                <span class="seal-avatar-flipper right"></span>
-              </span>
-            </span>
+            <img class="logo-icon" :src="appIconUrl" alt="" aria-hidden="true" />
             <span class="logo-text">OpenAgentSeal</span>
           </div>
         </div>
@@ -201,17 +191,7 @@
                     <circle cx="12" cy="7" r="4"/>
                   </svg>
                 </div>
-                <div v-else class="avatar agent-avatar seal-avatar" :style="{ background: getAgentColor() }" :aria-label="getAgentName()">
-                  <span class="seal-avatar-body">
-                    <span class="seal-avatar-face">
-                      <span class="seal-avatar-eye left"></span>
-                      <span class="seal-avatar-eye right"></span>
-                      <span class="seal-avatar-nose"></span>
-                    </span>
-                    <span class="seal-avatar-flipper left"></span>
-                    <span class="seal-avatar-flipper right"></span>
-                  </span>
-                </div>
+                <img v-else class="avatar agent-avatar agent-avatar-image" :src="appIconUrl" :alt="getAgentName()" />
               </div>
               <div class="message-content">
                 <div class="message-header">
@@ -228,17 +208,20 @@
                 />
                 <!-- 正在输入指示器 - 当消息内容为空且正在加载时显示-->
                 <div v-if="msg.role === 'assistant' && !msg.content && msg.isLoading" class="typing-indicator" :aria-label="t('小海豹正在思考', 'Seal is thinking')">
-                  <span class="seal-swimmer" aria-hidden="true">
-                    <span class="seal-body">
-                      <span class="seal-face">
-                        <span class="seal-eye left"></span>
-                        <span class="seal-eye right"></span>
-                        <span class="seal-nose"></span>
+                  <span class="thinking-seal-action" aria-hidden="true">
+                    <span class="thinking-seal-shadow"></span>
+                    <span class="thinking-seal-body">
+                      <span class="thinking-seal-face">
+                        <span class="thinking-seal-eye left"></span>
+                        <span class="thinking-seal-eye right"></span>
+                        <span class="thinking-seal-nose"></span>
                       </span>
-                      <span class="seal-flipper left"></span>
-                      <span class="seal-flipper right"></span>
+                      <span class="thinking-seal-flipper front"></span>
+                      <span class="thinking-seal-flipper back"></span>
                     </span>
-                    <span class="seal-ripple"></span>
+                    <span class="thinking-seal-tail"></span>
+                    <span class="thinking-seal-tap-mark one"></span>
+                    <span class="thinking-seal-tap-mark two"></span>
                   </span>
                   <span class="typing-text">{{ t('正在努力思考', 'Thinking hard') }}</span>
                   <span class="typing-dots" aria-hidden="true">
@@ -842,6 +825,7 @@ import { api } from '@/api'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
+import appIconUrl from '@/assets/icon.png'
 import { marked } from 'marked'
 import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
@@ -1077,15 +1061,6 @@ function t(zh: string, en: string): string {
 const availableModels = computed(() => {
   return agentStore.modelConfigs
 })
-
-// 鑾峰彇鏅鸿兘浣撻鑹?
-function getAgentColor(): string {
-  const agent = agentStore.agents.find(a => a.id === selectedAgentId.value)
-  if (!agent) return '#3b82f6'
-  const colors = ['#2f6ef4', '#3f7f68', '#8a6f2c', '#9b4f45', '#596579', '#4f7f9f', '#6f6a9a']
-  const index = agent.name.charCodeAt(0) % colors.length
-  return colors[index]
-}
 
 // 鑾峰彇鏅鸿兘浣撳悕绉?
 function getAgentName(): string {
@@ -2755,7 +2730,8 @@ onUnmounted(() => {
 .logo-icon {
   width: 30px;
   height: 30px;
-  color: var(--primary-color);
+  display: block;
+  object-fit: contain;
   filter: drop-shadow(0 8px 16px rgba(47, 110, 244, 0.18));
 }
 
@@ -2901,6 +2877,12 @@ onUnmounted(() => {
   color: white;
   font-weight: 700;
   font-size: 14px;
+}
+
+.agent-avatar-image {
+  display: block;
+  object-fit: contain;
+  background: transparent;
 }
 
 .seal-avatar {
@@ -3103,6 +3085,137 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
+.thinking-seal-action {
+  position: relative;
+  width: 48px;
+  height: 34px;
+  flex: 0 0 48px;
+  display: inline-block;
+}
+
+.thinking-seal-shadow {
+  position: absolute;
+  left: 7px;
+  bottom: 1px;
+  width: 34px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(47, 110, 244, 0.12);
+  filter: blur(1px);
+  animation: thinking-seal-shadow 1.05s ease-in-out infinite;
+}
+
+.thinking-seal-body {
+  position: absolute;
+  left: 8px;
+  bottom: 7px;
+  width: 30px;
+  height: 22px;
+  border-radius: 60% 58% 52% 54%;
+  background: linear-gradient(145deg, #eef8ff 0%, #c7dcea 62%, #91aabd 100%);
+  box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.86), 0 7px 15px rgba(82, 116, 146, 0.2);
+  transform-origin: 52% 78%;
+  animation: thinking-seal-body 1.05s ease-in-out infinite;
+  z-index: 2;
+}
+
+.thinking-seal-face {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 15px;
+  height: 12px;
+}
+
+.thinking-seal-eye {
+  position: absolute;
+  top: 1px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #263746;
+  animation: seal-blink 3.8s infinite;
+}
+
+.thinking-seal-eye.left {
+  left: 2px;
+}
+
+.thinking-seal-eye.right {
+  right: 2px;
+}
+
+.thinking-seal-nose {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  width: 4px;
+  height: 3px;
+  border-radius: 50%;
+  background: #38495a;
+}
+
+.thinking-seal-tail {
+  position: absolute;
+  left: 1px;
+  bottom: 8px;
+  width: 14px;
+  height: 12px;
+  border-radius: 70% 42% 70% 42%;
+  background: #9cb4c6;
+  transform-origin: right center;
+  animation: thinking-seal-tail 1.05s ease-in-out infinite;
+  z-index: 1;
+}
+
+.thinking-seal-flipper {
+  position: absolute;
+  border-radius: 999px;
+  background: #91aabd;
+}
+
+.thinking-seal-flipper.front {
+  right: 4px;
+  bottom: -4px;
+  width: 11px;
+  height: 7px;
+  transform: rotate(24deg);
+}
+
+.thinking-seal-flipper.back {
+  left: 2px;
+  bottom: -3px;
+  width: 15px;
+  height: 8px;
+  transform-origin: 86% 52%;
+  animation: thinking-seal-pat 1.05s cubic-bezier(0.36, 0, 0.2, 1) infinite;
+}
+
+.thinking-seal-tap-mark {
+  position: absolute;
+  left: 6px;
+  bottom: 18px;
+  width: 6px;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(47, 110, 244, 0.55);
+  opacity: 0;
+  transform-origin: right center;
+  z-index: 3;
+}
+
+.thinking-seal-tap-mark.one {
+  transform: rotate(-26deg);
+  animation: thinking-seal-tap 1.05s ease-out infinite;
+}
+
+.thinking-seal-tap-mark.two {
+  left: 4px;
+  bottom: 14px;
+  transform: rotate(18deg);
+  animation: thinking-seal-tap 1.05s ease-out 0.08s infinite;
+}
+
 .seal-swimmer {
   position: relative;
   width: 52px;
@@ -3227,6 +3340,68 @@ onUnmounted(() => {
   }
   50% {
     transform: translateX(5px) translateY(-2px) rotate(2deg);
+  }
+}
+
+@keyframes thinking-seal-body {
+  0%, 100% {
+    transform: translateY(0) rotate(-3deg);
+  }
+  42% {
+    transform: translateY(-2px) rotate(3deg);
+  }
+  58% {
+    transform: translateY(1px) rotate(-5deg);
+  }
+}
+
+@keyframes thinking-seal-shadow {
+  0%, 100% {
+    opacity: 0.62;
+    transform: scaleX(0.92);
+  }
+  45% {
+    opacity: 0.38;
+    transform: scaleX(1.08);
+  }
+}
+
+@keyframes thinking-seal-tail {
+  0%, 100% {
+    transform: rotate(-10deg) translateX(0);
+  }
+  42% {
+    transform: rotate(12deg) translateX(1px);
+  }
+  58% {
+    transform: rotate(-18deg) translateX(-1px);
+  }
+}
+
+@keyframes thinking-seal-pat {
+  0%, 28%, 100% {
+    transform: rotate(-34deg) translate(-1px, -1px);
+  }
+  44% {
+    transform: rotate(38deg) translate(-5px, 2px);
+  }
+  54% {
+    transform: rotate(20deg) translate(-3px, 1px);
+  }
+}
+
+@keyframes thinking-seal-tap {
+  0%, 35%, 100% {
+    opacity: 0;
+    transform: translate(0, 0) scaleX(0.72);
+  }
+  44% {
+    opacity: 0.85;
+    transform: translate(-3px, -1px) scaleX(1);
+  }
+  64% {
+    opacity: 0;
+    transform: translate(-8px, -3px) scaleX(0.4);
   }
 }
 
