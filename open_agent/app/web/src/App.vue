@@ -208,21 +208,7 @@
                 />
                 <!-- 正在输入指示器 - 当消息内容为空且正在加载时显示-->
                 <div v-if="msg.role === 'assistant' && !msg.content && msg.isLoading" class="typing-indicator" :aria-label="t('小海豹正在思考', 'Seal is thinking')">
-                  <span class="thinking-seal-action" aria-hidden="true">
-                    <span class="thinking-seal-shadow"></span>
-                    <span class="thinking-seal-body">
-                      <span class="thinking-seal-face">
-                        <span class="thinking-seal-eye left"></span>
-                        <span class="thinking-seal-eye right"></span>
-                        <span class="thinking-seal-nose"></span>
-                      </span>
-                      <span class="thinking-seal-flipper front"></span>
-                      <span class="thinking-seal-flipper back"></span>
-                    </span>
-                    <span class="thinking-seal-tail"></span>
-                    <span class="thinking-seal-tap-mark one"></span>
-                    <span class="thinking-seal-tap-mark two"></span>
-                  </span>
+                  <img class="thinking-seal-gif" :src="thinkingSealPatUrl" alt="" aria-hidden="true" />
                   <span class="typing-text">{{ t('正在努力思考', 'Thinking hard') }}</span>
                   <span class="typing-dots" aria-hidden="true">
                     <span></span>
@@ -826,6 +812,7 @@ import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
 import appIconUrl from '@/assets/icon.png'
+import thinkingSealPatUrl from '@/assets/thinking-seal-pat.gif'
 import { marked } from 'marked'
 import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
