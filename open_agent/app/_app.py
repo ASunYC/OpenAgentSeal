@@ -573,6 +573,7 @@ def _setup_legacy_routes(app: FastAPI):
                 "auto_save": settings.auto_save,
                 "stream_response": settings.stream_response,
                 "use_cot": settings.use_cot,
+                "enable_skills": settings.enable_skills,
             }
         except Exception as e:
             logger.error(f"Failed to get settings: {e}")
@@ -972,7 +973,12 @@ def _setup_legacy_routes(app: FastAPI):
 
             logs_dir = get_logs_dir()
             files = []
-            log_files = [path for path in logs_dir.rglob("*.log") if path.is_file()]
+            cutoff = datetime.now().timestamp() - 10 * 24 * 60 * 60
+            log_files = [
+                path
+                for path in logs_dir.rglob("*.log")
+                if path.is_file() and path.stat().st_mtime >= cutoff
+            ]
             for log_file in sorted(log_files, key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
                 try:
                     lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()

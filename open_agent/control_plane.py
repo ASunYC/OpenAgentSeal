@@ -1,12 +1,15 @@
 """Durable local control plane for agent runtime state."""
 
 import json
+import shutil
 import sqlite3
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from open_agent.utils.path_utils import get_data_dir
 
 
 class ControlPlane:
@@ -15,13 +18,24 @@ class ControlPlane:
     DB_FILE = "control_plane.db"
 
     def __init__(self, data_dir: str | Path | None = None):
-        self.data_dir = Path(data_dir) if data_dir else Path.home() / ".open-agent"
+        self.data_dir = Path(data_dir) if data_dir else get_data_dir()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / self.DB_FILE
+        self._migrate_legacy_db()
         self._local = threading.local()
         self._connections: set[sqlite3.Connection] = set()
         self._connections_lock = threading.Lock()
         self._init_db()
+
+    def _migrate_legacy_db(self) -> None:
+        legacy_path = Path.home() / ".open-agent" / self.DB_FILE
+        if self.db_path.exists() or not legacy_path.exists():
+            return
+        shutil.copy2(legacy_path, self.db_path)
+        for suffix in ("-wal", "-shm"):
+            legacy_sidecar = Path(str(legacy_path) + suffix)
+            if legacy_sidecar.exists():
+                shutil.copy2(legacy_sidecar, Path(str(self.db_path) + suffix))
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn"):

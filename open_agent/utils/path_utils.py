@@ -93,22 +93,34 @@ def get_bundled_skills_dir() -> Path | None:
     return None
 
 
+def _copy_missing_tree(source: Path, destination: Path) -> None:
+    """Copy files from source to destination without overwriting user edits."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        target = destination / item.name
+        if item.is_dir():
+            _copy_missing_tree(item, target)
+        elif not target.exists():
+            shutil.copy2(item, target)
+
+
 def ensure_user_skills_dir() -> Path | None:
-    """Seed bundled skills into the user directory on first run.
+    """Seed or upgrade bundled skills into the user directory.
 
     The installed application directory may be read-only, so installed builds use
-    this editable user copy when no exe-local skills directory exists.
+    this editable user copy when no exe-local skills directory exists. Existing
+    user files are preserved; only missing bundled skills are added.
     """
     user_skills_dir = get_user_skills_dir()
-    if user_skills_dir.exists():
-        return user_skills_dir
-
     bundled_skills_dir = get_bundled_skills_dir()
     if not bundled_skills_dir:
-        return None
+        return user_skills_dir if user_skills_dir.exists() else None
 
     user_skills_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(bundled_skills_dir, user_skills_dir)
+    if user_skills_dir.exists():
+        _copy_missing_tree(bundled_skills_dir, user_skills_dir)
+    else:
+        shutil.copytree(bundled_skills_dir, user_skills_dir)
     return user_skills_dir
 
 
@@ -136,17 +148,47 @@ def get_external_skills_dir() -> Path | None:
     return None
 
 
+def resolve_skills_dir(configured_dir: str | Path = "./skills") -> Path | None:
+    """Resolve the effective skills directory across dev, portable, and user installs."""
+    configured_path = Path(configured_dir).expanduser()
+
+    if is_frozen():
+        external_skills = get_external_skills_dir()
+        if external_skills:
+            return external_skills
+
+    if configured_path.is_absolute() and configured_path.exists():
+        return configured_path.resolve()
+
+    project_root = Path(__file__).parent.parent.parent.resolve()
+    candidates = [
+        Path.cwd() / configured_path,
+        Path.cwd() / "open_agent" / configured_path,
+        project_root / configured_path,
+        project_root / "open_agent" / configured_path,
+        Path(__file__).parent.parent / configured_path,
+        get_user_app_dir() / "open_agent" / "skills",
+        get_user_app_dir() / "skills",
+    ]
+
+    for path in candidates:
+        if path.exists():
+            return path.resolve()
+
+    return None
+
+
 def get_logs_dir() -> Path:
     r"""Get the logs directory.
     
     Unified log directory for all platforms:
-    - Windows: C:\Users\<user>\.open-agent\logs\
-    - Linux/macOS: ~/.open-agent/logs/
+    - Windows: C:\Users\<user>\.open-agent\data\logs\
+    - Linux/macOS: ~/.open-agent/data/logs/
     
     Returns:
         Path to logs directory
     """
-    log_dir = get_user_app_dir() / "logs"
+    log_dir = get_data_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 

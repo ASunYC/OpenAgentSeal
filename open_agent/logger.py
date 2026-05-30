@@ -20,8 +20,8 @@ class AgentLogger:
         """Initialize logger
 
         Logs are stored in unified logs directory:
-        - Windows: %APPDATA%\\open-agent\\logs\\
-        - Linux/macOS: ~/.open-agent/logs/
+        - Windows: %USERPROFILE%\\.open-agent\\data\\logs\\
+        - Linux/macOS: ~/.open-agent/data/logs/
         """
         from .utils.path_utils import get_logs_dir
         self.log_dir = get_logs_dir() / "agent"

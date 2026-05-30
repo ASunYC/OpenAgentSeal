@@ -366,7 +366,8 @@ class Colors:
 
 def get_log_directory() -> Path:
     """Get the log directory path."""
-    return Path.home() / ".open-agent" / "log"
+    from open_agent.utils.path_utils import get_logs_dir
+    return get_logs_dir()
 
 
 def show_log_directory(open_file_manager: bool = True) -> None:

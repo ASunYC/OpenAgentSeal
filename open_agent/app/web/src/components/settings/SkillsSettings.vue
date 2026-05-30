@@ -3,6 +3,7 @@
     <div class="content-header">
       <h3>{{ t('技能管理', 'Skills Management') }}</h3>
       <p>{{ t('管理可用的 AI 技能', 'Manage available AI skills') }}</p>
+      <span class="count-pill">{{ t('技能', 'Skills') }} {{ skills.length }}</span>
     </div>
 
     <div v-if="loading" class="loading-state">
@@ -128,6 +129,10 @@ onMounted(() => {
 }
 
 .content-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 16px;
+  align-items: start;
   margin-bottom: 8px;
 }
 
@@ -139,9 +144,23 @@ onMounted(() => {
 }
 
 .content-header p {
+  grid-column: 1;
   margin: 0;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+.count-pill {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--hover-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .loading-state,

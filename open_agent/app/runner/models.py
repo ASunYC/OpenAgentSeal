@@ -43,6 +43,7 @@ class Message(BaseModel):
     role: str  # user, assistant, system, tool
     type: str = "message"
     content: List[ContentItem] | str
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
     
     def to_api_format(self) -> Dict[str, Any]:
@@ -53,6 +54,7 @@ class Message(BaseModel):
                 "role": self.role,
                 "type": self.type,
                 "content": self.content,
+                "attachments": self.attachments,
                 "timestamp": self.timestamp.isoformat() if self.timestamp else None
             }
         else:
@@ -61,6 +63,7 @@ class Message(BaseModel):
                 "role": self.role,
                 "type": self.type,
                 "content": [c.model_dump(exclude_none=True) for c in self.content],
+                "attachments": self.attachments,
                 "timestamp": self.timestamp.isoformat() if self.timestamp else None
             }
 

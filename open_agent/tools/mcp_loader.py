@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,8 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from .base import Tool, ToolResult
+
+logger = logging.getLogger(__name__)
 
 # Connection type aliases
 ConnectionType = Literal["stdio", "sse", "http", "streamable_http"]
@@ -238,33 +241,30 @@ class MCPServerConnection:
                     )
                     self.prompts.append(prompt_info)
                 if self.prompts:
-                    print(f"  Loaded {len(self.prompts)} prompts from '{self.name}'")
+                    logger.info("Loaded %d prompts from MCP server '%s'", len(self.prompts), self.name)
             except Exception as e:
                 # Some MCP servers may not support prompts
-                print(f"  (No prompts available from '{self.name}')")
+                logger.debug("No prompts available from MCP server '%s': %s", self.name, e)
 
             conn_info = self.url if self.url else self.command
-            print(f"✓ Connected to MCP server '{self.name}' ({self.connection_type}: {conn_info}) - loaded {len(self.tools)} tools")
+            logger.info("Connected to MCP server '%s' (%s: %s) - loaded %d tools", self.name, self.connection_type, conn_info, len(self.tools))
             for tool in self.tools:
                 desc = tool.description[:60] if len(tool.description) > 60 else tool.description
-                print(f"  - {tool.name}: {desc}...")
+                logger.debug("MCP tool loaded from '%s': %s - %s...", self.name, tool.name, desc)
             return True
 
         except TimeoutError:
-            print(f"✗ Connection to MCP server '{self.name}' timed out after {connect_timeout}s")
+            logger.warning("Connection to MCP server '%s' timed out after %ss", self.name, connect_timeout)
             if self.exit_stack:
                 await self.exit_stack.aclose()
                 self.exit_stack = None
             return False
 
         except Exception as e:
-            print(f"✗ Failed to connect to MCP server '{self.name}': {e}")
+            logger.warning("Failed to connect to MCP server '%s': %s", self.name, e, exc_info=True)
             if self.exit_stack:
                 await self.exit_stack.aclose()
                 self.exit_stack = None
-            import traceback
-
-            traceback.print_exc()
             return False
 
     async def _connect_stdio(self):
@@ -456,9 +456,6 @@ async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
 
     except Exception as e:
         print(f"Error loading MCP config: {e}")
-        import traceback
-
-        traceback.print_exc()
         return []
 
 

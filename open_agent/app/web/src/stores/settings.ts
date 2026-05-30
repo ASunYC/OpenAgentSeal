@@ -13,6 +13,7 @@ const defaultSettings: SystemSettings = {
   workspace: '',
   autoSave: true,
   streamResponse: true,
+  enable_skills: true,
   useCoT: false,
 }
 

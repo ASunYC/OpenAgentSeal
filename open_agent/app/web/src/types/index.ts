@@ -40,6 +40,31 @@ export interface ChatAttachment {
   size?: number
 }
 
+export interface WorkspaceSourceNode {
+  id?: string
+  name: string
+  path: string
+  type: 'file' | 'directory' | 'web'
+  mime_type?: string | null
+  size?: number | null
+  modified_at?: number
+  relative_path?: string
+  children?: WorkspaceSourceNode[]
+  children_count?: number
+}
+
+export interface WorkspaceSource {
+  id: string
+  name: string
+  path: string
+  type: 'file' | 'directory' | 'web'
+  mime_type?: string | null
+  size?: number | null
+  modified_at?: number
+  children?: WorkspaceSourceNode[]
+  children_count?: number
+}
+
 export interface ForkChatResponse {
   chat: Chat
   source_session_id: string
@@ -72,6 +97,8 @@ export interface RunRequest {
   user_id?: string
   messages: Message[]
   stream?: boolean
+  workspace_sources?: WorkspaceSource[]
+  selected_workspace_paths?: string[]
 }
 
 export interface RuntimeThread {
@@ -199,6 +226,7 @@ export interface SystemSettings {
   settingsVersion?: number
   fontSize: 'small' | 'medium' | 'large'
   workspace: string
+  enable_skills?: boolean
   autoSave: boolean
   streamResponse: boolean
   useCoT: boolean  // 思考模式 (Chain of Thought)
@@ -238,6 +266,7 @@ export interface AppSettings {
   workspace: string
   autoSave: boolean
   streamResponse: boolean
+  enable_skills?: boolean
   useCoT: boolean
 }
 

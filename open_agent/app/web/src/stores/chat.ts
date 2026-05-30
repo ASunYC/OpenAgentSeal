@@ -92,6 +92,26 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function deleteChats(chatIds: string[]) {
+    if (!chatIds.length) return
+    try {
+      await chatApi.deleteMany(chatIds)
+      const idSet = new Set(chatIds)
+      chats.value = chats.value.filter(c => !idSet.has(c.id))
+      if (currentChatId.value && idSet.has(currentChatId.value)) {
+        currentChatId.value = chats.value[0]?.id || null
+        if (currentChatId.value) {
+          await selectChat(currentChatId.value)
+        } else {
+          messages.value = []
+          currentEvents.value = []
+        }
+      }
+    } catch (e) {
+      error.value = String(e)
+    }
+  }
+
   async function sendMessage(content: string) {
     if (!currentRunnerSessionId.value || isRunning.value) return
 
@@ -159,6 +179,7 @@ export const useChatStore = defineStore('chat', () => {
     forkCurrentChat,
     selectChat,
     deleteChat,
+    deleteChats,
     sendMessage,
     cancel,
     clearError,

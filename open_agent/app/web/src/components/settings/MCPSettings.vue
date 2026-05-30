@@ -3,6 +3,7 @@
     <div class="content-header">
       <h3>{{ t('MCP 设置', 'MCP Settings') }}</h3>
       <p>{{ t('管理 MCP 服务器配置', 'Manage MCP server configurations') }}</p>
+      <span class="count-pill">MCP {{ mcpServers.length }}</span>
     </div>
 
     <div v-if="configPath" class="config-path">
@@ -250,6 +251,10 @@ onMounted(() => {
 }
 
 .content-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 16px;
+  align-items: start;
   margin-bottom: 8px;
 }
 
@@ -261,9 +266,23 @@ onMounted(() => {
 }
 
 .content-header p {
+  grid-column: 1;
   margin: 0;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+.count-pill {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--hover-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .config-path,

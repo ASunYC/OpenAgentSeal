@@ -44,13 +44,14 @@
         <div class="header-right">
           <button
             class="btn-settings"
-            :class="{ active: activeWorkspacePanel === 'runtime' }"
-            @click="openRuntimePanel"
-            :title="t('对话与运行', 'Chats & runtime')"
+            :class="{ active: isSourceWorkspaceOpen }"
+            @click="toggleSourceWorkspace"
+            :title="t('资料库', 'Library')"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M8 15.5 4 19v-4.4A6.6 6.6 0 0 1 10.6 4H13a6.6 6.6 0 0 1 6.4 5"/>
-              <path d="M10 14a5 5 0 0 0 5 5h3.2L21 21.5V19a5 5 0 0 0-3-9h-3a5 5 0 0 0-5 5Z"/>
+              <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              <path d="M12 11v5"/>
+              <path d="M9.5 13.5h5"/>
             </svg>
           </button>
           <button
@@ -65,6 +66,17 @@
               <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
             </svg>
           </button>
+          <button
+            class="btn-settings"
+            :class="{ active: activeWorkspacePanel === 'runtime' }"
+            @click="openRuntimePanel"
+            :title="t('对话与运行', 'Chats & runtime')"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M8 15.5 4 19v-4.4A6.6 6.6 0 0 1 10.6 4H13a6.6 6.6 0 0 1 6.4 5"/>
+              <path d="M10 14a5 5 0 0 0 5 5h3.2L21 21.5V19a5 5 0 0 0-3-9h-3a5 5 0 0 0-5 5Z"/>
+            </svg>
+          </button>
           <button class="btn-settings" @click="openSettings" :title="t('设置', 'Settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"/>
@@ -75,7 +87,105 @@
       </header>
       
       <!-- 中间聊天区域 -->
-      <div class="chat-body" :class="{ 'dual-panel': isWorkspaceOpen }" :style="workspaceLayoutStyle">
+      <div
+        class="chat-body"
+        :class="{
+          'dual-panel': isWorkspaceOpen,
+          'source-open': isSourceWorkspaceOpen,
+          'browser-fullscreen': isBrowserPanelFullscreen,
+        }"
+        :style="workspaceLayoutStyle"
+      >
+        <aside v-if="isSourceWorkspaceOpen" ref="sourceWorkspaceRef" class="source-workspace-panel">
+          <header class="source-workspace-header">
+            <div class="workspace-panel-title source-workspace-title">
+              <svg class="workspace-panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                <path d="M12 11v5"/>
+                <path d="M9.5 13.5h5"/>
+              </svg>
+              <div class="workspace-panel-copy">
+                <h3>{{ t('资料库', 'Library') }}</h3>
+                <p>{{ t('添加文件、目录作为当前任务资料来源', 'Add files and folders as task reference sources') }}</p>
+              </div>
+            </div>
+            <div class="workspace-panel-actions">
+              <button class="workspace-header-button workspace-close" @click="isSourceWorkspaceOpen = false" :title="t('关闭', 'Close')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M18 6 6 18"/>
+                  <path d="m6 6 12 12"/>
+                </svg>
+              </button>
+            </div>
+          </header>
+
+          <section
+            class="source-drop-zone"
+            :class="{ 'drag-over': isSourceDragging }"
+            @dragenter.prevent="onSourceDragEnter"
+            @dragover.prevent="onSourceDragOver"
+            @dragleave.prevent="onSourceDragLeave"
+            @drop.prevent="onSourceDrop"
+            @click="chooseWorkspaceFiles"
+          >
+            <div class="source-drop-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 5v10"/>
+                <path d="M8 9l4-4 4 4"/>
+                <path d="M4 17v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1"/>
+              </svg>
+            </div>
+            <strong>{{ t('拖拽文件或目录到这里', 'Drop files or folders here') }}</strong>
+            <span>{{ t('点击选择文件，也可以选择整个目录挂载到资料库', 'Click to pick files, or mount a local folder to the library') }}</span>
+            <div class="source-drop-actions" @click.stop>
+              <button @click="chooseWorkspaceFiles">{{ t('选择文件', 'Files') }}</button>
+              <button @click="chooseWorkspaceDirectory">{{ t('选择目录', 'Folder') }}</button>
+              <button @click="openWebSourceInput">{{ t('添加 Web 地址', 'Add web URL') }}</button>
+            </div>
+            <form v-if="showWebSourceInput" class="source-web-form" @click.stop @submit.prevent="addWebSource">
+              <input
+                ref="webSourceInputRef"
+                v-model="webSourceUrl"
+                type="url"
+                :placeholder="t('输入 Web 地址后回车', 'Enter a web URL')"
+                @keydown.esc.prevent="showWebSourceInput = false"
+              />
+              <button type="submit">{{ t('添加', 'Add') }}</button>
+            </form>
+          </section>
+
+          <section class="source-list">
+            <div class="source-list-head">
+              <span>{{ t('来源', 'Sources') }}</span>
+              <button v-if="workspaceSources.length" @click="clearWorkspaceSources">{{ t('清空', 'Clear') }}</button>
+            </div>
+            <div v-if="!workspaceSources.length" class="source-empty">{{ t('还没有添加来源', 'No sources added yet') }}</div>
+            <WorkspaceSourceTree
+              v-else
+              :sources="workspaceSources"
+              :selected-paths="selectedWorkspacePaths"
+              :expanded-paths="expandedWorkspacePaths"
+              @toggle-select="toggleWorkspaceSourceSelection"
+              @toggle-expanded="toggleWorkspaceSourceExpanded"
+              @remove-source="removeWorkspaceSource"
+              @open-location="openWorkspaceSourceLocation"
+            />
+          </section>
+        </aside>
+
+        <button
+          v-if="isSourceWorkspaceOpen"
+          class="source-resizer"
+          :class="{ active: isResizingSourceWorkspace }"
+          type="button"
+          :title="t('拖动调整资料库宽度，双击重置', 'Drag to resize library, double-click to reset')"
+          :aria-label="t('调整资料库宽度', 'Resize library')"
+          @pointerdown="startSourceWorkspaceResize"
+          @dblclick="resetSourceWorkspaceWidth"
+        >
+          <span></span>
+        </button>
+
         <!-- 私人对话区-->
         <div class="private-chat-panel">
           <div class="chat-messages" ref="messagesContainer" @click="handleChatClick">
@@ -222,7 +332,7 @@
                         </svg>
                         <span>{{ t('复制为新会话', 'Copy to new chat') }}</span>
                       </button>
-                      <button @click="runComposerAction('clear')">
+                      <button type="button" @click="runComposerAction('clear')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="3,6 5,6 21,6"/>
                           <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
@@ -254,8 +364,17 @@
                     {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
                   </span>
                 </div>
-                <button class="btn-send" @click="sendMessage" :disabled="(!inputMessage.trim() && pendingAttachments.length === 0) || loading" :title="t('发送', 'Send')">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <button
+                  class="btn-send"
+                  :class="{ stopping: loading }"
+                  @click="handleComposerPrimaryAction"
+                  :disabled="!loading && !canSendMessage"
+                  :title="loading ? t('停止', 'Stop') : t('发送', 'Send')"
+                >
+                  <svg v-if="loading" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                    <rect x="7" y="7" width="10" height="10" rx="2"/>
+                  </svg>
+                  <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="22" y1="2" x2="11" y2="13"/>
                     <polygon points="22,2 15,22 11,13 2,9"/>
                   </svg>
@@ -266,7 +385,7 @@
         </div>
 
         <button
-          v-if="isWorkspaceOpen"
+          v-if="isWorkspaceOpen && !isBrowserPanelFullscreen"
           class="workspace-resizer"
           :class="{ active: isResizingWorkspace }"
           type="button"
@@ -278,7 +397,7 @@
           <span></span>
         </button>
 
-        <aside v-if="isWorkspaceOpen" class="workspace-panel">
+        <aside v-if="isWorkspaceOpen" class="workspace-panel" :class="{ 'browser-fullscreen-panel': isBrowserPanelFullscreen }">
           <header class="workspace-panel-header">
             <div class="workspace-panel-title">
               <svg v-if="activeWorkspacePanel === 'browser'" class="workspace-panel-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -290,14 +409,38 @@
                 <path d="M8 15.5 4 19v-4.4A6.6 6.6 0 0 1 10.6 4H13a6.6 6.6 0 0 1 6.4 5"/>
                 <path d="M10 14a5 5 0 0 0 5 5h3.2L21 21.5V19a5 5 0 0 0-3-9h-3a5 5 0 0 0-5 5Z"/>
               </svg>
-              <span>{{ workspacePanelTitle }}</span>
+              <div class="workspace-panel-copy">
+                <h3>{{ workspacePanelTitle }}</h3>
+                <p>{{ workspacePanelSubtitle }}</p>
+              </div>
             </div>
-            <button class="workspace-close" @click="closeWorkspacePanel" :title="t('关闭工作区', 'Close workspace')">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M18 6 6 18"/>
-                <path d="m6 6 12 12"/>
-              </svg>
-            </button>
+            <div class="workspace-panel-actions">
+              <button
+                v-if="activeWorkspacePanel === 'browser'"
+                class="workspace-header-button"
+                @click="toggleBrowserFullscreen"
+                :title="isBrowserPanelFullscreen ? t('退出全屏', 'Exit fullscreen') : t('全屏浏览器', 'Fullscreen browser')"
+              >
+                <svg v-if="!isBrowserPanelFullscreen" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3"/>
+                  <path d="M16 3h3a2 2 0 0 1 2 2v3"/>
+                  <path d="M21 16v3a2 2 0 0 1-2 2h-3"/>
+                  <path d="M8 21H5a2 2 0 0 1-2-2v-3"/>
+                </svg>
+                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M8 3v3a2 2 0 0 1-2 2H3"/>
+                  <path d="M16 3v3a2 2 0 0 0 2 2h3"/>
+                  <path d="M21 16h-3a2 2 0 0 0-2 2v3"/>
+                  <path d="M3 16h3a2 2 0 0 1 2 2v3"/>
+                </svg>
+              </button>
+              <button class="workspace-header-button workspace-close" @click="closeWorkspacePanel" :title="t('关闭工作区', 'Close workspace')">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M18 6 6 18"/>
+                  <path d="m6 6 12 12"/>
+                </svg>
+              </button>
+            </div>
           </header>
 
           <section v-if="activeWorkspacePanel === 'browser'" class="browser-workspace">
@@ -383,12 +526,20 @@
                   <span class="runtime-summary-value">{{ chatStore.chats.length }}</span>
                   <span>{{ t('对话', 'Chats') }}</span>
                 </div>
-                <button class="runtime-refresh" @click="chatStore.loadChats()" :title="t('刷新', 'Refresh')">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-                    <path d="M21 3v6h-6"/>
-                  </svg>
-                </button>
+                <div class="runtime-toolbar-actions">
+                  <button type="button" class="runtime-refresh runtime-danger" :disabled="!chatStore.chats.length" @click.stop="openClearAllChatsConfirm" :title="t('清空全部对话', 'Clear all chats')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="3,6 5,6 21,6"/>
+                      <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
+                    </svg>
+                  </button>
+                  <button type="button" class="runtime-refresh" @click="chatStore.loadChats()" :title="t('刷新', 'Refresh')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                      <path d="M21 3v6h-6"/>
+                    </svg>
+                  </button>
+                </div>
               </div>
 
               <div v-if="!chatStore.chats.length" class="runtime-empty">
@@ -555,7 +706,7 @@
                     </svg>
                     <span>{{ t('复制为新会话', 'Copy to new chat') }}</span>
                   </button>
-                  <button @click="runComposerAction('clear')">
+                  <button type="button" @click="runComposerAction('clear')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <polyline points="3,6 5,6 21,6"/>
                       <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
@@ -587,8 +738,17 @@
                 {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
               </span>
             </div>
-            <button class="btn-send" @click="sendMessage" :disabled="(!inputMessage.trim() && pendingAttachments.length === 0) || loading" :title="t('发送', 'Send')">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <button
+              class="btn-send"
+              :class="{ stopping: loading }"
+              @click="handleComposerPrimaryAction"
+              :disabled="!loading && !canSendMessage"
+              :title="loading ? t('停止', 'Stop') : t('发送', 'Send')"
+            >
+              <svg v-if="loading" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                <rect x="7" y="7" width="10" height="10" rx="2"/>
+              </svg>
+              <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="22" y1="2" x2="11" y2="13"/>
                 <polygon points="22,2 15,22 11,13 2,9"/>
               </svg>
@@ -616,6 +776,52 @@
     
     <!-- 设置闈㈡澘閬僵 -->
     <div class="settings-overlay" v-if="showSettings" @click="closeSettings"></div>
+    <div v-if="showClearChatConfirm" class="confirm-overlay" @click.self="closeClearChatConfirm">
+      <section class="confirm-dialog" role="dialog" aria-modal="true" :aria-label="t('清空会话', 'Clear chat')">
+        <div class="confirm-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 9v4"/>
+            <path d="M12 17h.01"/>
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/>
+          </svg>
+        </div>
+        <div class="confirm-copy">
+          <h3>{{ t('清空当前会话？', 'Clear current chat?') }}</h3>
+          <p>{{ t('将清空当前会话里的消息记录，此操作不可恢复。', 'This will clear messages in the current chat and cannot be undone.') }}</p>
+        </div>
+        <div class="confirm-actions">
+          <button type="button" class="confirm-button ghost" @click="closeClearChatConfirm">
+            {{ t('取消', 'Cancel') }}
+          </button>
+          <button type="button" class="confirm-button danger" :disabled="isClearingChat" @click="confirmClearChat">
+            {{ isClearingChat ? t('清空中...', 'Clearing...') : t('确认清空', 'Clear') }}
+          </button>
+        </div>
+      </section>
+    </div>
+    <div v-if="showClearAllChatsConfirm" class="confirm-overlay" @click.self="closeClearAllChatsConfirm">
+      <section class="confirm-dialog" role="dialog" aria-modal="true" :aria-label="t('清空全部对话', 'Clear all chats')">
+        <div class="confirm-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 9v4"/>
+            <path d="M12 17h.01"/>
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/>
+          </svg>
+        </div>
+        <div class="confirm-copy">
+          <h3>{{ t('清空全部对话？', 'Clear all chats?') }}</h3>
+          <p>{{ t('将删除对话管理中的全部对话，此操作不可恢复。', 'This will delete every chat in chat management and cannot be undone.') }}</p>
+        </div>
+        <div class="confirm-actions">
+          <button type="button" class="confirm-button ghost" @click="closeClearAllChatsConfirm">
+            {{ t('取消', 'Cancel') }}
+          </button>
+          <button type="button" class="confirm-button danger" :disabled="isClearingAllChats" @click="confirmClearAllManagedChats">
+            {{ isClearingAllChats ? t('清空中...', 'Clearing...') : t('确认清空', 'Clear all') }}
+          </button>
+        </div>
+      </section>
+    </div>
     <input
       ref="attachmentInput"
       class="hidden-input"
@@ -635,8 +841,9 @@ import { useChatStore } from '@/stores/chat'
 import { api } from '@/api'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
+import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
 import { marked } from 'marked'
-import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep } from '@/types'
+import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
@@ -650,8 +857,29 @@ type RuntimePanelTab = 'chats' | 'runtime'
 const activeWorkspacePanel = ref<WorkspacePanel>('')
 const runtimePanelTab = ref<RuntimePanelTab>('chats')
 const isWorkspaceOpen = computed(() => activeWorkspacePanel.value !== '')
+const isBrowserFullscreen = ref(false)
+const isBrowserPanelFullscreen = computed(() => activeWorkspacePanel.value === 'browser' && isBrowserFullscreen.value)
+const showClearChatConfirm = ref(false)
+const isClearingChat = ref(false)
+const showClearAllChatsConfirm = ref(false)
+const isClearingAllChats = ref(false)
+const isSourceWorkspaceOpen = ref(false)
+const sourceWorkspaceRef = ref<HTMLElement | null>(null)
+const sourceDragDepth = ref(0)
+const isSourceDragging = computed(() => sourceDragDepth.value > 0)
+const workspaceSources = ref<WorkspaceSource[]>([])
+const selectedWorkspacePaths = ref<string[]>([])
+const expandedWorkspacePaths = ref<string[]>([])
+const showWebSourceInput = ref(false)
+const webSourceUrl = ref('')
+const webSourceInputRef = ref<HTMLInputElement | null>(null)
+const sourceWorkspaceWidth = ref(426)
+const isResizingSourceWorkspace = ref(false)
 const workspaceWidth = ref(560)
 const isResizingWorkspace = ref(false)
+const SOURCE_WORKSPACE_DEFAULT_WIDTH = 426
+const SOURCE_WORKSPACE_MIN_WIDTH = 320
+const SOURCE_WORKSPACE_MAX_WIDTH = 700
 const WORKSPACE_DEFAULT_WIDTH = 560
 const WORKSPACE_MIN_WIDTH = 360
 const WORKSPACE_MAX_WIDTH = 820
@@ -661,13 +889,70 @@ const WORKSPACE_RIGHT_GUTTER = 18
 const workspaceLayoutStyle = computed<Record<string, string>>(() => {
   return {
     '--workspace-width': isWorkspaceOpen.value ? `${workspaceWidth.value}px` : '0px',
+    '--source-workspace-width': isSourceWorkspaceOpen.value ? `${sourceWorkspaceWidth.value}px` : '0px',
   }
 })
+
+function clampSourceWorkspaceWidth(width: number): number {
+  if (typeof window === 'undefined') {
+    return Math.min(Math.max(width, SOURCE_WORKSPACE_MIN_WIDTH), SOURCE_WORKSPACE_MAX_WIDTH)
+  }
+
+  const reservedRight = isWorkspaceOpen.value ? workspaceWidth.value : 0
+  const viewportMax = Math.max(
+    SOURCE_WORKSPACE_MIN_WIDTH,
+    window.innerWidth - WORKSPACE_MIN_CHAT_WIDTH - reservedRight - WORKSPACE_RIGHT_GUTTER,
+  )
+  const maxWidth = Math.min(SOURCE_WORKSPACE_MAX_WIDTH, viewportMax)
+  return Math.round(Math.min(Math.max(width, SOURCE_WORKSPACE_MIN_WIDTH), maxWidth))
+}
+
+function updateSourceWorkspaceWidthFromPointer(clientX: number): void {
+  sourceWorkspaceWidth.value = clampSourceWorkspaceWidth(clientX)
+}
+
+function startSourceWorkspaceResize(event: PointerEvent): void {
+  if (!isSourceWorkspaceOpen.value) return
+
+  event.preventDefault()
+  const target = event.currentTarget as HTMLElement | null
+  target?.setPointerCapture?.(event.pointerId)
+  isResizingSourceWorkspace.value = true
+  document.body.classList.add('source-workspace-resizing')
+  updateSourceWorkspaceWidthFromPointer(event.clientX)
+  window.addEventListener('pointermove', onSourceWorkspaceResize)
+  window.addEventListener('pointerup', stopSourceWorkspaceResize, { once: true })
+  window.addEventListener('pointercancel', stopSourceWorkspaceResize, { once: true })
+}
+
+function onSourceWorkspaceResize(event: PointerEvent): void {
+  updateSourceWorkspaceWidthFromPointer(event.clientX)
+}
+
+function stopSourceWorkspaceResize(): void {
+  if (!isResizingSourceWorkspace.value) return
+
+  isResizingSourceWorkspace.value = false
+  document.body.classList.remove('source-workspace-resizing')
+  window.removeEventListener('pointermove', onSourceWorkspaceResize)
+  window.removeEventListener('pointerup', stopSourceWorkspaceResize)
+  window.removeEventListener('pointercancel', stopSourceWorkspaceResize)
+}
+
+function resetSourceWorkspaceWidth(): void {
+  sourceWorkspaceWidth.value = clampSourceWorkspaceWidth(SOURCE_WORKSPACE_DEFAULT_WIDTH)
+}
 
 const workspacePanelTitle = computed(() => {
   if (activeWorkspacePanel.value === 'browser') return t('浏览器', 'Browser')
   if (activeWorkspacePanel.value === 'runtime') return t('对话与运行', 'Chats & runtime')
   return t('工作区', 'Workspace')
+})
+
+const workspacePanelSubtitle = computed(() => {
+  if (activeWorkspacePanel.value === 'browser') return t('网页浏览与检索辅助', 'Web browsing and research')
+  if (activeWorkspacePanel.value === 'runtime') return t('对话管理与运行事件', 'Chat management and runtime events')
+  return t('当前工作区', 'Current workspace')
 })
 
 function clampWorkspaceWidth(width: number): number {
@@ -767,10 +1052,12 @@ const messages = ref<Message[]>([])
 const inputMessage = ref('')
 const attachmentInput = ref<HTMLInputElement | null>(null)
 const pendingAttachments = ref<ChatAttachment[]>([])
+const canSendMessage = computed(() => !!inputMessage.value.trim() || pendingAttachments.value.length > 0)
 const composerMenuOpen = ref(false)
 const composerDragDepth = ref(0)
 const isComposerDragging = computed(() => composerDragDepth.value > 0)
 const loading = ref(false)
+const isCancellingRun = ref(false)
 const isForking = ref(false)
 const skillsEnabled = ref(true)  // 技能开关状态
 const messagesContainer = ref<HTMLElement | null>(null)
@@ -908,21 +1195,13 @@ async function createOrGetSession() {
   if (!selectedAgentId.value) return
   
   try {
-    // 灏濊瘯浠?localStorage 鎭㈠ runner 閫氶亾 ID
     const savedRunnerSessionId = localStorage.getItem(`session_${selectedAgentId.value}`)
-    
     if (savedRunnerSessionId) {
-      // 妫€鏌?localStorage 涓槸鍚︽湁瀵瑰簲鐨勬秷鎭巻鍙?
-      const savedMessages = localStorage.getItem(`messages_${savedRunnerSessionId}`)
-      if (savedMessages) {
-        // 鏈夊巻鍙叉秷鎭紝鐩存帴浣跨敤淇濆瓨鐨?runner 閫氶亾 ID
-        runnerSessionId.value = savedRunnerSessionId
-        console.log('Restored runner chat channel from localStorage:', runnerSessionId.value)
-        return
-      }
+      runnerSessionId.value = savedRunnerSessionId
+      console.log('Restored runner chat channel:', runnerSessionId.value)
+      return
     }
     
-    // 鍒涘缓鏂扮殑 runner 閫氶亾 ID
     runnerSessionId.value = `session_agent_${selectedAgentId.value}_${Date.now()}`
     localStorage.setItem(`session_${selectedAgentId.value}`, runnerSessionId.value)
     console.log('Created runner chat channel:', runnerSessionId.value)
@@ -948,36 +1227,29 @@ async function loadChatHistory() {
   if (!runnerSessionId.value) return
   
   try {
-    // 棣栧厛灏濊瘯浠?localStorage 鍔犺浇
-    const savedMessages = localStorage.getItem(`messages_${runnerSessionId.value}`)
-    if (savedMessages) {
-      messages.value = JSON.parse(savedMessages)
-      scrollToBottom()
-      return
-    }
-    
-    // 濡傛灉 localStorage 娌℃湁锛屽皾璇曚粠 runner chat 鍘嗗彶鍔犺浇
     const chat = await api.getChatByRunnerSession(runnerSessionId.value)
     const history = await api.getChatHistory(chat.id)
     messages.value = history.messages || []
     scrollToBottom()
   } catch (error) {
     console.error('Failed to load chat history:', error)
-    // 灏濊瘯浠?localStorage 鍔犺浇浣滀负澶囦唤
     const savedMessages = localStorage.getItem(`messages_${runnerSessionId.value}`)
     if (savedMessages) {
       messages.value = JSON.parse(savedMessages)
+      try {
+        await api.persistChatMessages(runnerSessionId.value, messages.value)
+        localStorage.removeItem(`messages_${runnerSessionId.value}`)
+      } catch (persistError) {
+        console.warn('Failed to migrate local chat messages:', persistError)
+      }
     } else {
       messages.value = []
     }
   }
 }
 
-// 淇濆瓨娑堟伅鍒?localStorage
 function saveMessages() {
-  if (runnerSessionId.value && messages.value.length > 0) {
-    localStorage.setItem(`messages_${runnerSessionId.value}`, JSON.stringify(messages.value))
-  }
+  // Messages are now persisted by the backend under ~/.open-agent/data/sessions.
 }
 
 function resetRuntimeReplay() {
@@ -988,6 +1260,7 @@ function resetRuntimeReplay() {
 }
 
 async function openRuntimePanel() {
+  isBrowserFullscreen.value = false
   activeWorkspacePanel.value = 'runtime'
   runtimePanelTab.value = 'chats'
   await chatStore.loadChats()
@@ -1039,6 +1312,51 @@ async function deleteManagedChat(chat: Chat) {
       await loadChatHistory()
     }
   }
+}
+
+function openClearAllChatsConfirm() {
+  if (!chatStore.chats.length || isClearingAllChats.value) return
+  showClearAllChatsConfirm.value = true
+}
+
+function closeClearAllChatsConfirm() {
+  if (isClearingAllChats.value) return
+  showClearAllChatsConfirm.value = false
+}
+
+async function confirmClearAllManagedChats() {
+  if (isClearingAllChats.value) return
+  isClearingAllChats.value = true
+  try {
+    await clearAllManagedChats()
+    showClearAllChatsConfirm.value = false
+  } finally {
+    isClearingAllChats.value = false
+  }
+}
+
+async function clearAllManagedChats() {
+  const chats = [...chatStore.chats]
+  if (!chats.length) return
+
+  const deletingCurrent = chats.some(chat => chat.session_id === runnerSessionId.value)
+  await chatStore.deleteChats(chats.map(chat => chat.id))
+  for (const chat of chats) {
+    localStorage.removeItem(`messages_${chat.session_id}`)
+  }
+
+  if (deletingCurrent) {
+    messages.value = []
+    pendingAttachments.value = []
+    resetRuntimeReplay()
+    if (selectedAgentId.value) {
+      localStorage.removeItem(`session_${selectedAgentId.value}`)
+      await createOrGetSession()
+      await loadChatHistory()
+    }
+  }
+
+  await chatStore.loadChats()
 }
 
 async function loadRuntimeReplay() {
@@ -1138,14 +1456,12 @@ async function forkCurrentTask() {
 
   isForking.value = true
   try {
-    const currentMessages = JSON.parse(JSON.stringify(messages.value))
     const forked = await api.forkChat(runnerSessionId.value, `${getAgentName()} Task`)
     const nextRunnerSessionId = forked.chat.session_id
 
     runnerSessionId.value = nextRunnerSessionId
     localStorage.setItem(`session_${selectedAgentId.value}`, nextRunnerSessionId)
-    localStorage.setItem(`messages_${nextRunnerSessionId}`, JSON.stringify(currentMessages))
-    saveMessages()
+    await loadChatHistory()
     resetRuntimeReplay()
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
       await chatStore.loadChats()
@@ -1162,13 +1478,19 @@ async function forkCurrentTask() {
 async function toggleSkills() {
   skillsEnabled.value = !skillsEnabled.value
   try {
-    await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enable_skills: skillsEnabled.value }),
-    })
-  } catch {
-    // toggle works locally even if API is unavailable
+    await api.saveSettings({ enable_skills: skillsEnabled.value })
+  } catch (error) {
+    skillsEnabled.value = !skillsEnabled.value
+    console.error('Failed to toggle skills:', error)
+  }
+}
+
+async function syncSkillsSetting() {
+  try {
+    const settings = await api.getSettings()
+    skillsEnabled.value = settings.enable_skills ?? true
+  } catch (error) {
+    console.warn('Failed to sync skills setting:', error)
   }
 }
 
@@ -1196,7 +1518,7 @@ async function runComposerAction(action: 'image' | 'clear' | 'new' | 'fork' | 'c
     return
   }
   if (action === 'clear') {
-    clearChat()
+    openClearChatConfirm()
     return
   }
   if (action === 'new') {
@@ -1288,6 +1610,208 @@ async function addDroppedFilePaths(paths: string[]) {
   }
 }
 
+function toggleSourceWorkspace() {
+  isSourceWorkspaceOpen.value = !isSourceWorkspaceOpen.value
+  if (!isSourceWorkspaceOpen.value) {
+    stopSourceWorkspaceResize()
+  }
+}
+
+async function addWorkspaceSourcePaths(paths: string[]) {
+  if (!paths.length) return
+  try {
+    const result = await api.createWorkspaceSources(paths)
+    const existing = new Set(workspaceSources.value.map(source => source.path))
+    const incoming = (result.sources || []).filter(source => !existing.has(source.path))
+    workspaceSources.value.push(...incoming)
+    const incomingDirectories = incoming.filter(source => source.type === 'directory').map(source => source.path)
+    if (incomingDirectories.length) {
+      expandedWorkspacePaths.value = Array.from(new Set([...expandedWorkspacePaths.value, ...incomingDirectories]))
+    }
+    if (result.rejected?.length) {
+      const first = result.rejected[0]
+      alert(t(`部分来源未添加：${first.reason}`, `Some sources were not added: ${first.reason}`))
+    }
+  } catch (error) {
+    console.error('Failed to add workspace sources:', error)
+    alert(t('添加资料库来源失败，请重试。', 'Failed to add library sources. Please try again.'))
+  }
+}
+
+async function chooseWorkspaceFiles() {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const selected = await open({ multiple: true, directory: false, title: t('选择文件', 'Select files') })
+    const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
+    await addWorkspaceSourcePaths(paths.map(String))
+  } catch (error) {
+    console.error('Tauri file dialog is not available:', error)
+    alert(t('当前环境不支持系统文件选择窗口。', 'System file dialog is not available in this environment.'))
+  }
+}
+
+async function chooseWorkspaceDirectory() {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const selected = await open({ multiple: true, directory: true, title: t('选择目录', 'Select folders') })
+    const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
+    await addWorkspaceSourcePaths(paths.map(String))
+  } catch (error) {
+    console.error('Tauri directory dialog is not available:', error)
+    alert(t('当前环境不支持目录选择窗口。', 'Folder picker is not available in this environment.'))
+  }
+}
+
+function collectWorkspaceSourcePaths(source: WorkspaceSourceNode): string[] {
+  const childPaths = (source.children || []).flatMap(collectWorkspaceSourcePaths)
+  return [source.path, ...childPaths]
+}
+
+function clearWorkspaceSources() {
+  workspaceSources.value = []
+  selectedWorkspacePaths.value = []
+  expandedWorkspacePaths.value = []
+}
+
+function openWebSourceInput() {
+  showWebSourceInput.value = true
+  void nextTick(() => webSourceInputRef.value?.focus())
+}
+
+function addWebSource() {
+  const url = normalizeWebSourceUrl(webSourceUrl.value)
+  if (!url) {
+    alert(t('请输入有效的 Web 地址。', 'Please enter a valid web URL.'))
+    return
+  }
+
+  if (workspaceSources.value.some(source => source.path === url)) {
+    webSourceUrl.value = ''
+    showWebSourceInput.value = false
+    return
+  }
+
+  workspaceSources.value.push({
+    id: `src_web_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: webSourceName(url),
+    path: url,
+    type: 'web',
+    mime_type: 'text/html',
+    size: null,
+    modified_at: Date.now() / 1000,
+    children: [],
+    children_count: 0,
+  })
+  webSourceUrl.value = ''
+  showWebSourceInput.value = false
+}
+
+function normalizeWebSourceUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim()
+  if (!trimmed) return ''
+  const candidate = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed) ? trimmed : `https://${trimmed}`
+  try {
+    const url = new URL(candidate)
+    if (!['http:', 'https:'].includes(url.protocol)) return ''
+    return url.toString()
+  } catch {
+    return ''
+  }
+}
+
+function webSourceName(url: string): string {
+  try {
+    const parsed = new URL(url)
+    return parsed.hostname || url
+  } catch {
+    return url
+  }
+}
+
+function toggleWorkspaceSourceSelection(path: string) {
+  const selected = new Set(selectedWorkspacePaths.value)
+  if (selected.has(path)) {
+    selected.delete(path)
+  } else {
+    selected.add(path)
+  }
+  selectedWorkspacePaths.value = Array.from(selected)
+}
+
+function toggleWorkspaceSourceExpanded(path: string) {
+  const expanded = new Set(expandedWorkspacePaths.value)
+  if (expanded.has(path)) {
+    expanded.delete(path)
+  } else {
+    expanded.add(path)
+  }
+  expandedWorkspacePaths.value = Array.from(expanded)
+}
+
+function removeWorkspaceSource(sourceIdOrPath: string) {
+  const removed = workspaceSources.value.find(source => source.id === sourceIdOrPath || source.path === sourceIdOrPath)
+  const removedPaths = new Set(removed ? collectWorkspaceSourcePaths(removed) : [sourceIdOrPath])
+  workspaceSources.value = workspaceSources.value.filter(source => source.id !== sourceIdOrPath && source.path !== sourceIdOrPath)
+  selectedWorkspacePaths.value = selectedWorkspacePaths.value.filter(path => !removedPaths.has(path))
+  expandedWorkspacePaths.value = expandedWorkspacePaths.value.filter(path => !removedPaths.has(path))
+}
+
+async function openWorkspaceSourceLocation(source: WorkspaceSourceNode) {
+  const path = source.path || ''
+  if (!path) return
+
+  const target = source.type === 'file' ? parentDirectory(path) : path
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('open_path', { target })
+  } catch (error) {
+    console.warn('Failed to open library source location:', error)
+    alert(t('当前环境无法打开该位置。', 'This environment cannot open this location.'))
+  }
+}
+
+function parentDirectory(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  const index = normalized.lastIndexOf('/')
+  if (index <= 0) return path
+  const parent = path.slice(0, index)
+  return parent || path
+}
+
+function onSourceDragEnter(event: DragEvent) {
+  if (!hasDraggedFiles(event)) return
+  sourceDragDepth.value += 1
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onSourceDragOver(event: DragEvent) {
+  if (!hasDraggedFiles(event)) return
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onSourceDragLeave(event: DragEvent) {
+  if (!hasDraggedFiles(event)) return
+  sourceDragDepth.value = Math.max(0, sourceDragDepth.value - 1)
+}
+
+async function onSourceDrop(event: DragEvent) {
+  sourceDragDepth.value = 0
+  const files = Array.from(event.dataTransfer?.files || [])
+  if (!files.length) return
+  const sources: WorkspaceSource[] = files.map(file => ({
+    id: `src_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: file.name,
+    path: file.name,
+    type: 'file',
+    mime_type: file.type || 'application/octet-stream',
+    size: file.size,
+    children: [],
+    children_count: 0,
+  }))
+  const existing = new Set(workspaceSources.value.map(source => `${source.name}:${source.size || 0}`))
+  workspaceSources.value.push(...sources.filter(source => !existing.has(`${source.name}:${source.size || 0}`)))
+}
+
 async function addFiles(files: File[]) {
   const maxFileSize = 10 * 1024 * 1024
   const acceptedFiles = files.filter((file) => {
@@ -1331,9 +1855,33 @@ function attachmentPreview(attachment: ChatAttachment) {
   return `data:${attachment.mime_type};base64,${attachment.data}`
 }
 
+function handleComposerPrimaryAction() {
+  if (loading.value) {
+    void stopCurrentRun()
+    return
+  }
+  void sendMessage()
+}
+
+async function stopCurrentRun() {
+  if (!loading.value || !runnerSessionId.value || isCancellingRun.value) return
+  isCancellingRun.value = true
+  try {
+    await api.cancelRunnerChat(runnerSessionId.value)
+  } catch (error) {
+    console.error('Failed to stop current run:', error)
+  }
+}
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !loading.value) return
+  event.preventDefault()
+  void stopCurrentRun()
+}
+
 // 鍙戦€佹秷鎭?
 async function sendMessage() {
-  if ((!inputMessage.value.trim() && pendingAttachments.value.length === 0) || loading.value || !selectedAgentId.value) return
+  if (!canSendMessage.value || loading.value || !selectedAgentId.value) return
   
   // Ensure the runner channel exists before sending.
   if (!runnerSessionId.value) {
@@ -1342,6 +1890,8 @@ async function sendMessage() {
   
   const userMessage = inputMessage.value.trim()
   const attachments = [...pendingAttachments.value]
+  const workspacePayload = workspaceSources.value
+  const selectedWorkspacePayload = [...selectedWorkspacePaths.value]
   inputMessage.value = ''
   pendingAttachments.value = []
   
@@ -1372,6 +1922,7 @@ async function sendMessage() {
   
   try {
     let assistantContent = ''
+    let runCancelled = false
     
     // 浣跨敤 runner 閫氶亾 ID锛岃€屼笉鏄?agentId
     // 鐩戝惉鍚庣鍙戦€佺殑浜嬩欢锛歵hinking, tool_call, tool_result, complete, error
@@ -1457,6 +2008,21 @@ async function sendMessage() {
           assistantMessage.thinking.isThinking = false
         }
       }
+
+      if (event.event === 'cancelled') {
+        runCancelled = true
+        assistantContent = t('已停止。', 'Stopped.')
+        assistantMessage.isLoading = false
+        if (settingsStore.settings.useCoT && assistantMessage.thinking) {
+          assistantMessage.thinking.steps.push({
+            id: generateId(),
+            type: 'observation',
+            content: t('用户已停止当前运行。', 'The user stopped the current run.'),
+            timestamp: new Date().toISOString()
+          })
+          assistantMessage.thinking.isThinking = false
+        }
+      }
       
       // 鐩戝惉閿欒浜嬩欢
       if (event.event === 'error' && event.error) {
@@ -1472,7 +2038,7 @@ async function sendMessage() {
           assistantMessage.thinking.isThinking = false
         }
       }
-    }, attachments)
+    }, attachments, workspacePayload, selectedWorkspacePayload)
 
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
       await loadRuntimeReplay()
@@ -1480,13 +2046,17 @@ async function sendMessage() {
     
     assistantMessage.isLoading = false
     // 更新 assistant 消息内容，加入本地打字机动画
-    await typewriterReveal(
-      assistantMessage,
-      assistantContent || t('抱歉，没有收到回复。', 'Sorry, no response received.'),
-      {
-        onUpdate: scrollToBottom
-      }
-    )
+    if (runCancelled) {
+      assistantMessage.content = assistantContent
+    } else {
+      await typewriterReveal(
+        assistantMessage,
+        assistantContent || t('抱歉，没有收到回复。', 'Sorry, no response received.'),
+        {
+          onUpdate: scrollToBottom
+        }
+      )
+    }
 
     scrollToBottom()
   } catch (error) {
@@ -1498,6 +2068,7 @@ async function sendMessage() {
     assistantMessage.content = t('抱歉，发生了错误。请重试。', 'Sorry, an error occurred. Please try again.')
   } finally {
     loading.value = false
+    isCancellingRun.value = false
     // 淇濆瓨娑堟伅鍒?localStorage
     saveMessages()
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
@@ -1507,12 +2078,35 @@ async function sendMessage() {
 }
 
 // 娓呯┖鑱婂ぉ
-function clearChat() {
-  if (confirm(t('确定要清空对话记录吗？', 'Are you sure you want to clear the chat?'))) {
-    messages.value = []
-    // 娓呯┖ localStorage 涓殑娑堟伅
-    if (runnerSessionId.value) {
-      localStorage.removeItem(`messages_${runnerSessionId.value}`)
+function openClearChatConfirm() {
+  if (isClearingChat.value) return
+  showClearChatConfirm.value = true
+}
+
+function closeClearChatConfirm() {
+  if (isClearingChat.value) return
+  showClearChatConfirm.value = false
+}
+
+async function confirmClearChat() {
+  if (isClearingChat.value) return
+  isClearingChat.value = true
+  try {
+    await clearChat()
+    showClearChatConfirm.value = false
+  } finally {
+    isClearingChat.value = false
+  }
+}
+
+async function clearChat() {
+  messages.value = []
+  if (runnerSessionId.value) {
+    localStorage.removeItem(`messages_${runnerSessionId.value}`)
+    try {
+      await api.clearChatMessages(runnerSessionId.value)
+    } catch (error) {
+      console.error('Failed to clear persisted chat messages:', error)
     }
   }
 }
@@ -1667,13 +2261,25 @@ function closeBrowserTab(tabId: string) {
     const nextTab = browserTabs.value[index] || browserTabs.value[index - 1] || null
     activeBrowserTabId.value = nextTab?.id || ''
     browserAddress.value = nextTab?.url || ''
-    if (!nextTab) activeWorkspacePanel.value = ''
+    if (!nextTab) {
+      isBrowserFullscreen.value = false
+      activeWorkspacePanel.value = ''
+    }
   }
 }
 
 function closeWorkspacePanel() {
   stopWorkspaceResize()
+  isBrowserFullscreen.value = false
   activeWorkspacePanel.value = ''
+}
+
+function toggleBrowserFullscreen(): void {
+  if (activeWorkspacePanel.value !== 'browser') return
+
+  stopSourceWorkspaceResize()
+  stopWorkspaceResize()
+  isBrowserFullscreen.value = !isBrowserFullscreen.value
 }
 
 function browserBack() {
@@ -1741,31 +2347,49 @@ async function listenForDesktopFileDrops() {
     const tauriWebview = await import('@tauri-apps/api/webview')
     const webview = tauriWebview.getCurrentWebview()
     unlistenDesktopFileDrops = await webview.onDragDropEvent((event: any) => {
+      const overSourceWorkspace = isDesktopDropOverSourceWorkspace(event.payload?.position)
       if (event.payload?.type === 'over') {
-        composerDragDepth.value = 1
+        sourceDragDepth.value = overSourceWorkspace ? 1 : 0
+        composerDragDepth.value = overSourceWorkspace ? 0 : 1
         return
       }
       if (event.payload?.type === 'drop') {
         composerDragDepth.value = 0
-        void addDroppedFilePaths(event.payload.paths || [])
+        sourceDragDepth.value = 0
+        if (overSourceWorkspace) {
+          void addWorkspaceSourcePaths(event.payload.paths || [])
+        } else {
+          void addDroppedFilePaths(event.payload.paths || [])
+        }
         return
       }
       composerDragDepth.value = 0
+      sourceDragDepth.value = 0
     })
   } catch (error) {
     console.debug('Tauri file drop bridge is not available in web mode:', error)
   }
 }
 
+function isDesktopDropOverSourceWorkspace(position: { x?: number; y?: number } | undefined) {
+  if (!isSourceWorkspaceOpen.value || !position || !sourceWorkspaceRef.value) return false
+  const rect = sourceWorkspaceRef.value.getBoundingClientRect()
+  const x = Number(position.x)
+  const y = Number(position.y)
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+}
+
 // 鍒濆鍖?
 onMounted(async () => {
   window.addEventListener('click', closeComposerMenu)
+  window.addEventListener('keydown', handleGlobalKeydown)
   await listenForDesktopNavigation()
   await listenForDesktopFileDrops()
 
   await agentStore.loadAgents()
   await agentStore.loadModelConfigs()
   await chatStore.loadChats()
+  await syncSkillsSetting()
   
   // 灏濊瘯鎭㈠涔嬪墠閫変腑鐨勬櫤鑳戒綋
   const savedAgentId = localStorage.getItem('selected_agent_id')
@@ -1799,8 +2423,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('click', closeComposerMenu)
+  window.removeEventListener('keydown', handleGlobalKeydown)
   unlistenDesktopFileDrops?.()
   unlistenDesktopFileDrops = null
+  stopSourceWorkspaceResize()
   stopWorkspaceResize()
 })
 </script>
@@ -2214,16 +2840,20 @@ onUnmounted(() => {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 30px 32px 24px;
   display: flex;
   flex-direction: column;
   gap: 18px;
+  min-width: 0;
 }
 
 .message {
   display: flex;
   gap: 12px;
+  width: fit-content;
   max-width: min(78%, 860px);
+  min-width: 0;
   animation: message-rise 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -2354,6 +2984,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .message-header {
@@ -2378,6 +3010,9 @@ onUnmounted(() => {
 }
 
 .message-text {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   padding: 12px 15px;
   border-radius: 16px;
   font-size: 14px;
@@ -2388,6 +3023,8 @@ onUnmounted(() => {
   box-shadow: 0 12px 28px rgba(17, 24, 39, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.68);
   backdrop-filter: blur(14px) saturate(150%);
   -webkit-backdrop-filter: blur(14px) saturate(150%);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message.user .message-text {
@@ -2399,6 +3036,9 @@ onUnmounted(() => {
 
 .message-text :deep(p) {
   margin: 0 0 8px 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-text :deep(p:last-child) {
@@ -2406,18 +3046,48 @@ onUnmounted(() => {
 }
 
 .message-text :deep(code) {
+  max-width: 100%;
   background: rgba(23, 23, 23, 0.08);
   padding: 2px 6px;
   border-radius: 6px;
   font-family: monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-text :deep(pre) {
+  max-width: 100%;
   background: rgba(23, 23, 23, 0.07);
   padding: 12px;
   border-radius: 12px;
   overflow-x: auto;
+  overflow-y: hidden;
   margin: 8px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-text :deep(pre code) {
+  display: block;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.message-text :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.message-text :deep(a) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .typing-indicator {
@@ -2900,6 +3570,15 @@ onUnmounted(() => {
   transform: translateY(-1px);
 }
 
+.btn-send.stopping {
+  background: #ef4444;
+  box-shadow: 0 14px 30px rgba(239, 68, 68, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.btn-send.stopping:hover:not(:disabled) {
+  opacity: 0.94;
+}
+
 .btn-send:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -2944,6 +3623,111 @@ onUnmounted(() => {
   z-index: 999;
 }
 
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.22);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.confirm-dialog {
+  width: min(420px, calc(100vw - 48px));
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+  background: var(--glass-bg-strong);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+}
+
+.confirm-icon {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+.confirm-icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.confirm-copy {
+  min-width: 0;
+}
+
+.confirm-copy h3 {
+  margin: 0 0 6px;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 760;
+}
+
+.confirm-copy p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.confirm-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 6px;
+}
+
+.confirm-button {
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.16s ease, border-color 0.16s ease;
+}
+
+.confirm-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--glass-bg-strong) 82%, rgba(47, 110, 244, 0.12));
+  border-color: rgba(47, 110, 244, 0.32);
+}
+
+.confirm-button:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.confirm-button.danger {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: #ef4444;
+  color: #fff;
+}
+
+.confirm-button.danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: #dc2626;
+}
+
+.confirm-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 /* 鍙岄潰鏉垮竷灞€ */
 .chat-body {
   flex: 1;
@@ -2958,6 +3742,296 @@ onUnmounted(() => {
   align-items: stretch;
   gap: 0;
   min-height: 0;
+}
+
+.chat-body.source-open {
+  flex-direction: row;
+  align-items: stretch;
+}
+
+.source-workspace-panel {
+  flex: 0 0 var(--source-workspace-width, 320px);
+  min-width: 320px;
+  max-width: 700px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  margin: 8px 0 8px 9px;
+  border: 1px solid var(--border-color);
+  border-radius: 22px;
+  background: var(--glass-bg-strong);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  overflow: hidden;
+}
+
+.source-resizer {
+  flex: 0 0 8px;
+  width: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 10;
+}
+
+.source-resizer span {
+  width: 4px;
+  height: 60px;
+  border-radius: 999px;
+  background: rgba(115, 115, 115, 0.32);
+  transition: all 0.2s;
+}
+
+.source-resizer:hover span {
+  height: 100px;
+  background: var(--primary-color, #3b82f6);
+}
+
+.source-resizer.active span {
+  width: 4px;
+  height: 100%;
+  background: var(--primary-color, #3b82f6);
+}
+
+.source-resizer:hover,
+.source-resizer.active {
+  background: transparent;
+}
+
+.source-workspace-header {
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-color);
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.source-drop-zone {
+  margin: 14px;
+  min-height: 174px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 18px;
+  border: 1px dashed rgba(47, 110, 244, 0.36);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--glass-bg-strong) 86%, rgba(47, 110, 244, 0.08));
+  color: var(--text-secondary);
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.source-drop-zone:hover,
+.source-drop-zone.drag-over {
+  border-color: rgba(47, 110, 244, 0.68);
+  background: color-mix(in srgb, var(--glass-bg-strong) 78%, rgba(47, 110, 244, 0.18));
+  box-shadow: 0 14px 34px rgba(47, 110, 244, 0.12);
+}
+
+.source-drop-icon {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: rgba(47, 110, 244, 0.12);
+  color: var(--primary-color);
+}
+
+.source-drop-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.source-drop-zone strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.source-drop-zone span {
+  max-width: 230px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.source-drop-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.source-drop-actions button,
+.source-list-head button {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.source-web-form {
+  width: 100%;
+  max-width: 310px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.source-web-form input {
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.source-web-form input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(47, 110, 244, 0.12);
+}
+
+.source-web-form button {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--primary-color);
+  border-radius: 9px;
+  background: var(--primary-color);
+  color: white;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.source-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 14px 14px;
+  overflow-y: auto;
+}
+
+.source-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.source-empty {
+  padding: 18px;
+  border: 1px dashed var(--border-color);
+  border-radius: 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.source-item {
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--glass-bg-strong);
+  overflow: hidden;
+}
+
+.source-item-main {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+}
+
+.source-type-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: rgba(47, 110, 244, 0.1);
+  color: var(--primary-color);
+}
+
+.source-type-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.source-item h4 {
+  margin: 0 0 3px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-item p {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-remove {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.source-children {
+  padding: 0 10px 10px 53px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.source-children ul {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.source-children li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .private-chat-panel {
@@ -2995,7 +4069,7 @@ onUnmounted(() => {
   align-self: stretch;
   position: relative;
   overflow: hidden;
-  margin: 16px 18px 16px 0;
+  margin: 8px 9px 8px 0;
   border: 1px solid var(--border-color);
   border-radius: 22px;
   background: var(--glass-bg-strong);
@@ -3004,58 +4078,79 @@ onUnmounted(() => {
   -webkit-backdrop-filter: blur(18px) saturate(160%);
 }
 
+.chat-body.browser-fullscreen {
+  position: relative;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.chat-body.browser-fullscreen .source-workspace-panel,
+.chat-body.browser-fullscreen .source-resizer,
+.chat-body.browser-fullscreen .private-chat-panel,
+.chat-body.browser-fullscreen .workspace-resizer {
+  display: none;
+}
+
+.chat-body.browser-fullscreen .workspace-panel.browser-fullscreen-panel {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  align-self: stretch;
+  background: var(--glass-bg-strong);
+}
+
+.chat-body.browser-fullscreen .workspace-panel-header {
+  padding: 12px 16px;
+}
+
+.chat-body.browser-fullscreen .browser-frame-area {
+  margin: 10px;
+  border-radius: 14px;
+}
+
 .workspace-resizer {
-  flex: 0 0 12px;
-  width: 12px;
-  margin: 16px 0;
+  flex: 0 0 8px;
+  width: 8px;
+  margin: 0;
   padding: 0;
   border: 0;
   background: transparent;
-  box-shadow: none;
-  color: var(--border-color);
   cursor: col-resize;
   display: flex;
-  align-items: stretch;
+  align-items: center;
   justify-content: center;
   position: relative;
   touch-action: none;
-  z-index: 2;
+  z-index: 10;
 }
 
 .workspace-resizer span {
-  width: 1px;
-  margin: 0 auto;
+  width: 4px;
+  height: 60px;
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.45);
-  opacity: 0.85;
-  box-shadow:
-    -3px 0 0 rgba(255, 255, 255, 0.62),
-    3px 0 0 rgba(148, 163, 184, 0.16);
-  transition: transform 0.18s ease, opacity 0.18s ease, background 0.18s ease;
+  background: rgba(115, 115, 115, 0.32);
+  transition: all 0.2s;
 }
 
-.workspace-resizer::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 999px;
-  background: transparent;
+.workspace-resizer:hover span {
+  height: 100px;
+  background: var(--primary-color, #3b82f6);
 }
 
-.workspace-resizer:hover span,
 .workspace-resizer.active span {
-  opacity: 1;
-  transform: scaleX(1.5);
-  background: rgba(47, 110, 244, 0.58);
-  box-shadow:
-    -3px 0 0 rgba(255, 255, 255, 0.72),
-    3px 0 0 rgba(47, 110, 244, 0.16);
+  width: 4px;
+  height: 100%;
+  background: var(--primary-color, #3b82f6);
 }
 
 .workspace-resizer:hover,
 .workspace-resizer.active {
   background: transparent;
-  box-shadow: none;
 }
 
 .workspace-panel-header {
@@ -3063,27 +4158,60 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 48px;
-  min-height: 48px;
-  padding: 0 14px;
+  min-height: 68px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--border-color);
-  background: rgba(255, 255, 255, 0.34);
-  box-shadow: inset 0 1px 0 var(--glass-border);
+  background: transparent;
+  box-shadow: none;
   flex-shrink: 0;
 }
 
 .workspace-panel-title {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
   color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 1;
 }
 
-.workspace-panel-icon,
+.workspace-panel-icon {
+  display: block;
+  width: 18px !important;
+  height: 18px !important;
+  flex: 0 0 18px;
+  max-width: 18px !important;
+  max-height: 18px !important;
+  min-width: 18px;
+  min-height: 18px;
+  color: var(--text-primary);
+}
+
+.workspace-panel-copy {
+  min-width: 0;
+}
+
+.workspace-panel-copy h3 {
+  margin: 0 0 4px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 750;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-panel-copy p {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-header-button svg,
 .workspace-close svg {
   display: block;
   width: 18px !important;
@@ -3095,6 +4223,14 @@ onUnmounted(() => {
   min-height: 18px;
 }
 
+.workspace-panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.workspace-header-button,
 .workspace-close {
   display: inline-flex;
   align-items: center;
@@ -3109,6 +4245,7 @@ onUnmounted(() => {
   transition: transform 0.18s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 
+.workspace-header-button:hover,
 .workspace-close:hover {
   background: var(--glass-bg-strong);
   border-color: var(--border-color);
@@ -3389,6 +4526,34 @@ onUnmounted(() => {
   background: var(--glass-bg-strong);
   color: var(--text-primary);
   cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.runtime-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-refresh:hover:not(:disabled) {
+  border-color: rgba(47, 110, 244, 0.45);
+  background: color-mix(in srgb, var(--glass-bg-strong) 84%, rgba(47, 110, 244, 0.14));
+  box-shadow: 0 8px 18px rgba(47, 110, 244, 0.12);
+}
+
+.runtime-refresh:active:not(:disabled) {
+  transform: scale(0.94);
+  box-shadow: inset 0 2px 6px rgba(17, 24, 39, 0.14);
+}
+
+.runtime-refresh.runtime-danger {
+  color: #ef4444;
+}
+
+.runtime-refresh.runtime-danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: color-mix(in srgb, var(--glass-bg-strong) 84%, rgba(239, 68, 68, 0.12));
+  box-shadow: 0 8px 18px rgba(239, 68, 68, 0.1);
 }
 
 .runtime-refresh:disabled {
@@ -3562,13 +4727,35 @@ onUnmounted(() => {
   cursor: col-resize;
 }
 
+:global(body.source-workspace-resizing) {
+  user-select: none;
+  cursor: col-resize;
+}
+
 :global(body.workspace-resizing) .browser-frame {
   pointer-events: none;
 }
 
+:global(body.source-workspace-resizing) .browser-frame {
+  pointer-events: none;
+}
+
 @media (max-width: 980px) {
+  .chat-body.source-open,
   .chat-body.dual-panel {
     flex-direction: column;
+  }
+
+  .source-workspace-panel {
+    flex: 0 0 auto;
+    max-width: none;
+    width: auto;
+    max-height: 42%;
+    margin: 8px 16px 0;
+  }
+
+  .source-resizer {
+    display: none;
   }
 
   .chat-body.dual-panel .private-chat-panel {

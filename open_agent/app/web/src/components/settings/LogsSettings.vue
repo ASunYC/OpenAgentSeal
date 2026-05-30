@@ -1,8 +1,14 @@
 <template>
   <div class="tab-content settings-shell">
-    <div class="content-header settings-header">
+    <div class="content-header settings-header logs-header">
       <h3>{{ t('日志', 'Logs') }}</h3>
       <p>{{ t('查看最近的运行日志', 'View recent run logs') }}</p>
+      <div class="log-header-actions">
+        <span class="retention-pill">{{ t('仅展示近10天的日志', 'Showing logs from the last 10 days') }}</span>
+        <button class="btn-secondary settings-button" :disabled="files.length === 0" @click="clearVisibleLogs">
+          {{ t('清理', 'Clear') }}
+        </button>
+      </div>
     </div>
 
     <div class="toolbar settings-toolbar">
@@ -98,12 +104,48 @@ async function loadLogs() {
   }
 }
 
+function clearVisibleLogs() {
+  files.value = []
+  error.value = null
+  loading.value = false
+}
+
 onMounted(() => {
   void loadLogs()
 })
 </script>
 
 <style scoped>
+.logs-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 16px;
+  align-items: start;
+}
+
+.logs-header p {
+  grid-column: 1;
+}
+
+.log-header-actions {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.retention-pill {
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--hover-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .path-pill {
   max-width: min(100%, 560px);
   border-radius: 14px;
@@ -160,6 +202,17 @@ onMounted(() => {
 }
 
 @media (max-width: 720px) {
+  .logs-header {
+    grid-template-columns: 1fr;
+  }
+
+  .log-header-actions {
+    grid-column: 1;
+    grid-row: auto;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .toolbar-actions,
   .toolbar-actions .settings-button {
     width: 100%;

@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from open_agent.app.runner.models import ChatSpec, ChatHistory, AgentRequest, AgentEvent
+from open_agent.app.runner.models import ChatSpec, ChatHistory, AgentRequest, AgentEvent, Message
 from open_agent.app.runner.manager import get_chat_manager
 from open_agent.app.runner.runner import get_runner
 from open_agent.app.runner.file_parser import MAX_FILE_BYTES
@@ -54,10 +54,20 @@ class RunRequest(BaseModel):
     user_id: str = "default"
     messages: List[dict] = []
     stream: bool = True
+    workspace_sources: List[dict] = []
+    selected_workspace_paths: List[str] = []
 
 
 class LocalAttachmentRequest(BaseModel):
     paths: List[str]
+
+
+class WorkspaceSourceRequest(BaseModel):
+    paths: List[str]
+
+
+class PersistMessagesRequest(BaseModel):
+    messages: List[dict] = []
 
 
 def _get_control_plane():
@@ -181,6 +191,36 @@ async def get_chat_history(chat_id: str) -> dict:
     }
 
 
+@router.delete("/chats/session/{session_id}/messages")
+async def clear_chat_messages(session_id: str) -> dict:
+    """Clear persisted messages for a chat session while keeping chat metadata."""
+    manager = get_chat_manager()
+    chat = await manager.repo.find_by_session_id(session_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    manager.clear_messages(session_id)
+    await manager.update_chat(chat)
+    return {"success": True, "session_id": session_id}
+
+
+@router.post("/chats/session/{session_id}/messages")
+async def persist_chat_messages(session_id: str, request: PersistMessagesRequest) -> dict:
+    """Persist an imported message history for a chat session."""
+    manager = get_chat_manager()
+    chat = await manager.repo.find_by_session_id(session_id)
+    if not chat:
+        chat = await manager.create_chat(
+            name="Imported Chat",
+            user_id="default",
+            channel="web",
+            session_id=session_id,
+        )
+    messages = [Message.model_validate(message) for message in request.messages]
+    manager.replace_messages(session_id, messages)
+    await manager.update_chat(chat)
+    return {"success": True, "session_id": session_id, "count": len(messages)}
+
+
 @router.post("/files/local-attachments")
 async def create_local_attachments(request: LocalAttachmentRequest) -> dict:
     """Read local files dropped into the Tauri webview and return chat attachments."""
@@ -214,6 +254,91 @@ async def create_local_attachments(request: LocalAttachmentRequest) -> dict:
             rejected.append({"path": raw_path, "reason": str(exc)})
 
     return {"attachments": attachments, "rejected": rejected}
+
+
+@router.post("/workspace/local-sources")
+async def create_workspace_sources(request: WorkspaceSourceRequest) -> dict:
+    """Create workspace source descriptors from local files or directories."""
+    sources = []
+    rejected = []
+    for raw_path in request.paths[:20]:
+        path = Path(raw_path)
+        try:
+            if not path.exists():
+                rejected.append({"path": raw_path, "reason": "path does not exist"})
+                continue
+            sources.append(_workspace_source_from_path(path))
+        except Exception as exc:
+            rejected.append({"path": raw_path, "reason": str(exc)})
+    return {"sources": sources, "rejected": rejected}
+
+
+def _workspace_source_from_path(path: Path) -> dict:
+    is_dir = path.is_dir()
+    stat = path.stat()
+    children = _workspace_children(path) if is_dir else []
+    return {
+        "id": f"src_{uuid.uuid4().hex[:12]}",
+        "name": path.name or str(path),
+        "path": str(path),
+        "type": "directory" if is_dir else "file",
+        "mime_type": None if is_dir else (mimetypes.guess_type(path.name)[0] or "application/octet-stream"),
+        "size": None if is_dir else stat.st_size,
+        "modified_at": stat.st_mtime,
+        "children": children,
+        "children_count": _workspace_node_count(children),
+    }
+
+
+def _workspace_children(path: Path, limit: int = 200) -> list[dict]:
+    remaining = {"count": limit}
+    return _workspace_children_nested(path, path, remaining)
+
+
+def _workspace_children_nested(path: Path, root: Path, remaining: dict) -> list[dict]:
+    children = []
+    try:
+        entries = sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+    except OSError:
+        return children
+
+    for child in entries:
+        if remaining["count"] <= 0:
+            break
+        try:
+            remaining["count"] -= 1
+            if child.is_dir():
+                nested = _workspace_children_nested(child, root, remaining)
+                child_payload = {
+                    "name": child.name,
+                    "path": str(child),
+                    "type": "directory",
+                    "mime_type": None,
+                    "size": None,
+                    "modified_at": child.stat().st_mtime,
+                    "relative_path": str(child.relative_to(root)),
+                    "children": nested,
+                    "children_count": _workspace_node_count(nested),
+                }
+            else:
+                stat = child.stat()
+                child_payload = {
+                    "name": child.name,
+                    "path": str(child),
+                    "type": "file",
+                    "mime_type": mimetypes.guess_type(child.name)[0] or "application/octet-stream",
+                    "size": stat.st_size,
+                    "modified_at": stat.st_mtime,
+                    "relative_path": str(child.relative_to(root)),
+                }
+            children.append(child_payload)
+        except OSError:
+            continue
+    return children
+
+
+def _workspace_node_count(nodes: list[dict]) -> int:
+    return sum(1 + _workspace_node_count(node.get("children") or []) for node in nodes)
 
 
 @router.post("/chats/fork")
@@ -325,6 +450,10 @@ async def run_agent(request: RunRequest):
         user_id=request.user_id,
         messages=request.messages,
         stream=request.stream,
+        meta={
+            "workspace_sources": request.workspace_sources,
+            "selected_workspace_paths": request.selected_workspace_paths,
+        },
     )
     
     if not request.stream:

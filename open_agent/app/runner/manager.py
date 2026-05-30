@@ -10,7 +10,7 @@ import uuid
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 
 from open_agent.app.runner.models import ChatSpec, Message, ChatHistory, AgentEvent
-from open_agent.app.runner.repo import ChatRepository, JsonChatRepository
+from open_agent.app.runner.repo import ChatRepository, JsonChatRepository, MonthlyMessageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +28,15 @@ class ChatManager:
     
     def __init__(self, repo: ChatRepository = None):
         self.repo = repo or JsonChatRepository()
+        self.message_repo = MonthlyMessageRepository()
         self._session_messages: Dict[str, List[Message]] = {}
         self._session_agents: Dict[str, str] = {}  # session_id -> agent_id
         self._event_subscribers: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
+
+    def _ensure_session_messages(self, session_id: str) -> List[Message]:
+        if session_id not in self._session_messages:
+            self._session_messages[session_id] = self.message_repo.list_messages(session_id)
+        return self._session_messages[session_id]
     
     async def list_chats(self, user_id: str = None) -> List[ChatSpec]:
         """List all chats"""
@@ -100,10 +106,11 @@ class ChatManager:
 
         await self.repo.create_chat(forked_chat)
 
-        source_messages = self._session_messages.get(source_chat.session_id, [])
+        source_messages = self._ensure_session_messages(source_chat.session_id)
         self._session_messages[forked_chat.session_id] = [
             message.model_copy(deep=True) for message in source_messages
         ]
+        self.message_repo.replace_messages(forked_chat.session_id, self._session_messages[forked_chat.session_id])
 
         source_agent_id = self._session_agents.get(source_chat.session_id)
         if source_agent_id:
@@ -137,8 +144,7 @@ class ChatManager:
             )
         
         # Ensure message storage exists
-        if chat.session_id not in self._session_messages:
-            self._session_messages[chat.session_id] = []
+        self._ensure_session_messages(chat.session_id)
         
         return chat
     
@@ -151,8 +157,10 @@ class ChatManager:
         # Also clean up session messages
         for chat_id in chat_ids:
             chat = await self.repo.get_chat(chat_id)
-            if chat and chat.session_id in self._session_messages:
-                del self._session_messages[chat.session_id]
+            if chat:
+                if chat.session_id in self._session_messages:
+                    del self._session_messages[chat.session_id]
+                self.message_repo.delete_session_messages(chat.session_id)
         
         return await self.repo.delete_chats(chat_ids)
     
@@ -162,7 +170,7 @@ class ChatManager:
         if not chat:
             return None
         
-        messages = self._session_messages.get(chat.session_id, [])
+        messages = self._ensure_session_messages(chat.session_id)
         return ChatHistory(
             chat_id=chat_id,
             messages=messages,
@@ -171,17 +179,23 @@ class ChatManager:
     
     def add_message(self, session_id: str, message: Message):
         """Add a message to session history"""
-        if session_id not in self._session_messages:
-            self._session_messages[session_id] = []
-        self._session_messages[session_id].append(message)
+        messages = self._ensure_session_messages(session_id)
+        messages.append(message)
+        self.message_repo.add_message(session_id, message)
     
     def get_messages(self, session_id: str) -> List[Message]:
         """Get messages for a session"""
-        return self._session_messages.get(session_id, [])
+        return self._ensure_session_messages(session_id)
     
     def clear_messages(self, session_id: str):
         """Clear messages for a session"""
         self._session_messages[session_id] = []
+        self.message_repo.delete_session_messages(session_id)
+
+    def replace_messages(self, session_id: str, messages: List[Message]):
+        """Replace all messages for a session."""
+        self._session_messages[session_id] = messages
+        self.message_repo.replace_messages(session_id, messages)
     
     def set_session_agent(self, session_id: str, agent_id: str):
         """Associate an agent with a session"""

@@ -85,7 +85,8 @@ class TrayManager:
         self._on_new_cli_callback: Optional[Callable] = None
         
         # 日志文件
-        self.log_dir = Path.home() / ".open-agent" / "logs"
+        from open_agent.utils.path_utils import get_logs_dir
+        self.log_dir = get_logs_dir()
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         self._initialized = True

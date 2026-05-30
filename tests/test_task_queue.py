@@ -18,8 +18,6 @@ from open_agent.task_queue import (
     TaskWorker,
     WorkerPool,
     TaskDispatcher,
-    TaskStatusDisplay,
-    TaskCommandHandler,
 )
 
 

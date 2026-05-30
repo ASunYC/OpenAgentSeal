@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment } from '@/types'
+import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource } from '@/types'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
 const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -47,8 +47,26 @@ export const chatApi = {
     await request(`/chats/${chatId}`, { method: 'DELETE' })
   },
 
+  async deleteMany(chatIds: string[]): Promise<{ success: boolean; deleted_count: number }> {
+    return request<{ success: boolean; deleted_count: number }>('/chats/delete', {
+      method: 'POST',
+      body: JSON.stringify({ chat_ids: chatIds }),
+    })
+  },
+
   async getHistory(chatId: string): Promise<ChatHistory> {
     return request<ChatHistory>(`/chats/${chatId}/history`)
+  },
+
+  async clearMessages(runnerSessionId: string): Promise<void> {
+    await request(`/chats/session/${encodeURIComponent(runnerSessionId)}/messages`, { method: 'DELETE' })
+  },
+
+  async persistMessages(runnerSessionId: string, messages: Message[]): Promise<void> {
+    await request(`/chats/session/${encodeURIComponent(runnerSessionId)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ messages }),
+    })
   },
 
   async fork(runnerSessionId: string, name?: string): Promise<ForkChatResponse> {
@@ -66,7 +84,9 @@ export const chatApi = {
 export async function* runAgentStream(
   runnerSessionId: string,
   messages: Message[],
-  userId = 'default'
+  userId = 'default',
+  workspaceSources: WorkspaceSource[] = [],
+  selectedWorkspacePaths: string[] = [],
 ): AsyncGenerator<AgentEvent> {
   const response = await fetch(`${API_BASE}/run`, {
     method: 'POST',
@@ -76,6 +96,8 @@ export async function* runAgentStream(
       user_id: userId,
       messages,
       stream: true,
+      workspace_sources: workspaceSources,
+      selected_workspace_paths: selectedWorkspacePaths,
     }),
   })
 
@@ -230,6 +252,7 @@ interface BackendAppSettings {
   workspace?: string
   auto_save?: boolean
   stream_response?: boolean
+  enable_skills?: boolean
   use_cot?: boolean
 }
 
@@ -243,6 +266,7 @@ export const settingsApi = {
       workspace: data.workspace || '',
       autoSave: data.auto_save ?? true,
       streamResponse: data.stream_response ?? true,
+      enable_skills: data.enable_skills ?? true,
       useCoT: data.use_cot ?? false,
     }
   },
@@ -255,6 +279,7 @@ export const settingsApi = {
     if (settings.workspace !== undefined) payload.workspace = settings.workspace
     if (settings.autoSave !== undefined) payload.auto_save = settings.autoSave
     if (settings.streamResponse !== undefined) payload.stream_response = settings.streamResponse
+    if (settings.enable_skills !== undefined) payload.enable_skills = settings.enable_skills
     if (settings.useCoT !== undefined) payload.use_cot = settings.useCoT
 
     return request<ApiResponse<AppSettings>>('/settings', {
@@ -372,11 +397,13 @@ export async function chatWithAgent(
   agentId: string,
   message: string,
   onEvent: (event: AgentEvent) => void,
-  attachments: ChatAttachment[] = []
+  attachments: ChatAttachment[] = [],
+  workspaceSources: WorkspaceSource[] = [],
+  selectedWorkspacePaths: string[] = [],
 ): Promise<void> {
   const messages: Message[] = [{ role: 'user' as const, content: message, attachments }]
   
-  for await (const event of runAgentStream(agentId, messages)) {
+  for await (const event of runAgentStream(agentId, messages, 'default', workspaceSources, selectedWorkspacePaths)) {
     onEvent(event)
   }
 }
@@ -404,6 +431,13 @@ export const fileApi = {
       method: 'POST',
       body: JSON.stringify({ paths }),
     })
+  },
+
+  async createWorkspaceSources(paths: string[]): Promise<{ sources: WorkspaceSource[]; rejected: Array<{ path: string; reason: string }> }> {
+    return request<{ sources: WorkspaceSource[]; rejected: Array<{ path: string; reason: string }> }>('/workspace/local-sources', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    })
   }
 }
 
@@ -415,7 +449,10 @@ export const api = {
   getChat: chatApi.get,
   getChatByRunnerSession: chatApi.getByRunnerSession,
   deleteChat: chatApi.delete,
+  deleteChats: chatApi.deleteMany,
   getChatHistory: chatApi.getHistory,
+  clearChatMessages: chatApi.clearMessages,
+  persistChatMessages: chatApi.persistMessages,
   forkChat: chatApi.fork,
 
   // Agent
@@ -468,8 +505,10 @@ export const api = {
 
   // Chat with agent (streaming)
   chat: chatWithAgent,
+  cancelRunnerChat,
 
   // File Upload
   uploadFile: fileApi.upload,
   createLocalAttachments: fileApi.createLocalAttachments,
+  createWorkspaceSources: fileApi.createWorkspaceSources,
 }

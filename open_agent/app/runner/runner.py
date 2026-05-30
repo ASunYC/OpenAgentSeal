@@ -6,6 +6,7 @@ Following CoPaw's Runner pattern for SSE-based streaming responses.
 
 import asyncio
 import logging
+import mimetypes
 from dataclasses import replace
 from pathlib import Path
 from typing import AsyncGenerator, Optional, Callable, Any, Dict, List
@@ -14,9 +15,12 @@ from open_agent.app.runner.models import (
     ChatSpec, Message, AgentRequest, AgentEvent
 )
 from open_agent.app.runner.manager import ChatManager, get_chat_manager
-from open_agent.app.runner.file_parser import attachment_to_context
+from open_agent.app.runner.file_parser import MAX_FILE_BYTES, attachment_to_context, parse_file_bytes
 
 logger = logging.getLogger(__name__)
+
+WORKSPACE_MAX_SELECTED_FILES = 20
+WORKSPACE_MAX_CONTEXT_CHARS = 60000
 
 
 class AgentRunner:
@@ -29,6 +33,9 @@ class AgentRunner:
     
     def __init__(self):
         self._chat_manager: Optional[ChatManager] = None
+        self._active_tasks: Dict[str, asyncio.Task] = {}
+        self._active_agents: Dict[str, Any] = {}
+        self._active_cancel_events: Dict[str, asyncio.Event] = {}
     
     def set_chat_manager(self, chat_manager: ChatManager):
         """Set the chat manager instance"""
@@ -81,6 +88,10 @@ class AgentRunner:
                     if isinstance(attachment, dict):
                         file_names.append(str(attachment.get("name") or "file"))
 
+        workspace_context = self._workspace_context(request)
+        if workspace_context:
+            file_contexts.append(workspace_context)
+
         model_text = "\n".join(part for part in [text, *file_contexts] if part).strip()
         blocks: List[Dict[str, Any]] = []
         if model_text:
@@ -95,6 +106,228 @@ class AgentRunner:
             return display_text or "[image]", blocks, "vision"
 
         return display_text, model_text or text, "text"
+
+    def _workspace_context(self, request: AgentRequest) -> str:
+        sources = request.meta.get("workspace_sources") or []
+        if not isinstance(sources, list) or not sources:
+            return ""
+
+        selected_paths = request.meta.get("selected_workspace_paths") or []
+        selected = {str(path) for path in selected_paths if path}
+        source_index = self._workspace_index(sources)
+
+        if not selected:
+            return (
+                "\n\n[资料库]\n"
+                "用户当前挂载了以下资料库来源，但没有勾选具体文件或目录。\n"
+                "当用户的问题明确需要资料库资料时，请优先根据这些路径使用可用工具读取或检索相关内容；"
+                "如果问题与资料库无关，不要主动展开读取。\n"
+                "注意：这里的“资料库”是主页左侧的参考资料来源，不是设置里的运行工作目录。\n"
+                f"{source_index}"
+            )
+
+        parts = [
+            "\n\n[资料库已选来源]",
+            "用户勾选了以下资料库来源。请把这些资料作为本轮对话的重要上下文。",
+            "注意：这里的“资料库”是主页左侧的参考资料来源，不是设置里的运行工作目录。",
+            "已选路径：",
+            *[f"- {path}" for path in sorted(selected)],
+            "",
+        ]
+        file_budget = {"count": WORKSPACE_MAX_SELECTED_FILES}
+        for path in sorted(selected):
+            node = self._workspace_node_by_path(sources, path)
+            if (isinstance(node, dict) and node.get("type") == "web") or self._is_web_url(path):
+                parts.append(self._workspace_web_context(node if isinstance(node, dict) else {"path": path}))
+            else:
+                parts.append(self._workspace_path_context(Path(path), file_budget))
+
+        context = "\n".join(part for part in parts if part)
+        if len(context) > WORKSPACE_MAX_CONTEXT_CHARS:
+            context = context[:WORKSPACE_MAX_CONTEXT_CHARS] + "\n\n[资料库内容过长，已截断]"
+        return context
+
+    def _workspace_index(self, sources: List[Any], level: int = 0, limit: int = 80) -> str:
+        lines: List[str] = []
+
+        def visit(nodes: List[Any], depth: int) -> None:
+            for node in nodes:
+                if len(lines) >= limit or not isinstance(node, dict):
+                    return
+                node_type = node.get("type") or "file"
+                marker = self._workspace_source_marker(node_type)
+                path = node.get("path") or node.get("name") or ""
+                lines.append(f"{'  ' * depth}- [{marker}] {path}")
+                children = node.get("children") or []
+                if node_type == "directory" and isinstance(children, list):
+                    visit(children, depth + 1)
+
+        visit(sources, level)
+        if len(lines) >= limit:
+            lines.append(f"...（仅展示前 {limit} 项）")
+        return "\n".join(lines)
+
+    def _workspace_source_marker(self, source_type: str) -> str:
+        if source_type == "directory":
+            return "目录"
+        if source_type == "web":
+            return "网页"
+        return "文件"
+
+    def _workspace_node_by_path(self, sources: List[Any], path: str) -> Optional[Dict[str, Any]]:
+        def visit(nodes: List[Any]) -> Optional[Dict[str, Any]]:
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("path") or "") == path:
+                    return node
+                children = node.get("children") or []
+                if isinstance(children, list):
+                    found = visit(children)
+                    if found:
+                        return found
+            return None
+
+        return visit(sources)
+
+    def _is_web_url(self, value: str) -> bool:
+        normalized = str(value or "").lower()
+        return normalized.startswith("http://") or normalized.startswith("https://")
+
+    def _workspace_web_context(self, node: Dict[str, Any]) -> str:
+        url = str(node.get("path") or node.get("url") or "").strip()
+        name = str(node.get("name") or url or "Web 来源")
+        return (
+            "\n[已选网页来源]\n"
+            f"名称：{name}\n"
+            f"地址：{url}\n"
+            "说明：这是用户添加到资料库的 Web 地址。需要网页正文时，优先使用可用的浏览、检索或网页读取工具打开该地址。"
+        )
+
+    def _workspace_path_context(self, path: Path, file_budget: Dict[str, int]) -> str:
+        try:
+            if not path.exists():
+                return f"\n[来源不可用]\n路径：{path}\n原因：路径不存在"
+            if path.is_file():
+                return self._workspace_file_context(path, file_budget)
+            if path.is_dir():
+                lines = [f"\n[已选目录]\n路径：{path}", "目录内容："]
+                files = []
+                for child in path.rglob("*"):
+                    if child.is_file():
+                        files.append(child)
+                    if len(files) >= WORKSPACE_MAX_SELECTED_FILES:
+                        break
+                for child in files[:WORKSPACE_MAX_SELECTED_FILES]:
+                    try:
+                        lines.append(f"- {child.relative_to(path)}")
+                    except ValueError:
+                        lines.append(f"- {child}")
+                lines.append("")
+                for child in files:
+                    if file_budget["count"] <= 0:
+                        lines.append("[已达到本轮资料库文件解析上限]")
+                        break
+                    lines.append(self._workspace_file_context(child, file_budget))
+                return "\n".join(lines)
+            return f"\n[来源不可用]\n路径：{path}\n原因：不是文件或目录"
+        except Exception as exc:
+            return f"\n[来源读取失败]\n路径：{path}\n错误：{exc}"
+
+    def _workspace_file_context(self, path: Path, file_budget: Dict[str, int]) -> str:
+        if file_budget["count"] <= 0:
+            return ""
+        file_budget["count"] -= 1
+
+        try:
+            stat = path.stat()
+            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            if stat.st_size > MAX_FILE_BYTES:
+                return (
+                    f"\n[已选文件]\n路径：{path}\n文件类型：{mime_type}\n"
+                    f"内容：文件超过 {MAX_FILE_BYTES // 1024 // 1024}MB，本轮未解析。"
+                )
+            raw = path.read_bytes()
+            text = parse_file_bytes(path.name, mime_type, raw)
+            return (
+                f"\n[已选文件]\n"
+                f"路径：{path}\n"
+                f"文件类型：{mime_type}\n"
+                f"内容：\n{text.strip() or '未提取到可用文本。'}"
+            )
+        except Exception as exc:
+            return f"\n[文件读取失败]\n路径：{path}\n错误：{exc}"
+
+    def _is_workspace_listing_request(self, text: str, request: AgentRequest) -> bool:
+        sources = request.meta.get("workspace_sources") or []
+        selected_paths = request.meta.get("selected_workspace_paths") or []
+        if not isinstance(sources, list) or not sources or selected_paths:
+            return False
+
+        normalized = (text or "").lower()
+        library_terms = ("资料库", "资料", "来源", "文件", "目录", "library", "workspace")
+        list_terms = ("有什么", "有哪些", "列出", "查看", "内容", "清单", "list", "ls", "show")
+        return any(term in normalized for term in library_terms) and any(
+            term in normalized for term in list_terms
+        )
+
+    def _workspace_listing_answer(self, request: AgentRequest, limit: int = 100) -> str:
+        sources = request.meta.get("workspace_sources") or []
+        entries: List[Dict[str, Any]] = []
+
+        def visit(node: Any, root_name: str, depth: int = 0) -> None:
+            if len(entries) >= 500 or not isinstance(node, dict):
+                return
+            node_type = str(node.get("type") or "file")
+            path = str(node.get("path") or node.get("name") or "")
+            name = str(node.get("relative_path") or node.get("name") or path)
+            modified_at = float(node.get("modified_at") or 0)
+            if not modified_at and path:
+                try:
+                    modified_at = Path(path).stat().st_mtime
+                except OSError:
+                    modified_at = 0
+            entries.append(
+                {
+                    "name": name,
+                    "path": path,
+                    "type": node_type,
+                    "root": root_name,
+                    "depth": depth,
+                    "modified_at": modified_at,
+                    "children_count": int(node.get("children_count") or 0),
+                }
+            )
+            children = node.get("children") or []
+            if isinstance(children, list):
+                for child in children:
+                    visit(child, root_name, depth + 1)
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            visit(source, str(source.get("name") or source.get("path") or "资料来源"))
+
+        total = len(entries)
+        entries.sort(key=lambda item: (item["modified_at"], item["type"] == "file"), reverse=True)
+        visible = entries[:limit]
+
+        lines = [
+            f"资料库当前有 {len(sources)} 个挂载来源，已索引 {total} 项。",
+            f"下面先列出最近更新的前 {min(limit, total)} 项：",
+            "",
+        ]
+        for item in visible:
+            marker = self._workspace_source_marker(item["type"])
+            suffix = ""
+            if item["type"] == "directory" and item["children_count"]:
+                suffix = f"（包含 {item['children_count']} 项）"
+            lines.append(f"- [{marker}] {item['name']}{suffix}")
+
+        if total > limit:
+            lines.append("")
+            lines.append(f"还有 {total - limit} 项未展开显示。你可以让我按目录、文件类型或关键词继续筛选。")
+        return "\n".join(lines)
 
     def _attachment_to_image_block(self, attachment: Any) -> Optional[Dict[str, Any]]:
         """Convert a frontend attachment into an Anthropic-style image block."""
@@ -188,6 +421,15 @@ class AgentRunner:
                 status="error",
             )
             return
+
+        if self._is_workspace_listing_request(user_content, request):
+            answer = self._workspace_listing_answer(request)
+            self.chat_manager.add_message(session_id, Message(role="user", content=user_content))
+            self.chat_manager.add_message(session_id, Message(role="assistant", content=answer))
+            yield AgentEvent(event="run_start", session_id=session_id, status="running")
+            yield AgentEvent(event="complete", session_id=session_id, status="idle", content=answer)
+            await self.chat_manager.update_chat(chat)
+            return
         
         # Get or create agent for this session
         agent_id = self.chat_manager.get_session_agent(session_id)
@@ -215,10 +457,10 @@ class AgentRunner:
                 if existing_agent:
                     agent_id = extracted_agent_id
                     self.chat_manager.set_session_agent(session_id, agent_id)
-                    logger.info(f"✅ Extracted agent_id {agent_id} from session_id {session_id}")
-                    logger.info(f"✅ Agent config: name={existing_agent.name}, system_prompt={existing_agent.system_prompt[:50] if existing_agent.system_prompt else 'None'}...")
+                    logger.info(f"Extracted agent_id {agent_id} from session_id {session_id}")
+                    logger.info(f"Agent config: name={existing_agent.name}, system_prompt={existing_agent.system_prompt[:50] if existing_agent.system_prompt else 'None'}...")
                 else:
-                    logger.warning(f"❌ Agent {extracted_agent_id} not found in config")
+                    logger.warning(f"Agent {extracted_agent_id} not found in config")
                     # List all available agents
                     all_agents = config_manager.get_all_agents()
                     logger.info(f"Available agents: {[a.id for a in all_agents]}")
@@ -312,7 +554,14 @@ class AgentRunner:
             return
         
         # Add user message to history
-        user_message = Message(role="user", content=user_content)
+        user_attachments = []
+        if request.messages:
+            last_request_message = request.messages[-1]
+            if isinstance(last_request_message, dict):
+                raw_attachments = last_request_message.get("attachments") or []
+                if isinstance(raw_attachments, list):
+                    user_attachments = raw_attachments
+        user_message = Message(role="user", content=user_content, attachments=user_attachments)
         self.chat_manager.add_message(session_id, user_message)
         
         # Add message to agent
@@ -408,7 +657,11 @@ class AgentRunner:
         agent.llm.stream_callback = stream_callback if stream_response else None
 
         # Create a task to run the agent
-        agent_task = asyncio.create_task(agent.run())
+        cancel_event = asyncio.Event()
+        agent_task = asyncio.create_task(agent.run(cancel_event))
+        self._active_tasks[session_id] = agent_task
+        self._active_agents[session_id] = agent
+        self._active_cancel_events[session_id] = cancel_event
         
         try:
             # Yield events as they come in, while agent is running
@@ -481,6 +734,9 @@ class AgentRunner:
             )
             yield error_event
         finally:
+            self._active_tasks.pop(session_id, None)
+            self._active_agents.pop(session_id, None)
+            self._active_cancel_events.pop(session_id, None)
             agent.status_callback = None
             agent.llm.stream_callback = None
     
@@ -550,6 +806,7 @@ class AgentRunner:
                 RecallNotesTool(),
                 AskUserChoiceTool(),
             ]
+            skill_loader = None
 
             # Web search tools
             config_obj = None
@@ -574,26 +831,20 @@ class AgentRunner:
                 user_settings = config_manager.get_settings()
                 enable_skills = getattr(user_settings, 'enable_skills', True) if user_settings else True
                 if enable_skills and config_obj and config_obj.tools.enable_skills:
-                    skills_path = Path(config_obj.tools.skills_dir).expanduser()
-                    if not skills_path.is_absolute():
-                        from open_agent.config import Config as Cfg
-                        candidates = [
-                            skills_path,
-                            Path("open_agent") / skills_path,
-                            Cfg.get_package_dir() / skills_path,
-                        ]
-                        for path in candidates:
-                            if path.exists():
-                                skills_path = path.resolve()
-                                break
+                    from open_agent.utils.path_utils import resolve_skills_dir
+                    skills_path = resolve_skills_dir(config_obj.tools.skills_dir)
                     if skills_path and Path(skills_path).exists():
                         from open_agent.tools.skill_tool import create_skill_tools
                         skill_tools, skill_loader = create_skill_tools(str(skills_path))
                         if skill_tools:
                             tools.extend(skill_tools)
                             logger.info(f"Loaded {len(skill_tools)} skill tools from {skills_path}")
-            except Exception:
-                pass
+                    else:
+                        logger.warning("Skills enabled but no skills directory was found")
+                else:
+                    logger.info("Skills disabled by user settings or config")
+            except Exception as e:
+                logger.error(f"Failed to load skill tools: {e}", exc_info=True)
 
             # MCP tools
             try:
@@ -626,6 +877,20 @@ class AgentRunner:
                 except Exception as e:
                     logger.error(f"Failed to load system prompt: {e}")
                     system_prompt = "You are an intelligent assistant that helps users complete various tasks."
+
+            if skill_loader:
+                skills_metadata = skill_loader.get_skills_metadata_prompt()
+                if skills_metadata:
+                    if "{SKILLS_METADATA}" in system_prompt:
+                        system_prompt = system_prompt.replace("{SKILLS_METADATA}", skills_metadata)
+                    else:
+                        system_prompt = system_prompt + "\n\n" + skills_metadata
+                    logger.info(
+                        "Injected %d skills into agent system prompt",
+                        len(skill_loader.loaded_skills),
+                    )
+            else:
+                system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
             
             # Create agent
             agent = Agent(
@@ -644,6 +909,26 @@ class AgentRunner:
     
     async def cancel_session(self, session_id: str) -> bool:
         """Cancel a running session"""
+        cancelled = False
+
+        cancel_event = self._active_cancel_events.get(session_id)
+        if cancel_event:
+            cancel_event.set()
+            cancelled = True
+
+        task = self._active_tasks.get(session_id)
+        if task and not task.done():
+            task.cancel()
+            cancelled = True
+
+        agent = self._active_agents.get(session_id)
+        if agent and getattr(agent, "cancel_event", None):
+            agent.cancel_event.set()
+            cancelled = True
+
+        if cancelled:
+            return True
+
         agent_id = self.chat_manager.get_session_agent(session_id)
         if not agent_id:
             return False

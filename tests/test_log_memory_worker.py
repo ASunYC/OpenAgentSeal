@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from open_agent.log_memory_worker import (
     LogMemoryWorker,
     LogEntry,
-    StepLogBatch,
+    StepLogBatch as SessionLogBatch,
     get_log_memory_worker,
     shutdown_log_memory_worker,
 )

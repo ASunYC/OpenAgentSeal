@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 
+from open_agent.utils.path_utils import get_data_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,7 +117,7 @@ class AgentService:
         self._sessions: Dict[str, AgentSession] = {}  # agent_id -> AgentSession
         
         # 会话存储目录
-        self.session_dir = Path.home() / ".open-agent" / "sessions"
+        self.session_dir = get_data_dir() / "sessions"
         self.session_dir.mkdir(parents=True, exist_ok=True)
         
         # 记忆管理器（延迟导入避免循环依赖）
@@ -126,6 +128,7 @@ class AgentService:
         
         # Web服务器引用
         self._web_server = None
+        self._skill_loader = None
         
         # 运行状态
         self._running = False
@@ -718,25 +721,15 @@ class AgentService:
         # Skills 工具
         try:
             if config_obj and config_obj.tools.enable_skills:
-                skills_path = Path(config_obj.tools.skills_dir).expanduser()
-                if not skills_path.is_absolute():
-                    from open_agent.config import Config as Cfg
-                    candidates = [
-                        skills_path,
-                        Path("open_agent") / skills_path,
-                        Cfg.get_package_dir() / skills_path,
-                    ]
-                    for path in candidates:
-                        if path.exists():
-                            skills_path = path.resolve()
-                            break
+                from open_agent.utils.path_utils import resolve_skills_dir
+                skills_path = resolve_skills_dir(config_obj.tools.skills_dir)
                 if skills_path and Path(skills_path).exists():
                     from open_agent.tools.skill_tool import create_skill_tools
-                    skill_tools, _ = create_skill_tools(str(skills_path))
+                    skill_tools, self._skill_loader = create_skill_tools(str(skills_path))
                     if skill_tools:
                         tools.extend(skill_tools)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to load skill tools: {e}", exc_info=True)
 
         # MCP 工具
         try:
@@ -764,7 +757,17 @@ class AgentService:
             system_prompt_path = Config.find_config_file(config_obj.agent.system_prompt_path)
             
             if system_prompt_path and system_prompt_path.exists():
-                return system_prompt_path.read_text(encoding="utf-8")
+                system_prompt = system_prompt_path.read_text(encoding="utf-8")
+                if self._skill_loader:
+                    skills_metadata = self._skill_loader.get_skills_metadata_prompt()
+                    if skills_metadata:
+                        if "{SKILLS_METADATA}" in system_prompt:
+                            system_prompt = system_prompt.replace("{SKILLS_METADATA}", skills_metadata)
+                        else:
+                            system_prompt = system_prompt + "\n\n" + skills_metadata
+                else:
+                    system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+                return system_prompt
         except Exception:
             pass
         

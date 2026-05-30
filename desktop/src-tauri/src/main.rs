@@ -386,6 +386,7 @@ fn app_tray_icon() -> Image<'static> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
                 .on_navigation(|webview, url| {
