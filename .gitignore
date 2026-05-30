@@ -78,3 +78,7 @@ desktop/src-tauri/gen/
 desktop/.tauri-dev-*.json
 
 .claude/
+
+# .NET build artifacts
+tools/uninstaller/bin/
+tools/uninstaller/obj/

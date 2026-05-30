@@ -105,7 +105,6 @@ Update-TextFile "open_agent\__init__.py" '(?m)^(__version__\s*=\s*)".*"' "`${1}`
 Update-TextFile "open_agent\cli.py" 'version="open-agent [^"]+"' "version=`"open-agent $AppVersion`""
 Update-TextFile "open_agent\acp\__init__.py" 'version="[^"]+"\)' "version=`"$AppVersion`")"
 Update-TextFile "open_agent\app\_app.py" 'version="[^"]+"' "version=`"$AppVersion`""
-Update-TextFile "open_agent\app\web\src\views\SettingsView.vue" "const appVersion = ref\('[^']+'\)" "const appVersion = ref('$AppVersion')"
 Update-TextFile "desktop\src-tauri\Cargo.toml" '(?m)^(version\s*=\s*)".*"' "`${1}`"$AppVersion`""
 
 Update-PackageJson "desktop\package.json"
