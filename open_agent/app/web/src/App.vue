@@ -208,7 +208,7 @@
                 />
                 <!-- 正在输入指示器 - 当消息内容为空且正在加载时显示-->
                 <div v-if="msg.role === 'assistant' && !msg.content && msg.isLoading" class="typing-indicator" :aria-label="t('小海豹正在思考', 'Seal is thinking')">
-                  <img class="typing-agent-icon" :src="assistantAvatarUrl" alt="" aria-hidden="true" />
+                  <img class="typing-agent-icon" :src="appIconUrl" alt="" aria-hidden="true" />
                   <span class="typing-text">{{ t('正在努力思考', 'Thinking hard') }}</span>
                   <span class="typing-dots" aria-hidden="true">
                     <span></span>
