@@ -29,6 +29,31 @@ struct BackendProcess {
 }
 
 impl BackendProcess {
+    fn ensure_started(&self) -> Result<(), String> {
+        if backend_healthy() {
+            return Ok(());
+        }
+
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| "Backend process lock is poisoned".to_string())?;
+
+        if backend_port_in_use() {
+            return Err("Backend port is already owned by another process".to_string());
+        }
+
+        let mut backend = spawn_backend(&self.command)?;
+        if wait_for_backend_ready() {
+            *child = Some(backend);
+            Ok(())
+        } else {
+            let _ = backend.kill();
+            let _ = backend.wait();
+            Err("Python backend did not become ready within 20 seconds".to_string())
+        }
+    }
+
     fn restart(&self) -> Result<(), String> {
         let mut child = self
             .child
@@ -282,6 +307,13 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn finish_startup(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("splash") {
+        let _ = window.close();
+    }
+    show_main_window(app);
+}
+
 fn open_backend_in_browser() -> Result<(), String> {
     open_target(&backend_url())
 }
@@ -405,25 +437,23 @@ fn main() {
         )
         .setup(|app| {
             let backend_command = resolve_backend_command(app);
-            let backend = if backend_healthy() {
-                None
-            } else if backend_port_in_use() {
-                return Err(format!(
-                    "{}:{} is already in use by another service",
-                    BACKEND_HOST, BACKEND_PORT
-                )
-                .into());
-            } else {
-                let backend = spawn_backend(&backend_command)?;
-                if !wait_for_backend_ready() {
-                    return Err("Python backend did not become ready within 20 seconds; see desktop-backend.log".into());
-                }
-                Some(backend)
-            };
-
             app.manage(BackendProcess {
-                child: Mutex::new(backend),
+                child: Mutex::new(None),
                 command: backend_command,
+            });
+
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let startup_result = {
+                    let state = app_handle.state::<BackendProcess>();
+                    state.ensure_started()
+                };
+
+                if let Err(error) = startup_result {
+                    append_desktop_log(&format!("Failed to initialize backend: {error}"));
+                }
+
+                finish_startup(&app_handle);
             });
 
             let frontend_header = MenuItemBuilder::new("Frontend").enabled(false).build(app)?;
@@ -505,9 +535,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![backend_url, open_path])

@@ -191,7 +191,7 @@
                     <circle cx="12" cy="7" r="4"/>
                   </svg>
                 </div>
-                <img v-else class="avatar agent-avatar agent-avatar-image" :src="appIconUrl" :alt="getAgentName()" />
+                <img v-else class="avatar agent-avatar agent-avatar-image" :src="assistantAvatarUrl" :alt="getAgentName()" />
               </div>
               <div class="message-content">
                 <div class="message-header">
@@ -208,7 +208,7 @@
                 />
                 <!-- 正在输入指示器 - 当消息内容为空且正在加载时显示-->
                 <div v-if="msg.role === 'assistant' && !msg.content && msg.isLoading" class="typing-indicator" :aria-label="t('小海豹正在思考', 'Seal is thinking')">
-                  <img class="typing-agent-icon" :src="appIconUrl" alt="" aria-hidden="true" />
+                  <img class="typing-agent-icon" :src="assistantAvatarUrl" alt="" aria-hidden="true" />
                   <span class="typing-text">{{ t('正在努力思考', 'Thinking hard') }}</span>
                   <span class="typing-dots" aria-hidden="true">
                     <span></span>
@@ -812,6 +812,7 @@ import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
 import appIconUrl from '@/assets/icon.png'
+import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
 import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
@@ -1221,6 +1222,11 @@ function resetRuntimeReplay() {
 }
 
 async function openRuntimePanel() {
+  if (activeWorkspacePanel.value === 'runtime') {
+    closeWorkspacePanel()
+    return
+  }
+
   isBrowserFullscreen.value = false
   activeWorkspacePanel.value = 'runtime'
   runtimePanelTab.value = 'chats'
@@ -2161,6 +2167,11 @@ function createBrowserTab(rawUrl: string = BROWSER_HOME) {
 }
 
 function openBrowserHome() {
+  if (activeWorkspacePanel.value === 'browser') {
+    closeWorkspacePanel()
+    return
+  }
+
   if (!activeBrowserTab.value) {
     createBrowserTab()
     return
