@@ -77,8 +77,8 @@ def create_app() -> FastAPI:
 
     app.include_router(chat_router)
 
-    # Include legacy routes for backward compatibility
-    _setup_legacy_routes(app)
+    # Include application routes not owned by the chat router.
+    _setup_app_routes(app)
 
     # Setup static file serving for Vue frontend
     _setup_static_files(app)
@@ -87,123 +87,242 @@ def create_app() -> FastAPI:
     return app
 
 
-def _setup_legacy_routes(app: FastAPI):
-    """Setup legacy routes for backward compatibility"""
+def _setup_app_routes(app: FastAPI):
+    """Setup application routes."""
 
     @app.get("/api/health")
     async def health_check():
         """Health check endpoint"""
         return {"status": "ok", "ready": True}
 
-    @app.get("/api/agents")
-    async def list_agents():
-        """List all agents - returns array directly for frontend compatibility"""
+    @app.get("/api/main-agent")
+    async def get_main_agent():
+        """Get the isolated main-agent configuration."""
         try:
-            from open_agent.user_config import get_user_config
+            from open_agent.agent_profiles import get_agent_profile_manager
 
-            manager = get_user_config()
-            agents = manager.get_all_agents()
-            return [a.to_dict() for a in agents]
+            return get_agent_profile_manager().get_main_agent().to_dict()
         except Exception as e:
-            logger.error(f"Failed to list agents: {e}")
+            logger.error(f"Failed to read main agent: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.patch("/api/main-agent")
+    async def update_main_agent(data: dict):
+        """Update the isolated main-agent configuration."""
+        try:
+            from open_agent.agent_profiles import AgentProfileConfig, MAIN_AGENT_ID, get_agent_profile_manager
+
+            manager = get_agent_profile_manager()
+            payload = manager.get_main_agent().to_dict()
+            payload.update(data)
+            payload["id"] = MAIN_AGENT_ID
+            saved = manager.save_main_agent(AgentProfileConfig.from_dict(payload))
+            return {"success": True, "data": saved.to_dict()}
+        except Exception as e:
+            logger.error(f"Failed to update main agent: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/agent-profiles")
+    async def list_agent_profiles():
+        """List isolated sub-agent profiles."""
+        try:
+            from open_agent.agent_profiles import get_agent_profile_manager
+
+            return [profile.to_dict() for profile in get_agent_profile_manager().list_profiles()]
+        except Exception as e:
+            logger.error(f"Failed to list agent profiles: {e}")
             return []
 
-    @app.post("/api/agents")
-    async def save_agent(data: dict):
-        """Create or update agent (legacy)"""
+    @app.post("/api/agent-profiles")
+    async def create_agent_profile(data: dict):
+        """Create an isolated sub-agent profile."""
         try:
-            from open_agent.user_config import get_user_config, AgentConfig
+            from open_agent.agent_profiles import get_agent_profile_manager
 
-            manager = get_user_config()
-
-            agent_id = data.get("id")
-
-            # 检查是否已存在该 ID 的 agent
-            existing_agent = manager.get_agent(agent_id) if agent_id else None
-
-            if existing_agent:
-                # 更新现有 agent
-                agent = AgentConfig(
-                    id=agent_id,
-                    name=data.get("name", "新智能体"),
-                    model_id=data.get("model_id", ""),
-                    description=data.get("description", ""),
-                    avatar=data.get("avatar", "🤖"),
-                    system_prompt=data.get("system_prompt"),
-                    temperature=data.get("temperature", 0.7),
-                    max_tokens=data.get("max_tokens", 4096),
-                    max_steps=data.get("max_steps", 100),
-                    tools=data.get("tools", []),
-                    mcp_servers=data.get("mcp_servers", []),
-                    created_at=existing_agent.created_at,
-                    updated_at="",
-                )
-                manager.update_agent(agent)
-            else:
-                # 创建新的 agent 配置
-                # 使用前端传来的 ID（如果有的话），否则生成新的
-                new_agent_id = data.get("id")
-                if new_agent_id:
-                    # 使用前端传来的 ID
-                    agent = AgentConfig(
-                        id=new_agent_id,
-                        name=data.get("name", "新智能体"),
-                        model_id=data.get("model_id", ""),
-                        description=data.get("description", ""),
-                        avatar=data.get("avatar", "🤖"),
-                        system_prompt=data.get("system_prompt"),
-                        temperature=data.get("temperature", 0.7),
-                        max_tokens=data.get("max_tokens", 4096),
-                        max_steps=data.get("max_steps", 100),
-                        tools=data.get("tools", []),
-                        mcp_servers=data.get("mcp_servers", []),
-                        created_at="",
-                        updated_at="",
-                    )
-                else:
-                    # 后端生成新的 ID
-                    agent = AgentConfig.create(
-                        name=data.get("name", "新智能体"),
-                        model_id=data.get("model_id", ""),
-                        description=data.get("description", ""),
-                        avatar=data.get("avatar", "🤖"),
-                        system_prompt=data.get("system_prompt"),
-                        temperature=data.get("temperature", 0.7),
-                        max_tokens=data.get("max_tokens", 4096),
-                        max_steps=data.get("max_steps", 100),
-                        tools=data.get("tools", []),
-                        mcp_servers=data.get("mcp_servers", []),
-                    )
-                manager.add_agent(agent)
-
-            return {"success": True, "agent": agent.to_dict()}
+            payload = dict(data or {})
+            clone_from = payload.pop("clone_from", "main")
+            clone_all = bool(payload.pop("clone_all", False))
+            profile = get_agent_profile_manager().create_profile(payload, clone_from=clone_from, clone_all=clone_all)
+            return {"success": True, "data": profile.to_dict()}
         except Exception as e:
-            logger.error(f"Failed to save agent: {e}")
+            logger.error(f"Failed to create agent profile: {e}")
             return {"success": False, "error": str(e)}
 
-    @app.delete("/api/agents/{agent_id}")
-    async def delete_agent(agent_id: str):
-        """Delete agent (legacy)"""
-        try:
-            from open_agent.user_config import get_user_config
+    @app.get("/api/agent-profiles/{profile_id}")
+    async def get_agent_profile(profile_id: str):
+        """Get an isolated sub-agent profile."""
+        from fastapi import HTTPException
+        from open_agent.agent_profiles import get_agent_profile_manager
 
-            manager = get_user_config()
-            success = manager.delete_agent(agent_id)
-            return {"success": success}
+        profile = get_agent_profile_manager().get_profile(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Agent profile not found")
+        return profile.to_dict()
+
+    @app.patch("/api/agent-profiles/{profile_id}")
+    async def update_agent_profile(profile_id: str, data: dict):
+        """Update an isolated sub-agent profile."""
+        from fastapi import HTTPException
+        from open_agent.agent_profiles import AgentProfileConfig, get_agent_profile_manager
+
+        manager = get_agent_profile_manager()
+        current = manager.get_profile(profile_id)
+        if not current:
+            raise HTTPException(status_code=404, detail="Agent profile not found")
+        payload = current.to_dict()
+        payload.update(data)
+        payload["id"] = current.id
+        saved = manager.save_profile(AgentProfileConfig.from_dict(payload))
+        return {"success": True, "data": saved.to_dict()}
+
+    @app.delete("/api/agent-profiles/{profile_id}")
+    async def delete_agent_profile(profile_id: str):
+        """Delete an isolated sub-agent profile."""
+        try:
+            from open_agent.agent_profiles import get_agent_profile_manager
+
+            return {"success": get_agent_profile_manager().delete_profile(profile_id)}
         except Exception as e:
+            logger.error(f"Failed to delete agent profile: {e}")
             return {"success": False, "error": str(e)}
 
-    @app.get("/api/agents/{agent_id}/messages")
-    async def get_messages(agent_id: str):
-        """Get agent messages (legacy)"""
+    @app.post("/api/agent-profiles/{profile_id}/clone")
+    async def clone_agent_profile(profile_id: str, data: dict):
+        """Clone an isolated sub-agent profile."""
         try:
-            from open_agent.agent_service import get_agent_service
+            from open_agent.agent_profiles import get_agent_profile_manager
 
-            service = get_agent_service()
-            messages = service.get_messages(agent_id)
-            return {"messages": messages}
+            payload = dict(data or {})
+            clone_all = bool(payload.pop("clone_all", False))
+            payload.setdefault("name", f"{profile_id} Copy")
+            profile = get_agent_profile_manager().create_profile(payload, clone_from=profile_id, clone_all=clone_all)
+            return {"success": True, "data": profile.to_dict()}
         except Exception as e:
-            return {"messages": [], "error": str(e)}
+            logger.error(f"Failed to clone agent profile: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/agent-profiles/{profile_id}/skills")
+    async def list_agent_profile_skills(profile_id: str):
+        """List skills stored in an isolated sub-agent profile."""
+        from fastapi import HTTPException
+        from open_agent.agent_profiles import get_agent_profile_manager
+        from open_agent.tools.skill_loader import SkillLoader
+
+        manager = get_agent_profile_manager()
+        profile = manager.get_profile(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Agent profile not found")
+        skills_dir = manager.get_agent_home(profile_id) / "skills"
+        loader = SkillLoader([{"path": str(skills_dir), "source": "profile", "source_label": profile.name}])
+        skills = loader.discover_skills()
+        return {
+            "profile_id": profile.id,
+            "skills_dir": str(skills_dir),
+            "skills": [
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "path": str(skill.skill_path) if skill.skill_path else "",
+                    "content": skill.content,
+                }
+            for skill in skills
+            ],
+        }
+
+    @app.post("/api/agent-profiles/{profile_id}/skills")
+    async def save_agent_profile_skill(profile_id: str, data: dict):
+        """Create or update a skill inside an isolated sub-agent profile."""
+        import re
+        from fastapi import HTTPException
+        from open_agent.agent_profiles import get_agent_profile_manager
+
+        manager = get_agent_profile_manager()
+        profile = manager.get_profile(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Agent profile not found")
+        name = str(data.get("name") or "").strip()
+        description = str(data.get("description") or "").strip()
+        content = str(data.get("content") or "").strip()
+        if not name or not description or not content:
+            raise HTTPException(status_code=400, detail="name, description and content are required")
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", name).strip("-").lower() or "profile-skill"
+        skill_dir = manager.get_agent_home(profile_id) / "skills" / safe_name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n\n{content}\n",
+            encoding="utf-8",
+        )
+        return {"success": True, "data": {"name": name, "path": str(skill_file)}}
+
+    @app.delete("/api/agent-profiles/{profile_id}/skills/{skill_name}")
+    async def delete_agent_profile_skill(profile_id: str, skill_name: str):
+        """Delete a skill from an isolated sub-agent profile."""
+        import shutil
+        from fastapi import HTTPException
+        from open_agent.agent_profiles import get_agent_profile_manager
+
+        manager = get_agent_profile_manager()
+        if not manager.get_profile(profile_id):
+            raise HTTPException(status_code=404, detail="Agent profile not found")
+        skills_dir = manager.get_agent_home(profile_id) / "skills"
+        candidates = [
+            item for item in skills_dir.iterdir()
+            if item.is_dir() and (item.name == skill_name or (item / "SKILL.md").exists())
+        ]
+        target = None
+        for item in candidates:
+            skill_file = item / "SKILL.md"
+            if item.name == skill_name:
+                target = item
+                break
+            try:
+                if f"name: {skill_name}" in skill_file.read_text(encoding="utf-8"):
+                    target = item
+                    break
+            except Exception:
+                pass
+        if not target:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        shutil.rmtree(target)
+        return {"success": True}
+
+    @app.get("/api/agent-profiles/{profile_id}/mcp")
+    async def get_agent_profile_mcp(profile_id: str):
+        """Read a sub-agent profile MCP config."""
+        import json
+        from fastapi import HTTPException
+        from open_agent.agent_profiles import get_agent_profile_manager
+
+        manager = get_agent_profile_manager()
+        if not manager.get_profile(profile_id):
+            raise HTTPException(status_code=404, detail="Agent profile not found")
+        mcp_path = manager.get_agent_home(profile_id) / "mcp.json"
+        if not mcp_path.exists():
+            return {"profile_id": profile_id, "path": str(mcp_path), "config": {"mcpServers": {}}}
+        try:
+            config = json.loads(mcp_path.read_text(encoding="utf-8"))
+        except Exception:
+            config = {"mcpServers": {}}
+        return {"profile_id": profile_id, "path": str(mcp_path), "config": config}
+
+    @app.put("/api/agent-profiles/{profile_id}/mcp")
+    async def save_agent_profile_mcp(profile_id: str, data: dict):
+        """Save a sub-agent profile MCP config."""
+        import json
+        from fastapi import HTTPException
+        from open_agent.agent_profiles import get_agent_profile_manager
+
+        manager = get_agent_profile_manager()
+        if not manager.get_profile(profile_id):
+            raise HTTPException(status_code=404, detail="Agent profile not found")
+        config = data.get("config", data)
+        if not isinstance(config, dict):
+            raise HTTPException(status_code=400, detail="config must be an object")
+        config.setdefault("mcpServers", {})
+        mcp_path = manager.get_agent_home(profile_id) / "mcp.json"
+        mcp_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"success": True, "data": {"path": str(mcp_path), "config": config}}
 
     @app.get("/api/models")
     async def list_models():
@@ -681,6 +800,7 @@ def _setup_legacy_routes(app: FastAPI):
             from open_agent.tools.skill_loader import SkillLoader
             from open_agent.config import Config
             from open_agent.utils.path_utils import get_external_skills_dir, is_frozen
+            from open_agent.plugins import get_plugin_manager
 
             # Get skills directory - use Config.get_package_dir() to find skills directory
             # instead of find_config_file which is for files, not directories
@@ -716,9 +836,15 @@ def _setup_legacy_routes(app: FastAPI):
 
             logger.info(f"[SKILLS] Loading skills from: {skills_dir}")
 
+            plugin_manager = get_plugin_manager()
+
             # Load skills
-            loader = SkillLoader(str(skills_dir))
+            loader = SkillLoader(
+                str(skills_dir),
+                extra_roots=plugin_manager.effective_skill_roots(),
+            )
             skills = loader.discover_skills()
+            disabled_skill_paths = plugin_manager.disabled_skill_paths()
 
             # Return skill metadata
             result = []
@@ -747,9 +873,14 @@ def _setup_legacy_routes(app: FastAPI):
                 result.append(
                     {
                         "name": skill.name,
+                        "original_name": skill.original_name or skill.name,
                         "description": skill.description,
                         "icon": icon,
-                        "enabled": True,  # Default enabled
+                        "enabled": str(skill.skill_path) not in disabled_skill_paths if skill.skill_path else True,
+                        "path": str(skill.skill_path) if skill.skill_path else "",
+                        "source": skill.source,
+                        "source_label": skill.source_label,
+                        "plugin_id": skill.plugin_id,
                     }
                 )
 
@@ -758,6 +889,21 @@ def _setup_legacy_routes(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to list skills: {e}")
             return []
+
+    @app.post("/api/skills/config")
+    async def set_skill_config(data: dict):
+        """Persist a skill enable/disable override."""
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            path = str(data.get("path", "")).strip()
+            if not path:
+                raise ValueError("path is required")
+            enabled = bool(data.get("enabled", True))
+            return get_plugin_manager().set_skill_enabled(path, enabled)
+        except Exception as e:
+            logger.error(f"Failed to update skill config: {e}")
+            return {"success": False, "error": str(e)}
 
     def _get_writable_mcp_config_path() -> Path:
         """Return the MCP config path, creating a user-writable config when needed."""
@@ -792,17 +938,25 @@ def _setup_legacy_routes(app: FastAPI):
     async def get_mcp_config():
         """Get MCP server configuration."""
         try:
+            from open_agent.plugins import get_plugin_manager
+
             config_path = _get_writable_mcp_config_path()
             raw = json.loads(config_path.read_text(encoding="utf-8"))
             servers = raw.get("mcpServers", {})
             if not isinstance(servers, dict):
                 servers = {}
+            effective_servers, warnings = get_plugin_manager().effective_mcp_servers(
+                servers,
+                include_disabled_plugin_servers=True,
+            )
 
             server_list = []
-            for name, config in servers.items():
+            for name, config in effective_servers.items():
                 if not isinstance(config, dict):
                     continue
                 server_config = dict(config)
+                source = server_config.pop("_source", "user")
+                plugin_id = server_config.pop("_plugin_id", None)
                 server_config.update({
                     "name": name,
                     "original_name": name,
@@ -812,6 +966,9 @@ def _setup_legacy_routes(app: FastAPI):
                     "args": config.get("args", []),
                     "env": config.get("env", {}),
                     "disabled": bool(config.get("disabled", False)),
+                    "source": source,
+                    "plugin_id": plugin_id,
+                    "readonly": source == "plugin",
                 })
                 server_list.append(server_config)
 
@@ -819,6 +976,7 @@ def _setup_legacy_routes(app: FastAPI):
                 "success": True,
                 "path": str(config_path),
                 "servers": server_list,
+                "warnings": warnings,
             }
         except Exception as e:
             logger.error(f"Failed to get MCP config: {e}")
@@ -846,6 +1004,8 @@ def _setup_legacy_routes(app: FastAPI):
 
             for server in servers_data:
                 if not isinstance(server, dict):
+                    continue
+                if server.get("source") == "plugin" or server.get("readonly"):
                     continue
 
                 name = str(server.get("name", "")).strip()
@@ -888,6 +1048,129 @@ def _setup_legacy_routes(app: FastAPI):
             return {"success": True, "path": str(config_path)}
         except Exception as e:
             logger.error(f"Failed to save MCP config: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.post("/api/mcp/plugin-server")
+    async def set_plugin_mcp_server(data: dict):
+        """Enable or disable a plugin-provided MCP server."""
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            plugin_id = str(data.get("plugin_id", "")).strip()
+            server_name = str(data.get("server_name", "")).strip()
+            if not plugin_id or not server_name:
+                raise ValueError("plugin_id and server_name are required")
+            enabled = bool(data.get("enabled", True))
+            return get_plugin_manager().set_plugin_mcp_enabled(plugin_id, server_name, enabled)
+        except Exception as e:
+            logger.error(f"Failed to update plugin MCP server: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/plugins")
+    async def list_plugins():
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().list_plugins()
+        except Exception as e:
+            logger.error(f"Failed to list plugins: {e}")
+            return {"success": False, "marketplaces": [], "marketplace_load_errors": [{"message": str(e)}]}
+
+    @app.get("/api/plugins/marketplaces")
+    async def list_plugin_marketplaces():
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().list_marketplaces()
+        except Exception as e:
+            logger.error(f"Failed to list plugin marketplaces: {e}")
+            return {"success": False, "marketplaces": [], "errors": [{"message": str(e)}]}
+
+    @app.post("/api/plugins/marketplaces")
+    async def add_plugin_marketplace(data: dict):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().add_marketplace(
+                str(data.get("source", "")),
+                data.get("ref"),
+            )
+        except Exception as e:
+            logger.error(f"Failed to add plugin marketplace: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.delete("/api/plugins/marketplaces/{marketplace_name}")
+    async def remove_plugin_marketplace(marketplace_name: str):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().remove_marketplace(marketplace_name)
+        except Exception as e:
+            logger.error(f"Failed to remove plugin marketplace: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.post("/api/plugins/marketplaces/upgrade")
+    async def upgrade_plugin_marketplaces(data: dict | None = None):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            data = data or {}
+            return get_plugin_manager().upgrade_marketplaces(data.get("marketplace_name"))
+        except Exception as e:
+            logger.error(f"Failed to upgrade plugin marketplaces: {e}")
+            return {"success": False, "error": str(e), "selected_marketplaces": [], "upgraded_roots": [], "errors": []}
+
+    @app.post("/api/plugins/install")
+    async def install_plugin(data: dict):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().install_plugin(
+                str(data.get("plugin_name", "")),
+                str(data.get("marketplace_name", "")),
+            )
+        except Exception as e:
+            logger.error(f"Failed to install plugin: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/plugins/{plugin_id}")
+    async def read_plugin(plugin_id: str):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().read_plugin(plugin_id)
+        except Exception as e:
+            logger.error(f"Failed to read plugin: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.delete("/api/plugins/{plugin_id}")
+    async def uninstall_plugin(plugin_id: str):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().uninstall_plugin(plugin_id)
+        except Exception as e:
+            logger.error(f"Failed to uninstall plugin: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.post("/api/plugins/{plugin_id}/enable")
+    async def enable_plugin(plugin_id: str):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().set_plugin_enabled(plugin_id, True)
+        except Exception as e:
+            logger.error(f"Failed to enable plugin: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.post("/api/plugins/{plugin_id}/disable")
+    async def disable_plugin(plugin_id: str):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            return get_plugin_manager().set_plugin_enabled(plugin_id, False)
+        except Exception as e:
+            logger.error(f"Failed to disable plugin: {e}")
             return {"success": False, "error": str(e)}
 
     @app.get("/api/commands")

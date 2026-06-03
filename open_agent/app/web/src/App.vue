@@ -12,13 +12,28 @@
         </div>
         
         <div class="header-center">
-          <!-- 智能体选择器-->
-          <div class="selector agent-selector">
-            <select v-model="selectedAgentId" @change="onAgentChange">
-              <option v-for="agent in agentStore.agents" :key="agent.id" :value="agent.id">
-                {{ agent.name }}
-              </option>
-            </select>
+          <div class="agent-dock-wrap header-agent-dock">
+            <div ref="agentDockRef" class="agent-dock-notch" :aria-label="t('智能体会话切换', 'Agent session switcher')">
+              <button
+                v-for="agent in dockAgents"
+                :key="agent.id"
+                type="button"
+                class="agent-dock-card"
+                :class="{ active: agent.id === selectedAgentId, running: isAgentRunning(agent.id) }"
+                :data-agent-id="agent.id"
+                @click="switchAgentFromDock(agent.id)"
+                :title="agent.name"
+              >
+                <span class="agent-dock-name">{{ agent.name }}</span>
+                <span v-if="isAgentRunning(agent.id)" class="agent-dock-equalizer" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+                <span v-else class="agent-dock-idle" aria-hidden="true"></span>
+              </button>
+            </div>
           </div>
           
           <!-- 模型选择器-->
@@ -179,7 +194,7 @@
         </button>
 
         <!-- 私人对话区-->
-        <div class="private-chat-panel">
+        <div class="private-chat-panel" :class="{ 'agent-switching': isAgentSwitching }">
           <div class="chat-messages" ref="messagesContainer" @click="handleChatClick">
             <div
               v-for="(msg, index) in messages"
@@ -254,10 +269,37 @@
                 v-model="inputMessage"
                 class="composer-textarea"
                 :placeholder="t('输入消息...', 'Type a message...')"
-                @keydown.enter.exact.prevent="sendMessage"
+                @focus="onComposerFocus"
+                @blur="closeAgentMention"
+                @input="onComposerInput"
+                @keydown="onComposerKeydown"
                 @paste="onComposerPaste"
                 rows="3"
               ></textarea>
+              <div v-if="mentionOpen && mentionAgents.length" class="agent-mention-menu" @mousedown.stop>
+                <button
+                  v-for="(agent, index) in mentionAgents"
+                  :key="agent.id"
+                  type="button"
+                  class="agent-mention-item"
+                  :class="{ active: index === mentionActiveIndex }"
+                  @mousedown.prevent="selectMentionAgent(agent)"
+                >
+                  <img
+                    v-if="isAgentAvatarImage(agent.avatar)"
+                    class="agent-mention-avatar"
+                    :src="agent.avatar"
+                    :alt="agent.name"
+                  />
+                  <span v-else class="agent-mention-avatar agent-mention-avatar-fallback">
+                    {{ getAgentAvatarText(agent) }}
+                  </span>
+                  <span class="agent-mention-main">
+                    <strong>{{ agent.name }}</strong>
+                    <small>{{ agent.description || t('子智能体', 'Sub-agent') }}</small>
+                  </span>
+                </button>
+              </div>
               <div v-if="pendingAttachments.length" class="pending-attachments">
                 <div v-for="attachment in pendingAttachments" :key="attachment.id" class="attachment-chip">
                   <img v-if="isImageAttachment(attachment)" :src="attachmentPreview(attachment)" :alt="attachment.name" />
@@ -646,10 +688,37 @@
             v-model="inputMessage"
             class="composer-textarea"
             :placeholder="t('输入消息...', 'Type a message...')"
-            @keydown.enter.exact.prevent="sendMessage"
+            @focus="onComposerFocus"
+            @blur="closeAgentMention"
+            @input="onComposerInput"
+            @keydown="onComposerKeydown"
             @paste="onComposerPaste"
             rows="3"
           ></textarea>
+          <div v-if="mentionOpen && mentionAgents.length" class="agent-mention-menu" @mousedown.stop>
+            <button
+              v-for="(agent, index) in mentionAgents"
+              :key="agent.id"
+              type="button"
+              class="agent-mention-item"
+              :class="{ active: index === mentionActiveIndex }"
+              @mousedown.prevent="selectMentionAgent(agent)"
+            >
+              <img
+                v-if="isAgentAvatarImage(agent.avatar)"
+                class="agent-mention-avatar"
+                :src="agent.avatar"
+                :alt="agent.name"
+              />
+              <span v-else class="agent-mention-avatar agent-mention-avatar-fallback">
+                {{ getAgentAvatarText(agent) }}
+              </span>
+              <span class="agent-mention-main">
+                <strong>{{ agent.name }}</strong>
+                <small>{{ agent.description || t('子智能体', 'Sub-agent') }}</small>
+              </span>
+            </button>
+          </div>
           <div v-if="pendingAttachments.length" class="pending-attachments">
             <div v-for="attachment in pendingAttachments" :key="attachment.id" class="attachment-chip">
               <img v-if="isImageAttachment(attachment)" :src="attachmentPreview(attachment)" :alt="attachment.name" />
@@ -763,6 +832,18 @@
           </div>
         </div>
       </footer>
+      <footer class="app-footer" aria-label="Application footer">
+        <button class="app-footer-user" type="button" :title="t('用户信息', 'User info')">
+          <span class="app-footer-avatar">
+            <img :src="appIconUrl" alt="" aria-hidden="true" />
+          </span>
+          <span class="app-footer-user-name">{{ footerUserName }}</span>
+        </button>
+        <p class="app-footer-note">{{ t('内容由 AI 生成，请核实重要信息。', 'AI-generated content. Please verify important information.') }}</p>
+        <div class="app-footer-status">
+          <span>{{ getAgentName() }}</span>
+        </div>
+      </footer>
     </main>
 
 
@@ -852,7 +933,7 @@ import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
-import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
+import type { AgentConfig, AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
@@ -1089,6 +1170,12 @@ const attachmentInput = ref<HTMLInputElement | null>(null)
 const pendingAttachments = ref<ChatAttachment[]>([])
 const canSendMessage = computed(() => !!inputMessage.value.trim() || pendingAttachments.value.length > 0)
 const composerMenuOpen = ref(false)
+const mentionOpen = ref(false)
+const mentionQuery = ref('')
+const mentionStart = ref(0)
+const mentionActiveIndex = ref(0)
+const mentionTarget = ref<{ agentId: string; token: string } | null>(null)
+let activeComposerTextarea: HTMLTextAreaElement | null = null
 const TOOL_ACCESS_MODE_STORAGE_KEY = 'tool_access_mode'
 const toolAccessMode = ref<ToolAccessMode>('default')
 const toolAccessModeTitle = computed(() => {
@@ -1101,8 +1188,12 @@ const isComposerDragging = computed(() => composerDragDepth.value > 0)
 const loading = ref(false)
 const isCancellingRun = ref(false)
 const isForking = ref(false)
+const isAgentSwitching = ref(false)
+const activeRunAgentId = ref('')
+const activeRunSessionId = ref('')
 const skillsEnabled = ref(true)  // 技能开关状态
 const messagesContainer = ref<HTMLElement | null>(null)
+const agentDockRef = ref<HTMLElement | null>(null)
 const runtimeThread = ref<RuntimeThread | null>(null)
 const runtimeTurns = ref<RuntimeTurn[]>([])
 const runtimeEvents = ref<RuntimeEvent[]>([])
@@ -1128,9 +1219,50 @@ function loadToolAccessMode() {
   toolAccessMode.value = normalizeToolAccessMode(localStorage.getItem(TOOL_ACCESS_MODE_STORAGE_KEY))
 }
 
+function sleep(ms: number) {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+async function loadStartupAgentData() {
+  for (let attempt = 1; attempt <= 45; attempt += 1) {
+    await agentStore.loadAgents()
+    await agentStore.loadModelConfigs()
+    if (agentStore.agents.length > 0) {
+      return
+    }
+    await sleep(1000)
+  }
+}
+
 // 鍙敤妯″瀷
 const availableModels = computed(() => {
   return agentStore.modelConfigs
+})
+
+const childAgents = computed(() => {
+  return agentStore.agents.filter(agent => agent.id !== 'main' && agent.enabled !== false)
+})
+
+const mentionAgents = computed(() => {
+  const query = mentionQuery.value.trim().toLowerCase()
+  const candidates = childAgents.value
+  const filtered = query
+    ? candidates.filter(agent => {
+        const haystack = `${agent.name} ${agent.id} ${agent.description || ''}`.toLowerCase()
+        return haystack.includes(query)
+      })
+    : candidates
+  return filtered.slice(0, 8)
+})
+
+const dockAgents = computed(() => {
+  const main = agentStore.agents.find(agent => agent.id === 'main')
+  const rest = agentStore.agents.filter(agent => agent.id !== 'main' && agent.enabled !== false)
+  return main ? [main, ...rest] : rest
+})
+
+const footerUserName = computed(() => {
+  return localStorage.getItem('openagentseal_user_name') || 'admin'
 })
 
 // 鑾峰彇鏅鸿兘浣撳悕绉?
@@ -1217,23 +1349,49 @@ function splitUrlDecoration(value: string): { leading: string; core: string; tra
   }
 }
 
-// 鏅鸿兘浣撳垏鎹?
-async function onAgentChange() {
-  // 淇濆瓨褰撳墠閫変腑鐨?agent ID
-  localStorage.setItem('selected_agent_id', selectedAgentId.value)
-  
+async function switchAgentFromDock(agentId: string) {
+  await switchAgentSession(agentId)
+}
+
+async function switchAgentSession(agentId: string) {
+  if (!agentId) return
+  const previousAgentId = selectedAgentId.value
+  selectedAgentId.value = agentId
+  localStorage.setItem('selected_agent_id', agentId)
+  if (previousAgentId !== agentId) {
+    isAgentSwitching.value = true
+  }
+
   messages.value = []
-  const agent = agentStore.agents.find(a => a.id === selectedAgentId.value)
+  const agent = agentStore.agents.find(a => a.id === agentId)
   if (agent) {
     selectedModelId.value = agent.model_id || ''
     // 鍒涘缓鎴栨仮澶?runner 瀵硅瘽閫氶亾
     await createOrGetSession()
   }
-  loadChatHistory()
+  await loadChatHistory()
   resetRuntimeReplay()
   if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
     await loadRuntimeReplay()
   }
+  await nextTick()
+  scrollSelectedAgentIntoView()
+  window.setTimeout(() => {
+    if (selectedAgentId.value === agentId) {
+      isAgentSwitching.value = false
+    }
+  }, 260)
+}
+
+function scrollSelectedAgentIntoView() {
+  nextTick(() => {
+    const dock = agentDockRef.value
+    if (!dock || !selectedAgentId.value) return
+    const selected = Array
+      .from(dock.querySelectorAll<HTMLElement>('.agent-dock-card'))
+      .find(item => item.dataset.agentId === selectedAgentId.value)
+    selected?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+  })
 }
 
 // 鍒涘缓鎴栬幏鍙?runner 瀵硅瘽閫氶亾
@@ -1248,7 +1406,9 @@ async function createOrGetSession() {
       return
     }
     
-    runnerSessionId.value = `session_agent_${selectedAgentId.value}_${Date.now()}`
+    runnerSessionId.value = selectedAgentId.value === 'main'
+      ? `session_main_${Date.now()}`
+      : `session_${selectedAgentId.value}_${Date.now()}`
     localStorage.setItem(`session_${selectedAgentId.value}`, runnerSessionId.value)
     console.log('Created runner chat channel:', runnerSessionId.value)
   } catch (error) {
@@ -1273,8 +1433,9 @@ async function loadChatHistory() {
   if (!runnerSessionId.value) return
   
   try {
-    const chat = await api.getChatByRunnerSession(runnerSessionId.value)
-    const history = await api.getChatHistory(chat.id)
+    const profileId = selectedAgentId.value || 'main'
+    const chat = await api.getChatByRunnerSession(runnerSessionId.value, profileId)
+    const history = await api.getChatHistory(chat.id, profileId)
     messages.value = history.messages || []
     scrollToBottom()
   } catch (error) {
@@ -1283,7 +1444,7 @@ async function loadChatHistory() {
     if (savedMessages) {
       messages.value = JSON.parse(savedMessages)
       try {
-        await api.persistChatMessages(runnerSessionId.value, messages.value)
+        await api.persistChatMessages(runnerSessionId.value, messages.value, selectedAgentId.value || 'main')
         localStorage.removeItem(`messages_${runnerSessionId.value}`)
       } catch (persistError) {
         console.warn('Failed to migrate local chat messages:', persistError)
@@ -1508,7 +1669,7 @@ async function forkCurrentTask() {
 
   isForking.value = true
   try {
-    const forked = await api.forkChat(runnerSessionId.value, `${getAgentName()} Task`)
+    const forked = await api.forkChat(runnerSessionId.value, `${getAgentName()} Task`, selectedAgentId.value)
     const nextRunnerSessionId = forked.chat.session_id
 
     runnerSessionId.value = nextRunnerSessionId
@@ -1563,6 +1724,158 @@ function closeComposerMenu() {
   composerMenuOpen.value = false
 }
 
+function onComposerFocus(event: FocusEvent) {
+  activeComposerTextarea = event.target as HTMLTextAreaElement
+}
+
+function onComposerInput(event: Event) {
+  activeComposerTextarea = event.target as HTMLTextAreaElement
+  if (mentionTarget.value && !inputMessage.value.includes(mentionTarget.value.token)) {
+    mentionTarget.value = null
+  }
+  updateAgentMention(activeComposerTextarea)
+}
+
+function onComposerKeydown(event: KeyboardEvent) {
+  if (mentionOpen.value && mentionAgents.value.length > 0) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      mentionActiveIndex.value = (mentionActiveIndex.value + 1) % mentionAgents.value.length
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      mentionActiveIndex.value = (mentionActiveIndex.value - 1 + mentionAgents.value.length) % mentionAgents.value.length
+      return
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault()
+      selectMentionAgent(mentionAgents.value[mentionActiveIndex.value])
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeAgentMention()
+      return
+    }
+  }
+
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void sendMessage()
+  }
+}
+
+function updateAgentMention(textarea: HTMLTextAreaElement | null) {
+  if (!textarea) return
+  const cursor = textarea.selectionStart ?? inputMessage.value.length
+  const beforeCursor = inputMessage.value.slice(0, cursor)
+  const match = beforeCursor.match(/(^|\s)@([^\s@]*)$/u)
+  if (!match) {
+    closeAgentMention()
+    return
+  }
+
+  mentionStart.value = beforeCursor.length - match[2].length - 1
+  mentionQuery.value = match[2]
+  mentionOpen.value = childAgents.value.length > 0
+  mentionActiveIndex.value = 0
+}
+
+function closeAgentMention() {
+  mentionOpen.value = false
+  mentionQuery.value = ''
+  mentionActiveIndex.value = 0
+}
+
+function isAgentAvatarImage(avatar?: string): boolean {
+  const value = (avatar || '').trim()
+  if (!value) return false
+  return /^(https?:|data:image\/|blob:|\/)/i.test(value)
+    || /\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(value)
+}
+
+function getAgentAvatarText(agent: AgentConfig): string {
+  const name = (agent.name || '').trim()
+  return name ? name.slice(0, 1).toUpperCase() : 'A'
+}
+
+function focusActiveComposer() {
+  nextTick(() => {
+    activeComposerTextarea?.focus()
+  })
+}
+
+function isAgentRunning(agentId: string): boolean {
+  return loading.value && activeRunAgentId.value === agentId
+}
+
+function selectMentionAgent(agent?: AgentConfig) {
+  if (!agent) return
+  const textarea = activeComposerTextarea
+  const cursor = textarea?.selectionStart ?? inputMessage.value.length
+  const beforeMention = inputMessage.value.slice(0, mentionStart.value)
+  const afterMention = inputMessage.value.slice(cursor).replace(/^\s+/, '')
+  inputMessage.value = `${beforeMention}${afterMention}`.trimStart()
+  mentionTarget.value = null
+  closeAgentMention()
+  void switchAgentSession(agent.id)
+
+  nextTick(() => {
+    const nextCursor = Math.max(0, beforeMention.length)
+    textarea?.focus()
+    textarea?.setSelectionRange(nextCursor, nextCursor)
+  })
+}
+
+function resolveMentionRoute(rawMessage: string): { agentId: string | null; message: string } {
+  const raw = rawMessage.trim()
+  if (!raw) {
+    return { agentId: null, message: '' }
+  }
+
+  if (mentionTarget.value && hasMentionBoundary(raw, mentionTarget.value.token)) {
+    return {
+      agentId: mentionTarget.value.agentId,
+      message: removeMentionToken(raw, mentionTarget.value.token),
+    }
+  }
+
+  const tokens = childAgents.value
+    .flatMap(agent => [
+      { agentId: agent.id, token: `@${agent.name}` },
+      { agentId: agent.id, token: `@${agent.id}` },
+    ])
+    .filter(item => item.token.length > 1)
+    .sort((a, b) => b.token.length - a.token.length)
+
+  for (const item of tokens) {
+    if (hasMentionBoundary(raw, item.token)) {
+      return {
+        agentId: item.agentId,
+        message: removeMentionToken(raw, item.token),
+      }
+    }
+  }
+
+  return { agentId: null, message: raw }
+}
+
+function hasMentionBoundary(value: string, token: string): boolean {
+  return value === token || value.startsWith(`${token} `)
+}
+
+function removeMentionToken(value: string, token: string): string {
+  if (value === token) return ''
+  return value.startsWith(`${token} `)
+    ? value.slice(token.length).trim()
+    : value.replace(token, '').trim()
+}
+
+async function switchToMentionAgent(agentId: string) {
+  await switchAgentSession(agentId)
+}
+
 async function runComposerAction(action: 'image' | 'clear' | 'new' | 'fork' | 'cot' | 'skills') {
   closeComposerMenu()
   if (action === 'image') {
@@ -1593,7 +1906,9 @@ async function startNewChat() {
   if (runnerSessionId.value && messages.value.length > 0) {
     saveMessages()
   }
-  runnerSessionId.value = `session_agent_${selectedAgentId.value}_${Date.now()}`
+  runnerSessionId.value = selectedAgentId.value === 'main'
+    ? `session_main_${Date.now()}`
+    : `session_${selectedAgentId.value}_${Date.now()}`
   localStorage.setItem(`session_${selectedAgentId.value}`, runnerSessionId.value)
   messages.value = []
   pendingAttachments.value = []
@@ -2024,10 +2339,11 @@ function handleComposerPrimaryAction() {
 }
 
 async function stopCurrentRun() {
-  if (!loading.value || !runnerSessionId.value || isCancellingRun.value) return
+  const sessionToCancel = activeRunSessionId.value || runnerSessionId.value
+  if (!loading.value || !sessionToCancel || isCancellingRun.value) return
   isCancellingRun.value = true
   try {
-    await api.cancelRunnerChat(runnerSessionId.value)
+    await api.cancelRunnerChat(sessionToCancel)
   } catch (error) {
     console.error('Failed to stop current run:', error)
   }
@@ -2042,18 +2358,39 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 // 鍙戦€佹秷鎭?
 async function sendMessage() {
   if (!canSendMessage.value || loading.value || !selectedAgentId.value) return
+
+  const route = resolveMentionRoute(inputMessage.value)
+  const attachments = [...pendingAttachments.value]
+
+  if (route.agentId && !route.message && attachments.length === 0) {
+    await switchToMentionAgent(route.agentId)
+    inputMessage.value = ''
+    mentionTarget.value = null
+    closeAgentMention()
+    focusActiveComposer()
+    return
+  }
+
+  if (route.agentId) {
+    await switchToMentionAgent(route.agentId)
+  }
   
   // Ensure the runner channel exists before sending.
   if (!runnerSessionId.value) {
     await createOrGetSession()
   }
   
-  const userMessage = inputMessage.value.trim()
-  const attachments = [...pendingAttachments.value]
+  const userMessage = route.message
   const workspacePayload = workspaceSources.value
   const selectedWorkspacePayload = compactSelectedWorkspacePaths()
   inputMessage.value = ''
   pendingAttachments.value = []
+  mentionTarget.value = null
+  closeAgentMention()
+
+  if (!userMessage && attachments.length === 0) {
+    return
+  }
   
   messages.value.push({
     role: 'user',
@@ -2064,6 +2401,10 @@ async function sendMessage() {
   
   scrollToBottom()
   loading.value = true
+  const sendSessionId = runnerSessionId.value
+  const sendAgentId = selectedAgentId.value || 'main'
+  activeRunSessionId.value = sendSessionId
+  activeRunAgentId.value = sendAgentId
   
   // 鍒涘缓涓€涓?assistant 娑堟伅鍗犱綅绗︼紝鐢ㄤ簬瀛樺偍鎬濊€冭繃绋嬪拰鏈€缁堝洖澶?
   // 浣跨敤 reactive 纭繚娣卞眰鍝嶅簲寮?
@@ -2086,7 +2427,7 @@ async function sendMessage() {
     
     // 浣跨敤 runner 閫氶亾 ID锛岃€屼笉鏄?agentId
     // 鐩戝惉鍚庣鍙戦€佺殑浜嬩欢锛歵hinking, tool_call, tool_result, complete, error
-    await api.chat(runnerSessionId.value, userMessage, (event) => {
+    await api.chat(sendSessionId, userMessage, (event) => {
       console.log('[Iteration Debug] Received event:', event)
       syncRuntimeEventFromStream(event)
 
@@ -2198,7 +2539,7 @@ async function sendMessage() {
           assistantMessage.thinking.isThinking = false
         }
       }
-    }, attachments, workspacePayload, selectedWorkspacePayload, toolAccessMode.value)
+    }, attachments, workspacePayload, selectedWorkspacePayload, toolAccessMode.value, sendAgentId)
 
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
       await loadRuntimeReplay()
@@ -2229,6 +2570,10 @@ async function sendMessage() {
   } finally {
     loading.value = false
     isCancellingRun.value = false
+    if (activeRunSessionId.value === sendSessionId) {
+      activeRunSessionId.value = ''
+      activeRunAgentId.value = ''
+    }
     // 淇濆瓨娑堟伅鍒?localStorage
     saveMessages()
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
@@ -2264,7 +2609,7 @@ async function clearChat() {
   if (runnerSessionId.value) {
     localStorage.removeItem(`messages_${runnerSessionId.value}`)
     try {
-      await api.clearChatMessages(runnerSessionId.value)
+      await api.clearChatMessages(runnerSessionId.value, selectedAgentId.value || 'main')
     } catch (error) {
       console.error('Failed to clear persisted chat messages:', error)
     }
@@ -2557,8 +2902,7 @@ onMounted(async () => {
   await listenForDesktopNavigation()
   await listenForDesktopFileDrops()
 
-  await agentStore.loadAgents()
-  await agentStore.loadModelConfigs()
+  await loadStartupAgentData()
   await chatStore.loadChats()
   await syncSkillsSetting()
   await loadWorkspaceSourceState()
@@ -2587,6 +2931,7 @@ onMounted(async () => {
     // 鍒涘缓鎴栨仮澶?runner 瀵硅瘽閫氶亾
     await createOrGetSession()
     await loadChatHistory()
+    scrollSelectedAgentIntoView()
     
     // 涓嶅啀鑷姩鍙戦€侀棶鍊欐秷鎭紙閬垮厤涓?CLI 閲嶅锛?
     // 鐢ㄦ埛鍙互涓诲姩杈撳叆娑堟伅寮€濮嬪璇?
@@ -2672,6 +3017,98 @@ onUnmounted(() => {
   background: transparent;
   position: relative;
   z-index: 1;
+  min-height: 0;
+}
+
+.app-footer {
+  flex: 0 0 40px;
+  height: 40px;
+  display: grid;
+  grid-template-columns: minmax(180px, 292px) minmax(0, 1fr) minmax(120px, 292px);
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px 0 8px;
+  border-top: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--glass-bg-strong) 94%, var(--bg-secondary));
+  box-shadow: inset 0 1px 0 var(--glass-border);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  color: var(--text-secondary);
+  position: relative;
+  z-index: 3;
+}
+
+.app-footer-user {
+  min-width: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  box-shadow: none;
+}
+
+.app-footer-avatar {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--glass-bg-strong));
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.1), inset 0 1px 0 var(--glass-border);
+  overflow: hidden;
+}
+
+.app-footer-avatar img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  display: block;
+}
+
+.app-footer-user-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.app-footer-note {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.app-footer-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.app-footer-status span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .main-browser {
@@ -2902,6 +3339,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 18px;
   padding: 12px 24px;
   background: var(--glass-bg);
   backdrop-filter: blur(20px) saturate(170%);
@@ -2915,6 +3353,7 @@ onUnmounted(() => {
 .header-left {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
 }
 
 .logo {
@@ -2943,7 +3382,18 @@ onUnmounted(() => {
 .header-center {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 16px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.model-selector {
+  flex: 0 0 auto;
+}
+
+.model-selector select {
+  min-width: 268px;
 }
 
 .selector select {
@@ -2975,6 +3425,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex: 0 0 auto;
 }
 
 .btn-settings {
@@ -3525,6 +3976,109 @@ onUnmounted(() => {
 
 .composer-textarea::placeholder {
   color: var(--text-muted);
+}
+
+.agent-mention-menu {
+  position: absolute;
+  left: 14px;
+  bottom: 54px;
+  z-index: 35;
+  width: min(340px, calc(100% - 28px));
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--glass-bg-strong);
+  box-shadow: 0 20px 55px rgba(15, 23, 42, 0.16), inset 0 1px 0 var(--glass-border);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+}
+
+.agent-mention-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.agent-mention-item:hover,
+.agent-mention-item.active {
+  border-color: rgba(47, 110, 244, 0.22);
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+}
+
+.agent-mention-item:active {
+  transform: translateY(1px);
+}
+
+.agent-mention-avatar {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  object-fit: cover;
+  background: rgba(47, 110, 244, 0.1);
+}
+
+.agent-mention-avatar-fallback {
+  border: 1px solid rgba(47, 110, 244, 0.16);
+  color: var(--primary-color);
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: inset 0 1px 0 var(--glass-border);
+}
+
+.agent-mention-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.agent-mention-main strong,
+.agent-mention-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-mention-main strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.agent-mention-main small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.mention-target-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  max-width: 160px;
+  padding: 0 10px;
+  border: 1px solid rgba(47, 110, 244, 0.22);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pending-attachments {
@@ -4302,6 +4856,179 @@ onUnmounted(() => {
   min-width: 300px;
 }
 
+.agent-dock-wrap {
+  position: relative;
+  z-index: 20;
+  flex: 1 1 720px;
+  width: min(760px, 100%);
+  min-width: 260px;
+  pointer-events: none;
+}
+
+.header-agent-dock {
+  max-width: min(760px, 58vw);
+}
+
+.agent-dock-notch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  min-height: 46px;
+  margin: 0 auto;
+  padding: 6px 8px;
+  overflow-x: auto;
+  border: 1px solid rgba(47, 110, 244, 0.16);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--glass-bg-strong) 92%, rgba(47, 110, 244, 0.14)), var(--glass-bg)),
+    radial-gradient(circle at 50% 0%, rgba(47, 110, 244, 0.2), transparent 64%);
+  box-shadow: 0 20px 55px rgba(15, 23, 42, 0.13), inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(22px) saturate(170%);
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+  pointer-events: auto;
+  scrollbar-width: none;
+}
+
+.agent-dock-notch::-webkit-scrollbar {
+  display: none;
+}
+
+.agent-dock-card {
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 4px;
+  width: 112px;
+  min-height: 38px;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--glass-bg-strong) 94%, rgba(255, 255, 255, 0.18)), color-mix(in srgb, var(--glass-bg) 86%, rgba(47, 110, 244, 0.08)));
+  color: var(--text-secondary);
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62), 0 8px 20px rgba(15, 23, 42, 0.06);
+  transition: transform 0.18s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+
+.agent-dock-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.26) 42%, transparent 68%);
+  opacity: 0;
+  transform: translateX(-80%);
+  transition: opacity 0.2s ease, transform 0.45s ease;
+}
+
+.agent-dock-card:hover {
+  border-color: rgba(47, 110, 244, 0.32);
+  color: var(--text-primary);
+  transform: translateY(-2px);
+}
+
+.agent-dock-card:hover::before {
+  opacity: 1;
+  transform: translateX(80%);
+}
+
+.agent-dock-card.active {
+  border-color: rgba(47, 110, 244, 0.64);
+  color: var(--primary-color);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--primary-color) 14%, var(--glass-bg-strong)), color-mix(in srgb, var(--primary-color) 8%, var(--glass-bg)));
+  box-shadow: 0 14px 34px rgba(47, 110, 244, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.agent-dock-card.running {
+  border-color: rgba(47, 110, 244, 0.74);
+}
+
+.agent-dock-name {
+  position: relative;
+  z-index: 1;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: 0;
+}
+
+.agent-dock-idle {
+  position: relative;
+  z-index: 1;
+  width: 18px;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 42%, transparent);
+}
+
+.agent-dock-equalizer {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+  height: 12px;
+}
+
+.agent-dock-equalizer span {
+  width: 3px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--primary-color);
+  box-shadow: 0 0 10px rgba(47, 110, 244, 0.42);
+  animation: agent-eq 0.86s ease-in-out infinite;
+}
+
+.agent-dock-equalizer span:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.agent-dock-equalizer span:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
+.agent-dock-equalizer span:nth-child(4) {
+  animation-delay: 0.36s;
+}
+
+@keyframes agent-eq {
+  0%, 100% {
+    height: 4px;
+    opacity: 0.55;
+  }
+  45% {
+    height: 12px;
+    opacity: 1;
+  }
+}
+
+.private-chat-panel.agent-switching .chat-messages {
+  animation: agent-session-switch 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes agent-session-switch {
+  0% {
+    opacity: 0.2;
+    transform: translateY(12px) scale(0.992);
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
 .chat-body.dual-panel .chat-messages {
   padding-right: 24px;
 }
@@ -4995,6 +5722,41 @@ onUnmounted(() => {
 }
 
 @media (max-width: 980px) {
+  .app-footer {
+    grid-template-columns: minmax(120px, 1fr) minmax(0, 1.3fr);
+  }
+
+  .app-footer-status {
+    display: none;
+  }
+
+  .chat-header {
+    padding: 10px 14px;
+    gap: 10px;
+  }
+
+  .logo-text {
+    display: none;
+  }
+
+  .header-center {
+    gap: 10px;
+  }
+
+  .header-agent-dock {
+    max-width: none;
+    min-width: 180px;
+  }
+
+  .agent-dock-card {
+    width: 92px;
+  }
+
+  .model-selector select {
+    min-width: 180px;
+    max-width: 220px;
+  }
+
   .chat-body.source-open,
   .chat-body.dual-panel {
     flex-direction: column;

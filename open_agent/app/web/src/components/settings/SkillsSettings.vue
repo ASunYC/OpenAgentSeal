@@ -2,7 +2,7 @@
   <div class="tab-content">
     <div class="content-header">
       <h3>{{ t('技能管理', 'Skills Management') }}</h3>
-      <p>{{ t('管理可用的 AI 技能', 'Manage available AI skills') }}</p>
+      <p>{{ t('管理智能体最终可用的技能能力', 'Manage skills available to the agent') }}</p>
       <span class="count-pill">{{ t('技能', 'Skills') }} {{ skills.length }}</span>
     </div>
 
@@ -19,16 +19,17 @@
     </div>
 
     <div v-else class="skills-grid">
-      <div v-for="skill in skills" :key="skill.name" class="skill-card">
+      <div v-for="skill in skills" :key="skill.path || skill.name" class="skill-card">
         <div class="skill-header">
-          <div class="skill-icon">{{ skill.icon }}</div>
+          <div class="skill-icon">{{ skill.icon || 'S' }}</div>
           <div class="skill-info">
             <h4>{{ skill.name }}</h4>
             <p>{{ skill.description }}</p>
+            <span class="source-pill">{{ sourceLabel(skill) }}</span>
           </div>
         </div>
         <div class="skill-actions">
-          <button class="btn-toggle" :class="{ active: skill.enabled }" @click="toggleSkill(skill)">
+          <button class="btn-toggle" :class="{ active: skill.enabled }" :disabled="savingPath === skill.path" @click="toggleSkill(skill)">
             {{ skill.enabled ? t('启用', 'Enabled') : t('禁用', 'Disabled') }}
           </button>
         </div>
@@ -38,83 +39,59 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
-import { API_BASE } from '@/api'
+import { onMounted, ref } from 'vue'
+import { skillsApi, type SkillConfig } from '@/api'
 import { useSettingsStore } from '@/stores/settings'
 
 const settingsStore = useSettingsStore()
-const STORAGE_KEY = 'open-agent-skills'
-
-interface Skill {
-  name: string
-  icon: string
-  description: string
-  enabled: boolean
-}
-
-const skills = ref<Skill[]>([])
+const skills = ref<SkillConfig[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+const savingPath = ref<string | null>(null)
 
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
 }
 
-function loadLocalSkills(): Skill[] | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return null
-    return JSON.parse(raw) as Skill[]
-  } catch (error) {
-    console.warn('Failed to load local skills:', error)
-    return null
+function sourceLabel(skill: SkillConfig) {
+  if (skill.source === 'plugin') {
+    return `${t('插件', 'Plugin')}: ${skill.source_label || skill.plugin_id || '-'}`
   }
-}
-
-function saveLocalSkills() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(skills.value))
+  if (skill.source === 'user') {
+    return t('用户技能', 'User skill')
+  }
+  return t('内置技能', 'Built-in')
 }
 
 async function loadSkills() {
   loading.value = true
   error.value = null
   try {
-    const cached = loadLocalSkills()
-    if (cached && cached.length > 0) {
-      skills.value = cached
-    }
-
-    const response = await fetch(`${API_BASE}/skills`)
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-
-    const data = await response.json()
-    const enabledMap = new Map(cached?.map((skill) => [skill.name, skill.enabled]) ?? [])
-    skills.value = data.map((skill: Skill) => ({
-      ...skill,
-      enabled: enabledMap.get(skill.name) ?? skill.enabled ?? true,
-    }))
-    saveLocalSkills()
+    skills.value = await skillsApi.list()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
-    console.error('Failed to load skills:', e)
-    if (!skills.value.length) {
-      skills.value = []
-    }
+    skills.value = []
   } finally {
     loading.value = false
   }
 }
 
-function toggleSkill(skill: Skill) {
-  skill.enabled = !skill.enabled
-  saveLocalSkills()
+async function toggleSkill(skill: SkillConfig) {
+  if (!skill.path) return
+  const next = !skill.enabled
+  savingPath.value = skill.path
+  try {
+    const result = await skillsApi.setEnabled(skill.path, next)
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to update skill')
+    }
+    skill.enabled = next
+  } catch (e) {
+    alert(e instanceof Error ? e.message : String(e))
+  } finally {
+    savingPath.value = null
+  }
 }
-
-watch(skills, () => {
-  saveLocalSkills()
-}, { deep: true })
 
 onMounted(() => {
   void loadSkills()
@@ -204,6 +181,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   width: 40px;
   height: 40px;
   border-radius: 10px;
@@ -213,6 +191,7 @@ onMounted(() => {
 
 .skill-info {
   flex: 1;
+  min-width: 0;
 }
 
 .skill-info h4 {
@@ -220,12 +199,26 @@ onMounted(() => {
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .skill-info p {
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.source-pill {
+  display: inline-flex;
+  margin-top: 8px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--hover-bg);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.2;
 }
 
 .skill-actions {
@@ -248,5 +241,10 @@ onMounted(() => {
   border-color: var(--primary-color);
   background: var(--primary-color);
   color: #fff;
+}
+
+.btn-toggle:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 </style>

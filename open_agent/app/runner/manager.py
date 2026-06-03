@@ -26,9 +26,9 @@ class ChatManager:
     - Broadcast events to connected clients (SSE)
     """
     
-    def __init__(self, repo: ChatRepository = None):
-        self.repo = repo or JsonChatRepository()
-        self.message_repo = MonthlyMessageRepository()
+    def __init__(self, repo: ChatRepository = None, storage_dir=None):
+        self.repo = repo or JsonChatRepository(storage_dir=storage_dir)
+        self.message_repo = MonthlyMessageRepository(storage_dir=storage_dir)
         self._session_messages: Dict[str, List[Message]] = {}
         self._session_agents: Dict[str, str] = {}  # session_id -> agent_id
         self._event_subscribers: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
@@ -71,12 +71,14 @@ class ChatManager:
 
     def _derive_fork_session_id(self, source_session_id: str) -> str:
         """Create a new session id that keeps the source agent routing when possible."""
-        if source_session_id.startswith("session_agent_"):
-            agent_part = source_session_id[len("session_agent_"):]
+        if source_session_id.startswith("session_main_"):
+            return f"session_main_{uuid.uuid4().hex[:8]}"
+        if source_session_id.startswith("session_"):
+            agent_part = source_session_id[len("session_"):]
             if "_" in agent_part:
                 agent_id = agent_part.rsplit("_", 1)[0]
-                if agent_id:
-                    return f"session_agent_{agent_id}_{uuid.uuid4().hex[:8]}"
+                if agent_id and agent_id != "main":
+                    return f"session_{agent_id}_{uuid.uuid4().hex[:8]}"
         return f"{source_session_id}_fork_{uuid.uuid4().hex[:8]}"
 
     async def fork_chat(
@@ -232,14 +234,33 @@ class ChatManager:
 
 # Singleton instance
 _chat_manager: Optional[ChatManager] = None
+_scoped_chat_managers: Dict[str, ChatManager] = {}
 
 
-def get_chat_manager() -> ChatManager:
+def _manager_key(profile_id: str | None = None) -> str:
+    return profile_id or "main"
+
+
+def _manager_storage_dir(profile_id: str | None = None):
+    from open_agent.agent_profiles import MAIN_AGENT_ID, get_agent_profile_manager
+
+    manager = get_agent_profile_manager()
+    agent_home = manager.get_agent_home(None if not profile_id or profile_id == MAIN_AGENT_ID else profile_id)
+    return agent_home / "sessions"
+
+
+def get_chat_manager(profile_id: str | None = None) -> ChatManager:
     """Get the global ChatManager instance"""
     global _chat_manager
-    if _chat_manager is None:
-        _chat_manager = ChatManager()
-    return _chat_manager
+    if profile_id is None:
+        if _chat_manager is None:
+            _chat_manager = ChatManager(storage_dir=_manager_storage_dir(None))
+        return _chat_manager
+
+    key = _manager_key(profile_id)
+    if key not in _scoped_chat_managers:
+        _scoped_chat_managers[key] = ChatManager(storage_dir=_manager_storage_dir(profile_id))
+    return _scoped_chat_managers[key]
 
 
 def init_chat_manager(repo: ChatRepository = None) -> ChatManager:

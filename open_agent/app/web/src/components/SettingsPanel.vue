@@ -114,6 +114,21 @@
           <span>{{ t('技能', 'Skills') }}</span>
         </div>
         
+        <div
+          class="menu-item"
+          :class="{ active: currentTab === 'plugins' }"
+          @click="switchTab('plugins')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 3v4a2 2 0 0 0 2 2h4" />
+            <path d="M5 8V5a2 2 0 0 1 2-2h7l5 5v3" />
+            <path d="M5 16v3a2 2 0 0 0 2 2h3" />
+            <path d="M15 14h6v6h-6z" />
+            <path d="M3 11h6v6H3z" />
+          </svg>
+          <span>{{ t('插件', 'Plugins') }}</span>
+        </div>
+
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'mcp' }"
@@ -208,6 +223,8 @@
         
         <!-- 技能 -->
         <SkillsSettings v-else-if="currentTab === 'skills'" />
+
+        <PluginsSettings v-else-if="currentTab === 'plugins'" />
         
         <!-- MCP -->
         <MCPSettings v-else-if="currentTab === 'mcp'" />
@@ -238,6 +255,7 @@ import ModelsSettings from '@/components/settings/ModelsSettings.vue'
 import SmartRoutingSettings from '@/components/settings/SmartRoutingSettings.vue'
 import AgentsSettings from '@/components/settings/AgentsSettings.vue'
 import SkillsSettings from '@/components/settings/SkillsSettings.vue'
+import PluginsSettings from '@/components/settings/PluginsSettings.vue'
 import MCPSettings from '@/components/settings/MCPSettings.vue'
 import LogsSettings from '@/components/settings/LogsSettings.vue'
 import TasksSettings from '@/components/settings/TasksSettings.vue'

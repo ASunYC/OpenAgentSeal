@@ -208,6 +208,32 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+def get_main_agent_dir() -> Path:
+    r"""Get the isolated data directory for the main agent."""
+    path = get_data_dir() / "main-agent"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_agent_profiles_root() -> Path:
+    r"""Get the root directory for isolated sub-agent profiles."""
+    path = get_data_dir() / "agents" / "profiles"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_agent_profile_dir(profile_id: str) -> Path:
+    r"""Get the isolated data directory for a sub-agent profile."""
+    safe_profile_id = "".join(
+        ch for ch in str(profile_id or "").strip() if ch.isalnum() or ch in {"_", "-"}
+    )
+    if not safe_profile_id:
+        safe_profile_id = "profile"
+    path = get_agent_profiles_root() / safe_profile_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def get_memory_dir() -> Path:
     r"""Get the memory database directory.
     

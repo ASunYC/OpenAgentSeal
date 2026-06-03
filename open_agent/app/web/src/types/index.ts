@@ -204,6 +204,9 @@ export interface AgentConfig {
   max_steps: number
   tools: string[]
   mcp_servers: string[]
+  permission_mode?: 'default' | 'full' | string
+  allow_delegation?: boolean
+  enabled?: boolean
   created_at: string
   updated_at: string
 }

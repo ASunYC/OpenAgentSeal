@@ -405,58 +405,61 @@ async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
         with open(config_file, encoding="utf-8") as f:
             config = json.load(f)
 
-        mcp_servers = config.get("mcpServers", {})
-
-        if not mcp_servers:
-            print("No MCP servers configured")
-            return []
-
-        all_tools = []
-
-        # Connect to each enabled server
-        for server_name, server_config in mcp_servers.items():
-            if server_config.get("disabled", False):
-                print(f"Skipping disabled server: {server_name}")
-                continue
-
-            conn_type = _determine_connection_type(server_config)
-            url = server_config.get("url")
-            command = server_config.get("command")
-
-            # Validate config
-            if conn_type == "stdio" and not command:
-                print(f"No command specified for STDIO server: {server_name}")
-                continue
-            if conn_type in ("sse", "http", "streamable_http") and not url:
-                print(f"No url specified for {conn_type.upper()} server: {server_name}")
-                continue
-
-            connection = MCPServerConnection(
-                name=server_name,
-                connection_type=conn_type,
-                command=command,
-                args=server_config.get("args", []),
-                env=server_config.get("env", {}),
-                url=url,
-                headers=server_config.get("headers", {}),
-                # Per-server timeout overrides from mcp.json
-                connect_timeout=server_config.get("connect_timeout"),
-                execute_timeout=server_config.get("execute_timeout"),
-                sse_read_timeout=server_config.get("sse_read_timeout"),
-            )
-            success = await connection.connect()
-
-            if success:
-                _mcp_connections.append(connection)
-                all_tools.extend(connection.tools)
-
-        print(f"\nTotal MCP tools loaded: {len(all_tools)}")
-
-        return all_tools
+        return await load_mcp_tools_from_servers_async(config.get("mcpServers", {}))
 
     except Exception as e:
         print(f"Error loading MCP config: {e}")
         return []
+
+
+async def load_mcp_tools_from_servers_async(mcp_servers: dict) -> list[Tool]:
+    """Load MCP tools from an already merged mcpServers mapping."""
+    global _mcp_connections
+
+    if not mcp_servers:
+        print("No MCP servers configured")
+        return []
+
+    all_tools = []
+
+    for server_name, server_config in mcp_servers.items():
+        if not isinstance(server_config, dict):
+            continue
+        if server_config.get("disabled", False):
+            print(f"Skipping disabled server: {server_name}")
+            continue
+
+        conn_type = _determine_connection_type(server_config)
+        url = server_config.get("url")
+        command = server_config.get("command")
+
+        if conn_type == "stdio" and not command:
+            print(f"No command specified for STDIO server: {server_name}")
+            continue
+        if conn_type in ("sse", "http", "streamable_http") and not url:
+            print(f"No url specified for {conn_type.upper()} server: {server_name}")
+            continue
+
+        connection = MCPServerConnection(
+            name=server_name,
+            connection_type=conn_type,
+            command=command,
+            args=server_config.get("args", []),
+            env=server_config.get("env", {}),
+            url=url,
+            headers=server_config.get("headers", {}),
+            connect_timeout=server_config.get("connect_timeout"),
+            execute_timeout=server_config.get("execute_timeout"),
+            sse_read_timeout=server_config.get("sse_read_timeout"),
+        )
+        success = await connection.connect()
+
+        if success:
+            _mcp_connections.append(connection)
+            all_tools.extend(connection.tools)
+
+    print(f"\nTotal MCP tools loaded: {len(all_tools)}")
+    return all_tools
 
 
 async def cleanup_mcp_connections():

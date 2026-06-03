@@ -48,6 +48,7 @@ class ForkChatRequest(BaseModel):
     name: Optional[str] = None
     user_id: str = "default"
     channel: str = "web"
+    profile_id: Optional[str] = None
 
 
 class RunRequest(BaseModel):
@@ -55,6 +56,35 @@ class RunRequest(BaseModel):
     user_id: str = "default"
     messages: List[dict] = []
     stream: bool = True
+    workspace_sources: List[dict] = []
+    selected_workspace_paths: List[str] = []
+    tool_access_mode: str = "default"
+    profile_id: Optional[str] = None
+
+
+class CreateAgentSessionRequest(BaseModel):
+    profile_id: Optional[str] = None
+    name: str = "New Chat"
+    user_id: str = "default"
+    parent_session_id: Optional[str] = None
+    parent_task_id: Optional[str] = None
+
+
+class AgentSessionMessageRequest(BaseModel):
+    profile_id: Optional[str] = None
+    messages: List[dict] = []
+    user_id: str = "default"
+    stream: bool = True
+    workspace_sources: List[dict] = []
+    selected_workspace_paths: List[str] = []
+    tool_access_mode: str = "default"
+
+
+class AgentTaskRequest(BaseModel):
+    profile_id: str
+    instruction: str
+    user_id: str = "default"
+    parent_session_id: Optional[str] = None
     workspace_sources: List[dict] = []
     selected_workspace_paths: List[str] = []
     tool_access_mode: str = "default"
@@ -79,13 +109,26 @@ class PersistMessagesRequest(BaseModel):
 
 
 def _get_control_plane():
+    from open_agent.agent_profiles import get_agent_profile_manager
     from open_agent.control_plane import get_control_plane
 
-    return get_control_plane()
+    return get_control_plane(get_agent_profile_manager().get_agent_home(None))
+
+
+def _get_control_plane_for_profile(profile_id: str | None):
+    from open_agent.agent_profiles import get_agent_profile_manager
+    from open_agent.control_plane import get_control_plane
+
+    home = get_agent_profile_manager().get_agent_home(None if not profile_id or profile_id == "main" else profile_id)
+    return get_control_plane(home)
 
 
 def _workspace_state_path() -> Path:
     return get_data_dir() / "workspace_sources.json"
+
+
+def _chat_manager_for_profile(profile_id: str | None):
+    return get_chat_manager(None if not profile_id or profile_id == "main" else profile_id)
 
 
 def _sanitize_workspace_state(state: WorkspaceSourceState) -> WorkspaceSourceState:
@@ -195,9 +238,9 @@ async def create_chat(request: CreateChatRequest) -> dict:
 
 @router.get("/chats/runner-channel/{session_id}")
 @router.get("/chats/session/{session_id}")
-async def get_chat_by_session(session_id: str) -> dict:
+async def get_chat_by_session(session_id: str, profile_id: str = Query(None)) -> dict:
     """Get chat metadata by session id."""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(profile_id)
     chat = await manager.repo.find_by_session_id(session_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -215,9 +258,9 @@ async def get_chat_by_session(session_id: str) -> dict:
 
 
 @router.get("/chats/{chat_id}")
-async def get_chat(chat_id: str) -> dict:
+async def get_chat(chat_id: str, profile_id: str = Query(None)) -> dict:
     """Get a specific chat"""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(profile_id)
     chat = await manager.get_chat(chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -234,9 +277,9 @@ async def get_chat(chat_id: str) -> dict:
 
 
 @router.delete("/chats/{chat_id}")
-async def delete_chat(chat_id: str) -> dict:
+async def delete_chat(chat_id: str, profile_id: str = Query(None)) -> dict:
     """Delete a chat"""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(profile_id)
     success = await manager.delete_chats([chat_id])
     if not success:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -244,17 +287,17 @@ async def delete_chat(chat_id: str) -> dict:
 
 
 @router.post("/chats/delete")
-async def delete_chats(request: DeleteChatsRequest) -> dict:
+async def delete_chats(request: DeleteChatsRequest, profile_id: str = Query(None)) -> dict:
     """Delete multiple chats"""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(profile_id)
     success = await manager.delete_chats(request.chat_ids)
     return {"success": success, "deleted_count": len(request.chat_ids)}
 
 
 @router.get("/chats/{chat_id}/history")
-async def get_chat_history(chat_id: str) -> dict:
+async def get_chat_history(chat_id: str, profile_id: str = Query(None)) -> dict:
     """Get chat history with messages"""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(profile_id)
     history = await manager.get_history(chat_id)
     if not history:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -267,9 +310,9 @@ async def get_chat_history(chat_id: str) -> dict:
 
 
 @router.delete("/chats/session/{session_id}/messages")
-async def clear_chat_messages(session_id: str) -> dict:
+async def clear_chat_messages(session_id: str, profile_id: str = Query(None)) -> dict:
     """Clear persisted messages for a chat session while keeping chat metadata."""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(profile_id)
     chat = await manager.repo.find_by_session_id(session_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -279,9 +322,13 @@ async def clear_chat_messages(session_id: str) -> dict:
 
 
 @router.post("/chats/session/{session_id}/messages")
-async def persist_chat_messages(session_id: str, request: PersistMessagesRequest) -> dict:
+async def persist_chat_messages(
+    session_id: str,
+    request: PersistMessagesRequest,
+    profile_id: str = Query(None),
+) -> dict:
     """Persist an imported message history for a chat session."""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(profile_id)
     chat = await manager.repo.find_by_session_id(session_id)
     if not chat:
         chat = await manager.create_chat(
@@ -362,6 +409,54 @@ async def save_workspace_sources(state: WorkspaceSourceState) -> dict:
     return saved.model_dump()
 
 
+@router.get("/agent-profiles/{profile_id}/sessions")
+async def list_profile_sessions(
+    profile_id: str,
+    user_id: str = Query(None),
+) -> dict:
+    """List chat sessions for an isolated sub-agent profile."""
+    manager = _chat_manager_for_profile(profile_id)
+    chats = await manager.list_chats(user_id)
+    return {
+        "profile_id": profile_id,
+        "sessions": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "session_id": c.session_id,
+                "user_id": c.user_id,
+                "channel": c.channel,
+                "meta": c.meta,
+                "created_at": c.created_at.isoformat(),
+                "updated_at": c.updated_at.isoformat(),
+            }
+            for c in chats
+        ],
+    }
+
+
+@router.get("/agent-profiles/{profile_id}/runtime-events")
+async def list_profile_runtime_events(
+    profile_id: str,
+    session_id: str = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+) -> dict:
+    """List runtime events from an isolated sub-agent profile."""
+    control_plane = _get_control_plane_for_profile(profile_id)
+    if session_id:
+        thread = control_plane.get_runtime_thread_by_session(session_id)
+        if not thread:
+            raise HTTPException(status_code=404, detail="Runtime thread not found")
+        events = control_plane.list_runtime_events(thread["thread_id"], limit=limit)
+    else:
+        threads = control_plane.list_runtime_threads(limit=20)
+        events = []
+        for thread in threads:
+            events.extend(control_plane.list_runtime_events(thread["thread_id"], limit=limit))
+        events = sorted(events, key=lambda item: item.get("created_at", ""))[-limit:]
+    return {"profile_id": profile_id, "events": events}
+
+
 def _workspace_source_from_path(path: Path) -> dict:
     is_dir = path.is_dir()
     stat = path.stat()
@@ -433,7 +528,7 @@ def _workspace_node_count(nodes: list[dict]) -> int:
 @router.post("/chats/fork")
 async def fork_chat(request: ForkChatRequest) -> dict:
     """Fork an existing chat session into a new task."""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(request.profile_id)
     chat, copied_message_count = await manager.fork_chat(
         source_session_id=request.session_id,
         name=request.name,
@@ -528,6 +623,98 @@ async def list_runtime_events(
     }
 
 
+@router.post("/agent-sessions")
+async def create_agent_session(request: CreateAgentSessionRequest) -> dict:
+    """Create a chat session for the main agent or an isolated sub-agent profile."""
+    from open_agent.agent_control import create_agent_session as create_profile_session
+
+    try:
+        return await create_profile_session(
+            profile_id=request.profile_id,
+            name=request.name,
+            user_id=request.user_id,
+            parent_session_id=request.parent_session_id,
+            parent_task_id=request.parent_task_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/agent-sessions/{session_id}/messages")
+async def send_agent_session_message(session_id: str, request: AgentSessionMessageRequest):
+    """Send a message to the main agent or a sub-agent profile session."""
+    profile_id = request.profile_id if hasattr(request, "profile_id") else None
+    if profile_id is None:
+        profile_id = "main"
+    run_request = RunRequest(
+        session_id=session_id,
+        user_id=request.user_id,
+        messages=request.messages,
+        stream=request.stream,
+        workspace_sources=request.workspace_sources,
+        selected_workspace_paths=request.selected_workspace_paths,
+        tool_access_mode=request.tool_access_mode,
+        profile_id=profile_id,
+    )
+    return await run_agent(run_request)
+
+
+@router.post("/agent-tasks")
+async def create_agent_task(request: AgentTaskRequest) -> dict:
+    """Start an asynchronous task for a sub-agent profile."""
+    from open_agent.agent_control import start_agent_task
+
+    try:
+        return await start_agent_task(
+            profile_id=request.profile_id,
+            instruction=request.instruction,
+            user_id=request.user_id,
+            parent_session_id=request.parent_session_id,
+            workspace_sources=request.workspace_sources,
+            selected_workspace_paths=request.selected_workspace_paths,
+            tool_access_mode=request.tool_access_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/agent-tasks")
+async def list_agent_tasks(
+    profile_id: str = Query(None),
+    parent_session_id: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
+    from open_agent.agent_control import list_agent_tasks as list_profile_tasks
+
+    return {
+        "tasks": list_profile_tasks(
+            profile_id=profile_id,
+            parent_session_id=parent_session_id,
+            limit=limit,
+        )
+    }
+
+
+@router.get("/agent-tasks/{task_id}")
+async def get_agent_task(task_id: str) -> dict:
+    from open_agent.agent_control import get_agent_task as get_profile_task
+
+    task = get_profile_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+    return task
+
+
+@router.post("/agent-tasks/{task_id}/cancel")
+async def cancel_agent_task(task_id: str) -> dict:
+    from open_agent.agent_control import cancel_agent_task as cancel_profile_task
+
+    task = await cancel_profile_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+    return task
+
+
 # Run endpoint with SSE streaming
 @router.post("/run")
 async def run_agent(request: RunRequest):
@@ -543,6 +730,7 @@ async def run_agent(request: RunRequest):
             "workspace_sources": request.workspace_sources,
             "selected_workspace_paths": request.selected_workspace_paths,
             "tool_access_mode": "full" if request.tool_access_mode == "full" else "default",
+            "profile_id": request.profile_id or "main",
         },
     )
     

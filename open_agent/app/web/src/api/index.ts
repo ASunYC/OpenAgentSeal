@@ -21,6 +21,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json()
 }
 
+function profileQuery(profileId?: string): string {
+  return profileId ? `?profile_id=${encodeURIComponent(profileId)}` : ''
+}
+
 // Chat API
 export const chatApi = {
   async list(userId?: string): Promise<Chat[]> {
@@ -35,46 +39,47 @@ export const chatApi = {
     })
   },
 
-  async get(chatId: string): Promise<Chat> {
-    return request<Chat>(`/chats/${chatId}`)
+  async get(chatId: string, profileId?: string): Promise<Chat> {
+    return request<Chat>(`/chats/${chatId}${profileQuery(profileId)}`)
   },
 
-  async getByRunnerSession(runnerSessionId: string): Promise<Chat> {
-    return request<Chat>(`/chats/runner-channel/${encodeURIComponent(runnerSessionId)}`)
+  async getByRunnerSession(runnerSessionId: string, profileId?: string): Promise<Chat> {
+    return request<Chat>(`/chats/runner-channel/${encodeURIComponent(runnerSessionId)}${profileQuery(profileId)}`)
   },
 
-  async delete(chatId: string): Promise<void> {
-    await request(`/chats/${chatId}`, { method: 'DELETE' })
+  async delete(chatId: string, profileId?: string): Promise<void> {
+    await request(`/chats/${chatId}${profileQuery(profileId)}`, { method: 'DELETE' })
   },
 
-  async deleteMany(chatIds: string[]): Promise<{ success: boolean; deleted_count: number }> {
-    return request<{ success: boolean; deleted_count: number }>('/chats/delete', {
+  async deleteMany(chatIds: string[], profileId?: string): Promise<{ success: boolean; deleted_count: number }> {
+    return request<{ success: boolean; deleted_count: number }>(`/chats/delete${profileQuery(profileId)}`, {
       method: 'POST',
       body: JSON.stringify({ chat_ids: chatIds }),
     })
   },
 
-  async getHistory(chatId: string): Promise<ChatHistory> {
-    return request<ChatHistory>(`/chats/${chatId}/history`)
+  async getHistory(chatId: string, profileId?: string): Promise<ChatHistory> {
+    return request<ChatHistory>(`/chats/${chatId}/history${profileQuery(profileId)}`)
   },
 
-  async clearMessages(runnerSessionId: string): Promise<void> {
-    await request(`/chats/session/${encodeURIComponent(runnerSessionId)}/messages`, { method: 'DELETE' })
+  async clearMessages(runnerSessionId: string, profileId?: string): Promise<void> {
+    await request(`/chats/session/${encodeURIComponent(runnerSessionId)}/messages${profileQuery(profileId)}`, { method: 'DELETE' })
   },
 
-  async persistMessages(runnerSessionId: string, messages: Message[]): Promise<void> {
-    await request(`/chats/session/${encodeURIComponent(runnerSessionId)}/messages`, {
+  async persistMessages(runnerSessionId: string, messages: Message[], profileId?: string): Promise<void> {
+    await request(`/chats/session/${encodeURIComponent(runnerSessionId)}/messages${profileQuery(profileId)}`, {
       method: 'POST',
       body: JSON.stringify({ messages }),
     })
   },
 
-  async fork(runnerSessionId: string, name?: string): Promise<ForkChatResponse> {
+  async fork(runnerSessionId: string, name?: string, profileId?: string): Promise<ForkChatResponse> {
     return request<ForkChatResponse>('/chats/fork', {
       method: 'POST',
       body: JSON.stringify({
         session_id: runnerSessionId,
         name,
+        profile_id: profileId,
       }),
     })
   },
@@ -88,6 +93,7 @@ export async function* runAgentStream(
   workspaceSources: WorkspaceSource[] = [],
   selectedWorkspacePaths: string[] = [],
   toolAccessMode: 'default' | 'full' = 'default',
+  profileId = 'main',
 ): AsyncGenerator<AgentEvent> {
   const response = await fetch(`${API_BASE}/run`, {
     method: 'POST',
@@ -100,6 +106,7 @@ export async function* runAgentStream(
       workspace_sources: workspaceSources,
       selected_workspace_paths: selectedWorkspacePaths,
       tool_access_mode: toolAccessMode,
+      profile_id: profileId,
     }),
   })
 
@@ -179,22 +186,67 @@ export const runtimeApi = {
 // Agent API
 export const agentApi = {
   async list(): Promise<AgentConfig[]> {
-    return request<AgentConfig[]>('/agents')
+    const main = await request<AgentConfig>('/main-agent')
+    const profiles = await request<AgentConfig[]>('/agent-profiles')
+    return [main, ...profiles]
   },
 
   async get(agentId: string): Promise<AgentConfig> {
-    return request<AgentConfig>(`/agents/${agentId}`)
+    if (agentId === 'main') {
+      return request<AgentConfig>('/main-agent')
+    }
+    return request<AgentConfig>(`/agent-profiles/${encodeURIComponent(agentId)}`)
   },
 
   async save(agent: AgentConfig): Promise<ApiResponse<AgentConfig>> {
-    return request<ApiResponse<AgentConfig>>('/agents', {
-      method: 'POST',
+    const isMain = agent.id === 'main'
+    const existing = isMain ? true : await request<AgentConfig[]>(`/agent-profiles`)
+      .then(items => items.some(item => item.id === agent.id))
+      .catch(() => false)
+    const url = isMain
+      ? '/main-agent'
+      : existing
+        ? `/agent-profiles/${encodeURIComponent(agent.id)}`
+        : '/agent-profiles'
+    return request<ApiResponse<AgentConfig>>(url, {
+      method: isMain || existing ? 'PATCH' : 'POST',
       body: JSON.stringify(agent),
     })
   },
 
   async delete(agentId: string): Promise<ApiResponse<void>> {
-    return request<ApiResponse<void>>(`/agents/${agentId}`, { method: 'DELETE' })
+    if (agentId === 'main') {
+      return { success: false, error: 'Main agent cannot be deleted' } as ApiResponse<void>
+    }
+    return request<ApiResponse<void>>(`/agent-profiles/${encodeURIComponent(agentId)}`, { method: 'DELETE' })
+  },
+
+  async listProfileSkills(agentId: string): Promise<{ profile_id: string; skills_dir: string; skills: Array<{ name: string; description: string; path: string; content: string }> }> {
+    return request(`/agent-profiles/${encodeURIComponent(agentId)}/skills`)
+  },
+
+  async saveProfileSkill(agentId: string, skill: { name: string; description: string; content: string }): Promise<ApiResponse<{ name: string; path: string }>> {
+    return request<ApiResponse<{ name: string; path: string }>>(`/agent-profiles/${encodeURIComponent(agentId)}/skills`, {
+      method: 'POST',
+      body: JSON.stringify(skill),
+    })
+  },
+
+  async deleteProfileSkill(agentId: string, skillName: string): Promise<ApiResponse<void>> {
+    return request<ApiResponse<void>>(`/agent-profiles/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillName)}`, {
+      method: 'DELETE',
+    })
+  },
+
+  async getProfileMcp(agentId: string): Promise<{ profile_id: string; path: string; config: Record<string, unknown> }> {
+    return request(`/agent-profiles/${encodeURIComponent(agentId)}/mcp`)
+  },
+
+  async saveProfileMcp(agentId: string, config: Record<string, unknown>): Promise<ApiResponse<{ path: string; config: Record<string, unknown> }>> {
+    return request<ApiResponse<{ path: string; config: Record<string, unknown> }>>(`/agent-profiles/${encodeURIComponent(agentId)}/mcp`, {
+      method: 'PUT',
+      body: JSON.stringify({ config }),
+    })
   },
 }
 
@@ -315,6 +367,31 @@ export const smartRoutingApi = {
   },
 }
 
+export interface SkillConfig {
+  name: string
+  original_name?: string
+  icon?: string
+  description: string
+  enabled: boolean
+  path?: string
+  source?: 'builtin' | 'plugin' | string
+  source_label?: string
+  plugin_id?: string | null
+}
+
+export const skillsApi = {
+  async list(): Promise<SkillConfig[]> {
+    return request<SkillConfig[]>('/skills')
+  },
+
+  async setEnabled(path: string, enabled: boolean): Promise<ApiResponse<{ path: string; enabled: boolean }>> {
+    return request<ApiResponse<{ path: string; enabled: boolean }>>('/skills/config', {
+      method: 'POST',
+      body: JSON.stringify({ path, enabled }),
+    })
+  },
+}
+
 export interface MCPServerConfig {
   name: string
   original_name?: string
@@ -324,11 +401,14 @@ export interface MCPServerConfig {
   args?: string[]
   env?: Record<string, string>
   disabled?: boolean
+  source?: 'user' | 'plugin' | string
+  plugin_id?: string | null
+  readonly?: boolean
   [key: string]: unknown
 }
 
 export const mcpApi = {
-  async getConfig(): Promise<{ success: boolean; path: string; servers: MCPServerConfig[]; error?: string }> {
+  async getConfig(): Promise<{ success: boolean; path: string; servers: MCPServerConfig[]; warnings?: Record<string, unknown>[]; error?: string }> {
     return request('/mcp/config')
   },
 
@@ -336,6 +416,105 @@ export const mcpApi = {
     return request<ApiResponse<{ path: string }>>('/mcp/config', {
       method: 'POST',
       body: JSON.stringify({ servers }),
+    })
+  },
+
+  async setPluginServerEnabled(pluginId: string, serverName: string, enabled: boolean): Promise<ApiResponse<{ plugin_id: string; server_name: string; enabled: boolean }>> {
+    return request<ApiResponse<{ plugin_id: string; server_name: string; enabled: boolean }>>('/mcp/plugin-server', {
+      method: 'POST',
+      body: JSON.stringify({ plugin_id: pluginId, server_name: serverName, enabled }),
+    })
+  },
+}
+
+export interface PluginSummary {
+  id: string
+  name: string
+  marketplace_name: string
+  installed: boolean
+  enabled: boolean
+  local_version?: string | null
+  install_policy?: string
+  auth_policy?: string
+  interface?: {
+    displayName?: string
+    display_name?: string
+    shortDescription?: string
+    short_description?: string
+    longDescription?: string
+    long_description?: string
+    developerName?: string
+    developer_name?: string
+    category?: string
+    capabilities?: string[]
+    brandColor?: string
+    brand_color?: string
+    logo?: string
+  }
+  keywords?: string[]
+}
+
+export interface PluginMarketplace {
+  name: string
+  path?: string
+  interface?: { displayName?: string; display_name?: string }
+  plugins: PluginSummary[]
+}
+
+export interface PluginDetail {
+  marketplace_name: string
+  marketplace_path?: string
+  summary: PluginSummary
+  description?: string | null
+  skills: SkillConfig[]
+  mcp_servers: { name: string; enabled: boolean; config: Record<string, unknown> }[]
+  apps: unknown
+  hooks: unknown
+}
+
+export const pluginsApi = {
+  async list(): Promise<{ success: boolean; marketplaces: PluginMarketplace[]; marketplace_load_errors?: { marketplace_name?: string; message: string }[] }> {
+    return request('/plugins')
+  },
+
+  async read(pluginId: string): Promise<{ success: boolean; plugin: PluginDetail; error?: string }> {
+    return request(`/plugins/${encodeURIComponent(pluginId)}`)
+  },
+
+  async install(pluginName: string, marketplaceName: string): Promise<ApiResponse<{ plugin_id: string; installed_version: string; installed_path: string }>> {
+    return request('/plugins/install', {
+      method: 'POST',
+      body: JSON.stringify({ plugin_name: pluginName, marketplace_name: marketplaceName }),
+    })
+  },
+
+  async uninstall(pluginId: string): Promise<ApiResponse<unknown>> {
+    return request(`/plugins/${encodeURIComponent(pluginId)}`, { method: 'DELETE' })
+  },
+
+  async setEnabled(pluginId: string, enabled: boolean): Promise<ApiResponse<{ plugin_id: string; enabled: boolean }>> {
+    return request(`/plugins/${encodeURIComponent(pluginId)}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' })
+  },
+
+  async listMarketplaces(): Promise<{ success: boolean; marketplaces: { name: string; path: string; plugin_count: number; kind: string }[]; errors?: { marketplace_name?: string; message: string }[] }> {
+    return request('/plugins/marketplaces')
+  },
+
+  async addMarketplace(source: string): Promise<ApiResponse<{ marketplace_name: string; path: string; installed_root?: string | null; already_added: boolean }>> {
+    return request('/plugins/marketplaces', {
+      method: 'POST',
+      body: JSON.stringify({ source }),
+    })
+  },
+
+  async removeMarketplace(name: string): Promise<ApiResponse<unknown>> {
+    return request(`/plugins/marketplaces/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  },
+
+  async upgradeMarketplaces(marketplaceName?: string): Promise<ApiResponse<unknown>> {
+    return request('/plugins/marketplaces/upgrade', {
+      method: 'POST',
+      body: JSON.stringify({ marketplace_name: marketplaceName }),
     })
   },
 }
@@ -396,17 +575,18 @@ export const dashboardApi = {
 
 // Chat with agent (simple wrapper for streaming)
 export async function chatWithAgent(
-  agentId: string,
+  runnerSessionId: string,
   message: string,
   onEvent: (event: AgentEvent) => void,
   attachments: ChatAttachment[] = [],
   workspaceSources: WorkspaceSource[] = [],
   selectedWorkspacePaths: string[] = [],
   toolAccessMode: 'default' | 'full' = 'default',
+  profileId = 'main',
 ): Promise<void> {
   const messages: Message[] = [{ role: 'user' as const, content: message, attachments }]
   
-  for await (const event of runAgentStream(agentId, messages, 'default', workspaceSources, selectedWorkspacePaths, toolAccessMode)) {
+  for await (const event of runAgentStream(runnerSessionId, messages, 'default', workspaceSources, selectedWorkspacePaths, toolAccessMode, profileId)) {
     onEvent(event)
   }
 }

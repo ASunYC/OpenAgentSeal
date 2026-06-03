@@ -101,9 +101,11 @@ class GetSkillTool(Tool):
 
 def create_skill_tools(
     skills_dir: str = "./skills",
+    extra_roots: Optional[list[dict[str, str]]] = None,
+    disabled_paths: Optional[set[str]] = None,
 ) -> tuple[List[Tool], Optional[SkillLoader]]:
     """Create skill tools and their backing loader."""
-    loader = SkillLoader(skills_dir)
+    loader = SkillLoader(skills_dir, extra_roots=extra_roots, disabled_paths=disabled_paths)
     skills = loader.discover_skills()
     logger.info("Discovered %d Agent Skills from %s", len(skills), skills_dir)
 

@@ -23,7 +23,13 @@
           </span>
         </div>
         <div class="agent-info">
-          <h4>{{ agent.name }}</h4>
+          <div class="agent-title-row">
+            <h4>{{ agent.name }}</h4>
+            <span class="agent-badge" :class="{ primary: isMainAgent(agent) }">
+              {{ isMainAgent(agent) ? t('主智能体', 'Main') : t('角色智能体', 'Profile') }}
+            </span>
+            <span v-if="!agent.enabled" class="agent-badge muted">{{ t('已停用', 'Disabled') }}</span>
+          </div>
           <p class="agent-model">{{ getModelName(agent.model_id) }}</p>
           <p class="agent-steps">{{ t('最大步骤', 'Max Steps') }}: {{ agent.max_steps || 100 }}</p>
         </div>
@@ -34,7 +40,7 @@
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
             </svg>
           </button>
-          <button class="btn-icon btn-delete" @click="deleteAgent(agent)" :title="t('删除', 'Delete')">
+          <button v-if="!isMainAgent(agent)" class="btn-icon btn-delete" @click="deleteAgent(agent)" :title="t('删除', 'Delete')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="3,6 5,6 21,6"/>
               <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
@@ -81,6 +87,73 @@
               </option>
             </select>
           </div>
+          <div class="form-group" v-if="!isEditingMainAgent">
+            <label>{{ t('状态', 'Status') }}</label>
+            <label class="switch-row">
+              <input v-model="editingAgent.enabled" type="checkbox" />
+              <span>{{ editingAgent.enabled ? t('启用角色智能体', 'Profile enabled') : t('停用角色智能体', 'Profile disabled') }}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label>{{ t('访问权限', 'Access Permission') }}</label>
+            <select v-model="editingAgent.permission_mode">
+              <option value="default">{{ t('默认权限（需要审批）', 'Default access (approval required)') }}</option>
+              <option value="full">{{ t('完全访问权限', 'Full access') }}</option>
+            </select>
+          </div>
+          <div class="form-group" v-if="!isEditingMainAgent">
+            <label>{{ t('协作能力', 'Delegation') }}</label>
+            <label class="switch-row">
+              <input v-model="editingAgent.allow_delegation" type="checkbox" />
+              <span>{{ t('允许该角色继续调用其他角色智能体', 'Allow this profile to delegate to other agents') }}</span>
+            </label>
+          </div>
+          <div class="profile-capabilities" v-if="!isEditingMainAgent && editMode === 'edit'">
+            <div class="section-title-row">
+              <div>
+                <h4>{{ t('角色能力', 'Profile Capabilities') }}</h4>
+                <p>{{ t('只影响当前角色自己的技能和 MCP 配置', 'Only affects this profile skills and MCP config') }}</p>
+              </div>
+              <button class="btn-secondary small" @click="loadProfileCapabilities">{{ t('刷新', 'Refresh') }}</button>
+            </div>
+
+            <div class="capability-panel">
+              <div class="capability-header">
+                <strong>{{ t('角色技能', 'Profile Skills') }}</strong>
+                <span>{{ profileSkills.length }}</span>
+              </div>
+              <div class="profile-skill-list" v-if="profileSkills.length">
+                <div class="profile-skill-item" v-for="skill in profileSkills" :key="skill.name">
+                  <div>
+                    <strong>{{ skill.name }}</strong>
+                    <p>{{ skill.description }}</p>
+                  </div>
+                  <button class="btn-icon btn-delete" @click="deleteProfileSkill(skill.name)" :title="t('删除', 'Delete')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="3,6 5,6 21,6"/>
+                      <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <p v-else class="empty-hint">{{ t('当前角色还没有自己的技能', 'No profile-specific skills yet') }}</p>
+              <div class="new-skill-form">
+                <input v-model="newSkill.name" type="text" :placeholder="t('技能名称', 'Skill name')" />
+                <input v-model="newSkill.description" type="text" :placeholder="t('技能描述', 'Skill description')" />
+                <textarea v-model="newSkill.content" rows="3" :placeholder="t('技能正文，会写入 SKILL.md', 'Skill body written to SKILL.md')"></textarea>
+                <button class="btn-secondary" @click="saveProfileSkill">{{ t('保存角色技能', 'Save Profile Skill') }}</button>
+              </div>
+            </div>
+
+            <div class="capability-panel">
+              <div class="capability-header">
+                <strong>{{ t('角色 MCP', 'Profile MCP') }}</strong>
+                <span>{{ profileMcpPath }}</span>
+              </div>
+              <textarea class="mcp-json-editor" v-model="profileMcpJson" rows="7"></textarea>
+              <button class="btn-secondary" @click="saveProfileMcp">{{ t('保存角色 MCP', 'Save Profile MCP') }}</button>
+            </div>
+          </div>
           <div class="form-group">
             <label>{{ t('最大步骤数', 'Max Steps') }}</label>
             <input v-model.number="editingAgent.max_steps" type="number" min="1" max="500" :placeholder="t('默认 100', 'Default 100')" />
@@ -106,9 +179,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useAgentStore } from '@/stores/agent'
+import { agentApi } from '@/api'
 import type { AgentConfig } from '@/types'
 
 const settingsStore = useSettingsStore()
@@ -133,9 +207,26 @@ const editingAgent = ref<AgentConfig>({
   max_steps: 100,
   tools: [],
   mcp_servers: [],
+  permission_mode: 'default',
+  allow_delegation: false,
+  enabled: true,
   created_at: '',
   updated_at: ''
 })
+
+const isEditingMainAgent = computed(() => editingAgent.value.id === 'main')
+const profileSkills = ref<Array<{ name: string; description: string; path: string; content: string }>>([])
+const profileMcpJson = ref('{\n  "mcpServers": {}\n}')
+const profileMcpPath = ref('')
+const newSkill = ref({
+  name: '',
+  description: '',
+  content: '',
+})
+
+function isMainAgent(agent: AgentConfig): boolean {
+  return agent.id === 'main'
+}
 
 // 获取智能体颜色
 function getAgentColor(agentId: string): string {
@@ -157,6 +248,9 @@ function editAgent(agent: AgentConfig) {
   editMode.value = 'edit'
   editingAgent.value = { ...agent }
   showEditDialog.value = true
+  if (agent.id !== 'main') {
+    loadProfileCapabilities()
+  }
 }
 
 // 创建智能体
@@ -164,7 +258,7 @@ function createAgent() {
   editMode.value = 'create'
   const defaultModel = agentStore.modelConfigs.find(m => m.is_default)?.id || agentStore.modelConfigs[0]?.id || ''
   editingAgent.value = {
-    id: `agent_${Date.now()}`,
+    id: `profile_${Date.now()}`,
     name: t('新智能体', 'New Agent'),
     model_id: defaultModel,
     description: '',
@@ -175,14 +269,91 @@ function createAgent() {
     max_steps: 100,
     tools: [],
     mcp_servers: [],
+    permission_mode: 'default',
+    allow_delegation: false,
+    enabled: true,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   }
   showEditDialog.value = true
+  profileSkills.value = []
+  profileMcpJson.value = '{\n  "mcpServers": {}\n}'
+  profileMcpPath.value = ''
+}
+
+async function loadProfileCapabilities() {
+  if (!editingAgent.value.id || editingAgent.value.id === 'main') return
+  try {
+    const [skills, mcp] = await Promise.all([
+      agentApi.listProfileSkills(editingAgent.value.id),
+      agentApi.getProfileMcp(editingAgent.value.id),
+    ])
+    profileSkills.value = skills.skills || []
+    profileMcpPath.value = mcp.path || ''
+    profileMcpJson.value = JSON.stringify(mcp.config || { mcpServers: {} }, null, 2)
+  } catch (error) {
+    console.error('Failed to load profile capabilities:', error)
+  }
+}
+
+async function saveProfileSkill() {
+  if (!editingAgent.value.id || editingAgent.value.id === 'main') return
+  if (!newSkill.value.name.trim() || !newSkill.value.description.trim() || !newSkill.value.content.trim()) {
+    alert(t('请填写技能名称、描述和正文', 'Please fill skill name, description and body'))
+    return
+  }
+  try {
+    const result = await agentApi.saveProfileSkill(editingAgent.value.id, { ...newSkill.value })
+    if (result.success) {
+      newSkill.value = { name: '', description: '', content: '' }
+      await loadProfileCapabilities()
+    } else {
+      alert(result.error || t('保存技能失败', 'Failed to save skill'))
+    }
+  } catch (error) {
+    console.error('Failed to save profile skill:', error)
+    alert(t('保存技能失败', 'Failed to save skill'))
+  }
+}
+
+async function deleteProfileSkill(skillName: string) {
+  if (!editingAgent.value.id || editingAgent.value.id === 'main') return
+  if (!confirm(t(`确定删除角色技能 "${skillName}" 吗？`, `Delete profile skill "${skillName}"?`))) return
+  try {
+    const result = await agentApi.deleteProfileSkill(editingAgent.value.id, skillName)
+    if (result.success) {
+      await loadProfileCapabilities()
+    } else {
+      alert(result.error || t('删除技能失败', 'Failed to delete skill'))
+    }
+  } catch (error) {
+    console.error('Failed to delete profile skill:', error)
+    alert(t('删除技能失败', 'Failed to delete skill'))
+  }
+}
+
+async function saveProfileMcp() {
+  if (!editingAgent.value.id || editingAgent.value.id === 'main') return
+  try {
+    const config = JSON.parse(profileMcpJson.value || '{}')
+    const result = await agentApi.saveProfileMcp(editingAgent.value.id, config)
+    if (result.success) {
+      profileMcpPath.value = result.data?.path || profileMcpPath.value
+      profileMcpJson.value = JSON.stringify(result.data?.config || config, null, 2)
+    } else {
+      alert(result.error || t('保存 MCP 失败', 'Failed to save MCP'))
+    }
+  } catch (error) {
+    console.error('Failed to save profile MCP:', error)
+    alert(t('MCP JSON 格式不正确', 'Invalid MCP JSON'))
+  }
 }
 
 // 删除智能体
 async function deleteAgent(agent: AgentConfig) {
+  if (isMainAgent(agent)) {
+    return
+  }
   if (confirm(t(`确定要删除智能体 "${agent.name}" 吗？`, `Are you sure you want to delete agent "${agent.name}"?`))) {
     await agentStore.deleteAgent(agent.id)
   }
@@ -195,6 +366,10 @@ async function saveAgent() {
     return
   }
   
+  if (editingAgent.value.id === 'main') {
+    editingAgent.value.enabled = true
+    editingAgent.value.allow_delegation = true
+  }
   editingAgent.value.updated_at = new Date().toISOString()
   const success = await agentStore.saveAgent(editingAgent.value)
   
@@ -208,6 +383,7 @@ async function saveAgent() {
 // 关闭编辑对话框
 function closeEditDialog() {
   showEditDialog.value = false
+  profileSkills.value = []
 }
 
 onMounted(async () => {
@@ -348,7 +524,38 @@ onMounted(async () => {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  margin: 0 0 4px 0;
+  margin: 0;
+}
+
+.agent-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.agent-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--hover-bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.agent-badge.primary {
+  color: var(--primary-color);
+  background: var(--primary-light, rgba(59, 130, 246, 0.1));
+  border-color: rgba(59, 130, 246, 0.28);
+}
+
+.agent-badge.muted {
+  color: var(--text-muted);
 }
 
 .agent-info .agent-model {
@@ -443,7 +650,7 @@ onMounted(async () => {
   background: var(--card-bg);
   border-radius: 16px;
   width: 100%;
-  max-width: 500px;
+  max-width: 720px;
   max-height: 90vh;
   overflow: hidden;
   display: flex;
@@ -509,6 +716,26 @@ onMounted(async () => {
   color: var(--text-primary);
 }
 
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 8px 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.switch-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary-color);
+}
+
 .form-group input,
 .form-group textarea,
 .form-group select {
@@ -518,6 +745,17 @@ onMounted(async () => {
   border-radius: 8px;
   color: var(--text-primary);
   font-size: 14px;
+}
+
+.form-group .switch-row input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  accent-color: var(--primary-color);
+  flex: 0 0 auto;
 }
 
 .form-group input:focus,
@@ -530,6 +768,137 @@ onMounted(async () => {
 .form-hint {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.profile-capabilities {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--main-bg);
+}
+
+.section-title-row,
+.capability-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-title-row h4 {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.section-title-row p,
+.empty-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.capability-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+}
+
+.capability-header strong {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.capability-header span {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.profile-skill-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--input-bg);
+}
+
+.profile-skill-item strong {
+  display: block;
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+
+.profile-skill-item p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.new-skill-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.new-skill-form input,
+.new-skill-form textarea,
+.mcp-json-editor {
+  padding: 10px 12px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.mcp-json-editor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  resize: vertical;
+}
+
+.btn-secondary {
+  align-self: flex-start;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.btn-secondary.small {
+  padding: 6px 10px;
+  font-size: 12px;
 }
 
 .modal-footer {

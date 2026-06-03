@@ -8,7 +8,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -26,6 +26,10 @@ class Skill:
     allowed_tools: Optional[List[str]] = None
     metadata: Optional[Dict[str, str]] = None
     skill_path: Optional[Path] = None
+    source: str = "builtin"
+    source_label: str = "OpenAgentSeal"
+    plugin_id: Optional[str] = None
+    original_name: Optional[str] = None
 
     def to_prompt(self) -> str:
         """Convert skill to prompt format."""
@@ -49,11 +53,43 @@ All files and references in this skill are relative to this directory.
 class SkillLoader:
     """Skill loader."""
 
-    def __init__(self, skills_dir: str = "./skills"):
-        self.skills_dir = Path(skills_dir)
+    def __init__(
+        self,
+        skills_dir: str | Path | list[str | Path | dict[str, Any]] = "./skills",
+        extra_roots: Optional[list[dict[str, str]]] = None,
+        disabled_paths: Optional[set[str]] = None,
+    ):
+        self.skill_roots = self._normalize_roots(skills_dir)
+        if extra_roots:
+            self.skill_roots.extend(self._normalize_roots(extra_roots))
+        self.skills_dir = Path(self.skill_roots[0]["path"]) if self.skill_roots else Path("./skills")
         self.loaded_skills: Dict[str, Skill] = {}
+        self.disabled_paths = disabled_paths or set()
 
-    def load_skill(self, skill_path: Path) -> Optional[Skill]:
+    def _normalize_roots(self, roots: str | Path | list[str | Path | dict[str, Any]]) -> list[dict[str, Any]]:
+        if not isinstance(roots, list):
+            roots = [roots]
+        normalized = []
+        for root in roots:
+            if isinstance(root, dict):
+                path = root.get("path")
+                if path:
+                    normalized.append({
+                        "path": Path(path),
+                        "source": root.get("source", "plugin"),
+                        "source_label": root.get("plugin_name") or root.get("source_label") or root.get("plugin_id") or "Plugin",
+                        "plugin_id": root.get("plugin_id"),
+                    })
+            else:
+                normalized.append({
+                    "path": Path(root),
+                    "source": "builtin",
+                    "source_label": "OpenAgentSeal",
+                    "plugin_id": None,
+                })
+        return normalized
+
+    def load_skill(self, skill_path: Path, root_info: Optional[dict[str, Any]] = None) -> Optional[Skill]:
         """Load a single skill from a SKILL.md file."""
         try:
             content = skill_path.read_text(encoding="utf-8")
@@ -87,6 +123,10 @@ class SkillLoader:
                 allowed_tools=frontmatter.get("allowed-tools"),
                 metadata=frontmatter.get("metadata"),
                 skill_path=skill_path,
+                source=(root_info or {}).get("source", "builtin"),
+                source_label=(root_info or {}).get("source_label", "OpenAgentSeal"),
+                plugin_id=(root_info or {}).get("plugin_id"),
+                original_name=frontmatter["name"],
             )
         except Exception as exc:
             logger.warning("Failed to load skill (%s): %s", skill_path, exc)
@@ -144,13 +184,24 @@ class SkillLoader:
         """Discover and load all skills in the skills directory."""
         skills = []
 
-        if not self.skills_dir.exists():
-            logger.warning("Skills directory does not exist: %s", self.skills_dir)
-            return skills
+        for root_info in self.skill_roots:
+            skills_dir = Path(root_info["path"])
+            if not skills_dir.exists():
+                logger.warning("Skills directory does not exist: %s", skills_dir)
+                continue
 
-        for skill_file in self.skills_dir.rglob("SKILL.md"):
-            skill = self.load_skill(skill_file)
-            if skill:
+            for skill_file in skills_dir.rglob("SKILL.md"):
+                if str(skill_file) in self.disabled_paths:
+                    continue
+                skill = self.load_skill(skill_file, root_info)
+                if not skill:
+                    continue
+                if skill.name in self.loaded_skills:
+                    if skill.plugin_id:
+                        skill.name = f"{skill.source_label}:{skill.name}"
+                    else:
+                        suffix = skills_dir.name
+                        skill.name = f"{suffix}:{skill.name}"
                 skills.append(skill)
                 self.loaded_skills[skill.name] = skill
 

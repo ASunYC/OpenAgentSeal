@@ -2,12 +2,12 @@
   <div class="tab-content">
     <div class="content-header">
       <h3>{{ t('MCP 设置', 'MCP Settings') }}</h3>
-      <p>{{ t('管理 MCP 服务器配置', 'Manage MCP server configurations') }}</p>
+      <p>{{ t('管理智能体最终可用的 MCP 服务', 'Manage MCP servers available to the agent') }}</p>
       <span class="count-pill">MCP {{ mcpServers.length }}</span>
     </div>
 
     <div v-if="configPath" class="config-path">
-      <span>{{ t('配置文件', 'Config file') }}</span>
+      <span>{{ t('用户配置文件', 'User config file') }}</span>
       <code>{{ configPath }}</code>
     </div>
 
@@ -20,13 +20,16 @@
     </div>
 
     <div v-else class="mcp-list">
-      <div v-for="server in mcpServers" :key="server.name" class="mcp-card">
+      <div v-for="server in mcpServers" :key="serverKey(server)" class="mcp-card" :class="{ readonly: server.readonly }">
         <div class="mcp-header">
           <div class="mcp-info">
             <h4>{{ server.name }}</h4>
-            <span class="mcp-type">{{ server.type }}</span>
+            <div class="mcp-meta">
+              <span class="mcp-type">{{ server.type }}</span>
+              <span class="source-pill">{{ sourceLabel(server) }}</span>
+            </div>
           </div>
-          <button class="mcp-status" :class="{ connected: !server.disabled }" @click="toggleServer(server)">
+          <button class="mcp-status" :class="{ connected: !server.disabled }" :disabled="savingServer === serverKey(server)" @click="toggleServer(server)">
             {{ server.disabled ? t('已禁用', 'Disabled') : t('已启用', 'Enabled') }}
           </button>
         </div>
@@ -34,11 +37,11 @@
         <div class="mcp-fields">
           <label>
             <span>{{ t('名称', 'Name') }}</span>
-            <input v-model="server.name" type="text" />
+            <input v-model="server.name" type="text" :disabled="server.readonly" />
           </label>
           <label>
             <span>{{ t('类型', 'Type') }}</span>
-            <select v-model="server.type">
+            <select v-model="server.type" :disabled="server.readonly">
               <option value="stdio">stdio</option>
               <option value="streamable_http">streamable_http</option>
               <option value="http">http</option>
@@ -47,25 +50,26 @@
           </label>
           <label v-if="server.type === 'stdio'">
             <span>{{ t('命令', 'Command') }}</span>
-            <input v-model="server.command" type="text" placeholder="npx" />
+            <input v-model="server.command" type="text" placeholder="npx" :disabled="server.readonly" />
           </label>
           <label v-else>
             <span>URL</span>
-            <input v-model="server.url" type="text" placeholder="https://example.com/mcp" />
+            <input v-model="server.url" type="text" placeholder="https://example.com/mcp" :disabled="server.readonly" />
           </label>
           <label>
             <span>{{ t('参数', 'Args') }}</span>
-            <textarea v-model="server.argsText" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-memory"></textarea>
+            <textarea v-model="server.argsText" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-memory" :disabled="server.readonly"></textarea>
           </label>
           <label class="wide">
             <span>{{ t('环境变量', 'Env') }}</span>
-            <textarea v-model="server.envText" rows="2" placeholder="KEY=value"></textarea>
+            <textarea v-model="server.envText" rows="2" placeholder="KEY=value" :disabled="server.readonly"></textarea>
           </label>
         </div>
 
         <div class="mcp-actions">
           <button class="btn-secondary" @click="validateServer(server)">{{ t('检查', 'Check') }}</button>
-          <button class="btn-danger" @click="deleteServer(server)">{{ t('删除', 'Delete') }}</button>
+          <button v-if="server.readonly" class="btn-secondary" @click="copyPluginServer(server)">{{ t('复制为用户 MCP', 'Copy as user MCP') }}</button>
+          <button v-else class="btn-danger" @click="deleteServer(server)">{{ t('删除', 'Delete') }}</button>
         </div>
       </div>
 
@@ -80,7 +84,7 @@
       <div class="footer-actions">
         <button class="btn-secondary" @click="loadConfig">{{ t('重新加载', 'Reload') }}</button>
         <button class="btn-primary" :disabled="saving" @click="saveConfig">
-          {{ saving ? t('保存中...', 'Saving...') : t('保存配置', 'Save Config') }}
+          {{ saving ? t('保存中...', 'Saving...') : t('保存用户 MCP 配置', 'Save User MCP Config') }}
         </button>
       </div>
     </div>
@@ -102,10 +106,21 @@ const mcpServers = ref<EditableMCPServer[]>([])
 const configPath = ref('')
 const loading = ref(false)
 const saving = ref(false)
+const savingServer = ref<string | null>(null)
 const error = ref<string | null>(null)
 
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
+}
+
+function serverKey(server: EditableMCPServer) {
+  return `${server.source || 'user'}:${server.plugin_id || ''}:${server.name}`
+}
+
+function sourceLabel(server: EditableMCPServer) {
+  return server.source === 'plugin'
+    ? `${t('插件', 'Plugin')}: ${server.plugin_id || '-'}`
+    : t('用户配置', 'User config')
 }
 
 function toEnvText(env?: Record<string, string>) {
@@ -134,6 +149,8 @@ function toEditable(server: MCPServerConfig): EditableMCPServer {
     args: server.args ?? [],
     env: server.env ?? {},
     disabled: server.disabled ?? false,
+    source: server.source || 'user',
+    readonly: server.readonly ?? server.source === 'plugin',
     argsText: (server.args ?? []).join('\n'),
     envText: toEnvText(server.env),
   }
@@ -173,8 +190,24 @@ async function loadConfig() {
   }
 }
 
-function toggleServer(server: EditableMCPServer) {
-  server.disabled = !server.disabled
+async function toggleServer(server: EditableMCPServer) {
+  const nextDisabled = !server.disabled
+  if (server.readonly && server.plugin_id) {
+    savingServer.value = serverKey(server)
+    try {
+      const result = await mcpApi.setPluginServerEnabled(server.plugin_id, server.name, !nextDisabled)
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to update plugin MCP server')
+      }
+      server.disabled = nextDisabled
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    } finally {
+      savingServer.value = null
+    }
+    return
+  }
+  server.disabled = nextDisabled
 }
 
 function validateServer(server: EditableMCPServer) {
@@ -200,6 +233,19 @@ function deleteServer(server: EditableMCPServer) {
   }
 }
 
+function copyPluginServer(server: EditableMCPServer) {
+  const copy = toEditable({
+    ...toPayload(server),
+    name: `${server.name}-copy`,
+    original_name: `${server.name}-copy`,
+    source: 'user',
+    plugin_id: null,
+    readonly: false,
+    disabled: true,
+  })
+  mcpServers.value.push(copy)
+}
+
 function addServer() {
   mcpServers.value.push(toEditable({
     name: `server-${mcpServers.value.length + 1}`,
@@ -208,11 +254,15 @@ function addServer() {
     args: [],
     env: {},
     disabled: true,
+    source: 'user',
   }))
 }
 
 async function saveConfig() {
-  const servers = mcpServers.value.map(toPayload).filter((server) => server.name)
+  const servers = mcpServers.value
+    .filter((server) => !server.readonly && server.source !== 'plugin')
+    .map(toPayload)
+    .filter((server) => server.name)
   const names = new Set<string>()
   for (const server of servers) {
     if (names.has(server.name)) {
@@ -287,26 +337,26 @@ onMounted(() => {
 
 .config-path,
 .state-card {
-  display: flex;
-  gap: 10px;
-  align-items: center;
   padding: 12px;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--main-bg);
-  color: var(--text-muted);
-  font-size: 13px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.config-path {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
 }
 
 .config-path code {
   min-width: 0;
-  color: var(--text-primary);
-  word-break: break-all;
-}
-
-.state-card {
-  justify-content: center;
-  min-height: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .state-card.error {
@@ -326,61 +376,73 @@ onMounted(() => {
   background: var(--main-bg);
 }
 
-.mcp-header,
-.mcp-actions,
-.footer-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+.mcp-card.readonly {
+  background: color-mix(in srgb, var(--main-bg) 92%, var(--primary-color) 8%);
 }
 
 .mcp-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 14px;
 }
 
 .mcp-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  min-width: 0;
 }
 
 .mcp-info h4 {
-  margin: 0;
+  margin: 0 0 6px;
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
-.mcp-type {
-  padding: 2px 8px;
-  border-radius: 6px;
+.mcp-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mcp-type,
+.source-pill {
+  display: inline-flex;
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
   background: var(--hover-bg);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 11px;
+  line-height: 1.2;
 }
 
 .mcp-status {
-  padding: 5px 10px;
+  align-self: flex-start;
+  padding: 6px 12px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--hover-bg);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
 }
 
 .mcp-status.connected {
-  border-color: #10b981;
-  background: #10b981;
+  border-color: var(--primary-color);
+  background: var(--primary-color);
   color: #fff;
+}
+
+.mcp-status:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 .mcp-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 14px;
 }
 
 .mcp-fields label {
@@ -398,45 +460,56 @@ onMounted(() => {
 .mcp-fields input,
 .mcp-fields select,
 .mcp-fields textarea {
-  min-width: 0;
-  padding: 9px 10px;
+  width: 100%;
+  padding: 8px 10px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: var(--input-bg);
+  background: var(--input-bg, var(--main-bg));
   color: var(--text-primary);
   font: inherit;
   resize: vertical;
 }
 
-.btn-secondary,
-.btn-danger,
-.btn-primary,
-.add-mcp {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  border-radius: 8px;
-  cursor: pointer;
+.mcp-fields input:disabled,
+.mcp-fields select:disabled,
+.mcp-fields textarea:disabled {
+  opacity: 0.75;
+  cursor: not-allowed;
 }
 
+.mcp-actions,
+.footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.add-mcp,
 .btn-secondary,
 .btn-danger,
 .btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 8px 12px;
   border: 1px solid var(--border-color);
-  font-size: 12px;
+  border-radius: 8px;
+  background: var(--main-bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
 }
 
-.btn-secondary {
-  background: var(--hover-bg);
-  color: var(--text-primary);
+.add-mcp {
+  width: 100%;
+  border-style: dashed;
 }
 
-.btn-danger {
-  border-color: #ef4444;
-  background: transparent;
-  color: #ef4444;
+.add-mcp svg {
+  width: 16px;
+  height: 16px;
 }
 
 .btn-primary {
@@ -445,31 +518,13 @@ onMounted(() => {
   color: #fff;
 }
 
-.btn-primary:disabled {
-  cursor: not-allowed;
-  opacity: 0.65;
+.btn-danger {
+  color: #ef4444;
 }
 
-.add-mcp {
-  width: 100%;
-  padding: 16px;
-  border: 1px dashed var(--border-color);
-  background: var(--main-bg);
-  color: var(--text-muted);
-}
-
-.add-mcp:hover {
-  border-color: var(--primary-color);
-  color: var(--primary-color);
-}
-
-.add-mcp svg {
-  width: 18px;
-  height: 18px;
-}
-
-.footer-actions {
-  justify-content: flex-end;
-  margin-top: 4px;
+@media (max-width: 720px) {
+  .mcp-fields {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

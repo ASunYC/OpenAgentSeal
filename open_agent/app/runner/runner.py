@@ -5,6 +5,7 @@ Following CoPaw's Runner pattern for SSE-based streaming responses.
 """
 
 import asyncio
+import json
 import logging
 import mimetypes
 from dataclasses import replace
@@ -399,7 +400,8 @@ class AgentRunner:
             return "\n".join(text_parts).strip()
         return str(content or "")
 
-    def _restore_agent_history(self, agent: Any, session_id: str) -> None:
+    def _restore_agent_history(self, agent: Any, session_id: str, chat_manager: ChatManager | None = None) -> None:
+        chat_manager = chat_manager or self.chat_manager
         system_content = getattr(agent, "system_prompt", "")
         if getattr(agent, "messages", None):
             first_message = agent.messages[0]
@@ -410,7 +412,7 @@ class AgentRunner:
         if system_content:
             restored.append(AgentMessage(role="system", content=system_content))
 
-        persisted_messages = self.chat_manager.get_messages(session_id)
+        persisted_messages = chat_manager.get_messages(session_id)
         for stored in persisted_messages[-AGENT_HISTORY_MAX_MESSAGES:]:
             if stored.role not in {"user", "assistant"}:
                 continue
@@ -432,10 +434,14 @@ class AgentRunner:
         """
         session_id = request.session_id
         user_id = request.user_id
-        tool_access_mode = "full" if request.meta.get("tool_access_mode") == "full" else "default"
+        requested_tool_access_mode = "full" if request.meta.get("tool_access_mode") == "full" else "default"
+        tool_access_mode = requested_tool_access_mode
+        profile_id = str(request.meta.get("profile_id") or "main")
+        manager_profile_id = None if profile_id == "main" else profile_id
+        chat_manager = get_chat_manager(manager_profile_id)
         
         # Get or create chat
-        chat = await self.chat_manager.get_or_create_chat(
+        chat = await chat_manager.get_or_create_chat(
             session_id=session_id,
             user_id=user_id,
             channel="web",
@@ -444,12 +450,14 @@ class AgentRunner:
         # Get agent from user_config based on session_id
         try:
             from open_agent.user_config import get_user_config
+            from open_agent.agent_profiles import get_agent_profile_manager
             config_manager = get_user_config()
+            profile_manager = get_agent_profile_manager()
         except ImportError:
             yield AgentEvent(
                 event="error",
                 session_id=session_id,
-                error="User config not available",
+                error="Agent config not available",
                 status="error",
             )
             return
@@ -466,126 +474,50 @@ class AgentRunner:
 
         if self._is_workspace_listing_request(user_content, request):
             answer = self._workspace_listing_answer(request)
-            self.chat_manager.add_message(session_id, Message(role="user", content=user_content))
-            self.chat_manager.add_message(session_id, Message(role="assistant", content=answer))
+            chat_manager.add_message(session_id, Message(role="user", content=user_content))
+            chat_manager.add_message(session_id, Message(role="assistant", content=answer))
             yield AgentEvent(event="run_start", session_id=session_id, status="running")
             yield AgentEvent(event="complete", session_id=session_id, status="idle", content=answer)
-            await self.chat_manager.update_chat(chat)
+            await chat_manager.update_chat(chat)
             return
         
-        # Get or create agent for this session
-        agent_id = self.chat_manager.get_session_agent(session_id)
-        agent = None
-        
-        # DEBUG: Log session info
-        logger.info(f"[DEBUG] session_id: {session_id}")
-        logger.info(f"[DEBUG] agent_id from chat_manager: {agent_id}")
-        
-        # Try to extract agent_id from session_id if not set
-        # Session ID format: session_agent_{agentId}_{timestamp}
-        # Example: session_agent_agent-1710820800000_1710820800000
-        # The agentId can contain various characters including hyphens
-        if not agent_id and session_id.startswith("session_agent_"):
-            # Remove the prefix "session_agent_" to get the rest
-            rest = session_id[len("session_agent_"):]
-            # The rest should be: {agentId}_{timestamp}
-            # Find the last underscore to separate agentId from timestamp
-            last_underscore = rest.rfind("_")
-            if last_underscore > 0:
-                extracted_agent_id = rest[:last_underscore]
-                logger.info(f"[DEBUG] extracted_agent_id: {extracted_agent_id}")
-                # Verify this is a valid agent ID
-                existing_agent = config_manager.get_agent(extracted_agent_id)
-                if existing_agent:
-                    agent_id = extracted_agent_id
-                    self.chat_manager.set_session_agent(session_id, agent_id)
-                    logger.info(f"Extracted agent_id {agent_id} from session_id {session_id}")
-                    logger.info(f"Agent config: name={existing_agent.name}, system_prompt={existing_agent.system_prompt[:50] if existing_agent.system_prompt else 'None'}...")
-                else:
-                    logger.warning(f"Agent {extracted_agent_id} not found in config")
-                    # List all available agents
-                    all_agents = config_manager.get_all_agents()
-                    logger.info(f"Available agents: {[a.id for a in all_agents]}")
-            else:
-                logger.warning(f"Invalid session_id format: {session_id}, cannot extract agent_id")
-        
-        session_agent_config = config_manager.get_agent(agent_id) if agent_id else None
-        can_reuse_agent = True
-        if session_agent_config:
-            routed_model_id = config_manager.resolve_smart_model_id(
-                input_modality,
-                session_agent_config.model_id,
+        agent_config = profile_manager.get_agent_config(manager_profile_id)
+        if not agent_config:
+            yield AgentEvent(
+                event="error",
+                session_id=session_id,
+                error=f"Agent profile not found: {profile_id}",
+                status="error",
             )
-            can_reuse_agent = routed_model_id == session_agent_config.model_id
-
-        if agent_id and can_reuse_agent:
-            # Try to get existing agent from AgentService
-            try:
-                from open_agent.agent_service import get_agent_service
-                service = get_agent_service()
-                agent = service.get_agent(agent_id)
-            except Exception:
-                agent = None
-        
-        if not agent:
-            # Get agent config from user_config based on session_id
-            # Priority: use the agent_id extracted from session_id
-            agent_config = None
-            
-            # First, try to get config using the agent_id from session
-            if agent_id:
-                agent_config = config_manager.get_agent(agent_id)
-                if agent_config:
-                    logger.info(f"Found agent config for agent_id: {agent_id}")
-            
-            # If not found, fall back to first agent
-            if not agent_config:
-                agents = config_manager.get_all_agents()
-                if agents:
-                    agent_config = agents[0]
-                    agent_id = agent_config.id
-                    logger.info(f"Using first agent: {agent_id}")
-                else:
-                    # Create default agent config with system prompt
-                    from open_agent.user_config import AgentConfig
-                    from open_agent.config import Config
-                    
-                    system_prompt = "You are an intelligent assistant that helps users complete various tasks."
-                    try:
-                        system_prompt_path = Config.find_config_file("system_prompt.md")
-                        if system_prompt_path and system_prompt_path.exists():
-                            system_prompt = system_prompt_path.read_text(encoding="utf-8")
-                            print(f"[Runner] Loaded system prompt from: {system_prompt_path}")
-                        else:
-                            print(f"[Runner] system_prompt.md not found, using default")
-                    except Exception as e:
-                        print(f"[Runner] Failed to load system prompt: {e}")
-                    
-                    agent_config = AgentConfig.create(
-                        name="默认助手",
-                        model_id="",
-                        system_prompt=system_prompt
-                    )
-                    config_manager.add_agent(agent_config)
-                    agent_id = agent_config.id
-                    self.chat_manager.set_session_agent(session_id, agent_id)
-
-            routed_model_id = config_manager.resolve_smart_model_id(
-                input_modality,
-                agent_config.model_id if agent_config else None,
+            return
+        if manager_profile_id and not getattr(agent_config, "enabled", True):
+            yield AgentEvent(
+                event="error",
+                session_id=session_id,
+                error=f"Agent profile is disabled: {profile_id}",
+                status="error",
             )
-            if agent_config and routed_model_id and routed_model_id != agent_config.model_id:
-                logger.info(
-                    "Smart routing selected model_id=%s for modality=%s (agent default=%s)",
-                    routed_model_id,
-                    input_modality,
-                    agent_config.model_id,
-                )
-                agent_config = replace(agent_config, model_id=routed_model_id)
-            
-            # Create agent instance from config
-            agent = self._create_agent_from_config(agent_config)
-        
+            return
+        if requested_tool_access_mode != "full":
+            tool_access_mode = "full" if getattr(agent_config, "permission_mode", "default") == "full" else "default"
+
+        routed_model_id = config_manager.resolve_smart_model_id(input_modality, agent_config.model_id)
+        if routed_model_id and routed_model_id != agent_config.model_id:
+            logger.info(
+                "Smart routing selected model_id=%s for modality=%s (agent default=%s)",
+                routed_model_id,
+                input_modality,
+                agent_config.model_id,
+            )
+            agent_config = replace(agent_config, model_id=routed_model_id)
+
+        agent_id = agent_config.id
+        agent = self._create_agent_from_config(
+            agent_config,
+            profile_id=manager_profile_id,
+            session_id=session_id,
+        )
+
         if not agent:
             yield AgentEvent(
                 event="error",
@@ -596,7 +528,7 @@ class AgentRunner:
             return
 
         agent.tool_access_mode = tool_access_mode
-        self._restore_agent_history(agent, session_id)
+        self._restore_agent_history(agent, session_id, chat_manager)
         
         # Add user message to history
         user_attachments = []
@@ -607,26 +539,27 @@ class AgentRunner:
                 if isinstance(raw_attachments, list):
                     user_attachments = raw_attachments
         user_message = Message(role="user", content=user_content, attachments=user_attachments)
-        self.chat_manager.add_message(session_id, user_message)
+        chat_manager.add_message(session_id, user_message)
         
         # Add message to agent
         agent.add_user_message(agent_user_content)
 
         from open_agent.control_plane import get_control_plane
 
-        control_plane = get_control_plane()
+        agent_home = profile_manager.get_agent_home(manager_profile_id)
+        control_plane = get_control_plane(agent_home)
         runtime_thread = control_plane.get_runtime_thread_by_session(session_id)
         if runtime_thread is None:
             runtime_thread = control_plane.create_runtime_thread(
                 session_id=session_id,
                 user_id=user_id,
                 title=user_content[:80],
-                metadata={"chat_id": chat.id, "source": "runner"},
+                metadata={"chat_id": chat.id, "source": "runner", "profile_id": profile_id},
             )
         runtime_turn = control_plane.start_runtime_turn(
             runtime_thread["thread_id"],
             user_input=user_content,
-            metadata={"agent_id": agent_id, "tool_access_mode": tool_access_mode},
+            metadata={"agent_id": agent_id, "profile_id": profile_id, "tool_access_mode": tool_access_mode},
         )
 
         def persist_event(event: AgentEvent) -> AgentEvent:
@@ -736,7 +669,7 @@ class AgentRunner:
             if last_assistant_msg:
                 # Add to history
                 assistant_message = Message(role="assistant", content=last_assistant_msg)
-                self.chat_manager.add_message(session_id, assistant_message)
+                chat_manager.add_message(session_id, assistant_message)
             
             # Yield completion event
             complete_event = persist_event(AgentEvent(
@@ -753,7 +686,7 @@ class AgentRunner:
             yield complete_event
             
             # Update chat
-            await self.chat_manager.update_chat(chat)
+            await chat_manager.update_chat(chat)
         
         except asyncio.CancelledError:
             agent_task.cancel()
@@ -785,7 +718,7 @@ class AgentRunner:
             agent.status_callback = None
             agent.llm.stream_callback = None
     
-    def _create_agent_from_config(self, agent_config):
+    def _create_agent_from_config(self, agent_config, profile_id: str | None = None, session_id: str | None = None):
         """Create agent instance from agent config"""
         try:
             from open_agent.agent import Agent
@@ -796,9 +729,16 @@ class AgentRunner:
             from open_agent.tools.note_tool import RecordNoteTool, RecallNotesTool
             from open_agent.tools.choice_tool import AskUserChoiceTool
             from open_agent.user_config import get_user_config
+            from open_agent.agent_profiles import get_agent_profile_manager
             
             # Get model config
             config_manager = get_user_config()
+            profile_manager = get_agent_profile_manager()
+            agent_home = profile_manager.get_agent_home(profile_id)
+            memory_dir = agent_home / "memory"
+            workspace_dir = agent_home / "workspace"
+            profile_skills_dir = agent_home / "skills"
+            profile_mcp_path = agent_home / "mcp.json"
             model_config = None
             
             if agent_config.model_id:
@@ -841,16 +781,29 @@ class AgentRunner:
             
             # Create tools
             tools = [
-                BashTool(workspace_dir=str(config_manager.get_settings().workspace)),
+                BashTool(workspace_dir=str(workspace_dir)),
                 BashOutputTool(),
                 BashKillTool(),
-                ReadTool(workspace_dir=str(config_manager.get_settings().workspace)),
-                WriteTool(workspace_dir=str(config_manager.get_settings().workspace)),
-                EditTool(workspace_dir=str(config_manager.get_settings().workspace)),
-                RecordNoteTool(),
-                RecallNotesTool(),
+                ReadTool(workspace_dir=str(workspace_dir)),
+                WriteTool(workspace_dir=str(workspace_dir)),
+                EditTool(workspace_dir=str(workspace_dir)),
+                RecordNoteTool(memory_dir=str(memory_dir)),
+                RecallNotesTool(memory_dir=str(memory_dir)),
                 AskUserChoiceTool(),
             ]
+            try:
+                from open_agent.tools.agent_control_tool import create_agent_control_tools
+
+                can_delegate = profile_id is None or bool(getattr(agent_config, "allow_delegation", False))
+                tools.extend(
+                    create_agent_control_tools(
+                        can_delegate=can_delegate,
+                        parent_session_id=session_id,
+                        parent_profile_id=profile_id or "main",
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to load agent control tools: %s", exc)
             skill_loader = None
 
             # Web search tools
@@ -877,10 +830,26 @@ class AgentRunner:
                 enable_skills = getattr(user_settings, 'enable_skills', True) if user_settings else True
                 if enable_skills and config_obj and config_obj.tools.enable_skills:
                     from open_agent.utils.path_utils import resolve_skills_dir
-                    skills_path = resolve_skills_dir(config_obj.tools.skills_dir)
+                    from open_agent.plugins import get_plugin_manager
+                    skills_path = profile_skills_dir if profile_id else resolve_skills_dir(config_obj.tools.skills_dir)
                     if skills_path and Path(skills_path).exists():
                         from open_agent.tools.skill_tool import create_skill_tools
-                        skill_tools, skill_loader = create_skill_tools(str(skills_path))
+                        plugin_manager = get_plugin_manager()
+                        extra_roots = plugin_manager.effective_skill_roots()
+                        if not profile_id and profile_skills_dir.exists():
+                            extra_roots = [
+                                {
+                                    "path": str(profile_skills_dir),
+                                    "source": "profile",
+                                    "plugin_name": agent_config.name,
+                                },
+                                *extra_roots,
+                            ]
+                        skill_tools, skill_loader = create_skill_tools(
+                            str(skills_path),
+                            extra_roots=extra_roots,
+                            disabled_paths=plugin_manager.disabled_skill_paths(),
+                        )
                         if skill_tools:
                             tools.extend(skill_tools)
                             logger.info(f"Loaded {len(skill_tools)} skill tools from {skills_path}")
@@ -895,13 +864,28 @@ class AgentRunner:
             try:
                 if config_obj and config_obj.tools.enable_mcp:
                     from open_agent.config import Config as Cfg
-                    mcp_config_path = Cfg.find_config_file(config_obj.tools.mcp_config_path)
+                    if profile_id:
+                        mcp_config_path = profile_mcp_path if profile_mcp_path.exists() else None
+                    else:
+                        mcp_config_path = Cfg.find_config_file(config_obj.tools.mcp_config_path)
+
+                    from open_agent.plugins import get_plugin_manager
+                    from open_agent.tools.mcp_loader import load_mcp_tools_from_servers_async
+
+                    raw_mcp_config = {"mcpServers": {}}
                     if mcp_config_path:
-                        from open_agent.tools.mcp_loader import load_mcp_tools_async
-                        mcp_tools = asyncio.run(load_mcp_tools_async(str(mcp_config_path)))
-                        if mcp_tools:
-                            tools.extend(mcp_tools)
-                            logger.info(f"Loaded {len(mcp_tools)} MCP tools from {mcp_config_path}")
+                        try:
+                            raw_mcp_config = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
+                        except Exception:
+                            raw_mcp_config = {"mcpServers": {}}
+                    user_mcp_servers = raw_mcp_config.get("mcpServers", {}) if isinstance(raw_mcp_config, dict) else {}
+                    effective_mcp_servers, mcp_warnings = get_plugin_manager().effective_mcp_servers(user_mcp_servers)
+                    for warning in mcp_warnings:
+                        logger.warning("Plugin MCP skipped: %s", warning)
+                    mcp_tools = asyncio.run(load_mcp_tools_from_servers_async(effective_mcp_servers))
+                    if mcp_tools:
+                        tools.extend(mcp_tools)
+                        logger.info(f"Loaded {len(mcp_tools)} MCP tools from effective MCP config")
             except Exception:
                 pass
             
@@ -936,6 +920,43 @@ class AgentRunner:
                     )
             else:
                 system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+
+            try:
+                from open_agent.plugins import get_plugin_manager
+
+                plugin_roots = get_plugin_manager().effective_skill_roots()
+                if plugin_roots:
+                    plugin_names = sorted({root.get("plugin_name", "plugin") for root in plugin_roots})
+                    plugins_instructions = (
+                        "\n\n<plugins_instructions>\n"
+                        "## Plugins\n"
+                        "A plugin is a local bundle of skills and MCP servers. Plugins are not invoked directly; "
+                        "use the skills and MCP tools they contribute. If a user names a plugin, prefer the "
+                        "capabilities associated with that plugin when they are relevant.\n"
+                        f"Enabled plugins: {', '.join(plugin_names)}\n"
+                        "</plugins_instructions>"
+                    )
+                    system_prompt += plugins_instructions
+            except Exception:
+                logger.debug("Failed to inject plugin instructions", exc_info=True)
+
+            agent_kind = "main-agent" if not profile_id else "sub-agent"
+            delegation_note = (
+                "This agent may delegate work to enabled sub-agent profiles with start_agent_task. "
+                if (not profile_id or getattr(agent_config, "allow_delegation", False))
+                else "This sub-agent should complete its assigned work directly and must not delegate to other agents. "
+            )
+            system_prompt += (
+                "\n\n<agent_profile>\n"
+                f"Agent kind: {agent_kind}\n"
+                f"Agent id: {agent_config.id}\n"
+                f"Agent name: {agent_config.name}\n"
+                f"Isolated home: {agent_home}\n"
+                "Memory and session history are isolated to this agent home. "
+                "The library/资料库 and global model registry are shared across agents.\n"
+                f"{delegation_note}\n"
+                "</agent_profile>"
+            )
             
             # Create agent
             agent = Agent(
@@ -943,7 +964,7 @@ class AgentRunner:
                 system_prompt=system_prompt,
                 tools=tools,
                 max_steps=agent_config.max_steps if hasattr(agent_config, 'max_steps') and agent_config.max_steps else 100,
-                workspace_dir=str(config_manager.get_settings().workspace),
+                workspace_dir=str(workspace_dir),
             )
             
             logger.info(f"Agent created successfully")

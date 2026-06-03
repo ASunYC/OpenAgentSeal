@@ -15,7 +15,7 @@ from open_agent.utils.path_utils import get_data_dir
 class ControlPlane:
     """SQLite-backed store for sessions, goals, tool calls, jobs, and metadata."""
 
-    DB_FILE = "control_plane.db"
+    DB_FILE = "runtime.db"
 
     def __init__(self, data_dir: str | Path | None = None):
         self.data_dir = Path(data_dir) if data_dir else get_data_dir()
@@ -28,8 +28,13 @@ class ControlPlane:
         self._init_db()
 
     def _migrate_legacy_db(self) -> None:
-        legacy_path = Path.home() / ".open-agent" / self.DB_FILE
-        if self.db_path.exists() or not legacy_path.exists():
+        legacy_paths = [
+            self.data_dir / "control_plane.db",
+            get_data_dir() / "control_plane.db",
+            Path.home() / ".open-agent" / "control_plane.db",
+        ]
+        legacy_path = next((path for path in legacy_paths if path.exists()), None)
+        if self.db_path.exists() or legacy_path is None:
             return
         shutil.copy2(legacy_path, self.db_path)
         for suffix in ("-wal", "-shm"):
@@ -202,6 +207,23 @@ class ControlPlane:
                     FOREIGN KEY(goal_id) REFERENCES goals(goal_id) ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS agent_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    parent_session_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    instruction TEXT NOT NULL DEFAULT '',
+                    result TEXT,
+                    error TEXT,
+                    events TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS metadata (
                     namespace TEXT NOT NULL,
                     key TEXT NOT NULL,
@@ -217,6 +239,8 @@ class ControlPlane:
                 CREATE INDEX IF NOT EXISTS idx_goals_session_status ON goals(session_id, status);
                 CREATE INDEX IF NOT EXISTS idx_tool_calls_session_created ON tool_calls(session_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_status_next_run ON scheduler_jobs(status, next_run_at);
+                CREATE INDEX IF NOT EXISTS idx_agent_tasks_profile_updated ON agent_tasks(profile_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_agent_tasks_parent_updated ON agent_tasks(parent_session_id, updated_at);
                 """
             )
 
@@ -728,9 +752,103 @@ class ControlPlane:
         ).fetchone()
         return json.loads(row["value"]) if row else default
 
+    def upsert_agent_task(
+        self,
+        task_id: str,
+        profile_id: str,
+        session_id: str,
+        instruction: str = "",
+        parent_session_id: str | None = None,
+        status: str = "queued",
+        result: str | None = None,
+        error: str | None = None,
+        events: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+        completed_at: str | None = None,
+    ) -> dict[str, Any]:
+        if self.get_session(session_id) is None:
+            self.create_session(session_id=session_id, channel="agent-task", metadata={"profile_id": profile_id})
+        now = datetime.now().isoformat()
+        existing = self.get_agent_task(task_id)
+        created_at = existing["created_at"] if existing else now
+        if completed_at is None and status in {"completed", "failed", "cancelled"}:
+            completed_at = existing.get("completed_at") if existing else now
+        if events is None:
+            events = existing.get("events", []) if existing else []
+        if metadata is None:
+            metadata = existing.get("metadata", {}) if existing else {}
+        conn = self._get_conn()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO agent_tasks (
+                    task_id, profile_id, session_id, parent_session_id, status, instruction,
+                    result, error, events, created_at, updated_at, completed_at, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    profile_id=excluded.profile_id,
+                    session_id=excluded.session_id,
+                    parent_session_id=excluded.parent_session_id,
+                    status=excluded.status,
+                    instruction=excluded.instruction,
+                    result=excluded.result,
+                    error=excluded.error,
+                    events=excluded.events,
+                    updated_at=excluded.updated_at,
+                    completed_at=excluded.completed_at,
+                    metadata=excluded.metadata
+                """,
+                (
+                    task_id,
+                    profile_id,
+                    session_id,
+                    parent_session_id,
+                    status,
+                    instruction,
+                    result,
+                    error,
+                    json.dumps(events, ensure_ascii=False),
+                    created_at,
+                    now,
+                    completed_at,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+        return self.get_agent_task(task_id) or {}
+
+    def get_agent_task(self, task_id: str) -> dict[str, Any] | None:
+        row = self._get_conn().execute(
+            "SELECT * FROM agent_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_agent_tasks(
+        self,
+        profile_id: str | None = None,
+        parent_session_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if profile_id:
+            clauses.append("profile_id = ?")
+            params.append(profile_id)
+        if parent_session_id:
+            clauses.append("parent_session_id = ?")
+            params.append(parent_session_id)
+        query = "SELECT * FROM agent_tasks"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self._get_conn().execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
-        for key in ("metadata", "todo_items", "last_judge_result", "arguments", "result", "payload", "decision"):
+        for key in ("metadata", "todo_items", "last_judge_result", "arguments", "result", "payload", "decision", "events"):
             if key in data and isinstance(data[key], str):
                 try:
                     data[key] = json.loads(data[key])
@@ -742,10 +860,17 @@ class ControlPlane:
 
 
 _control_plane: ControlPlane | None = None
+_control_planes: dict[str, ControlPlane] = {}
 
 
 def get_control_plane(data_dir: str | Path | None = None) -> ControlPlane:
     global _control_plane
-    if _control_plane is None or data_dir is not None:
+    if data_dir is not None:
+        key = str(Path(data_dir).resolve())
+        if key not in _control_planes:
+            _control_planes[key] = ControlPlane(data_dir=data_dir)
+        return _control_planes[key]
+
+    if _control_plane is None:
         _control_plane = ControlPlane(data_dir=data_dir)
     return _control_plane

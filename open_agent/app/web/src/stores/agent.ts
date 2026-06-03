@@ -170,7 +170,7 @@ export const useAgentStore = defineStore('agent', () => {
   function createNewAgent(): AgentConfig {
     const now = new Date().toISOString()
     const newAgent: AgentConfig = {
-      id: `agent-${Date.now()}`,
+      id: `profile_${Date.now()}`,
       name: '新智能体',
       model_id: modelConfigs.value.find(c => c.is_default)?.id || modelConfigs.value[0]?.id || '',
       description: '',
@@ -181,6 +181,9 @@ export const useAgentStore = defineStore('agent', () => {
       max_steps: 100,
       tools: [],
       mcp_servers: [],
+      permission_mode: 'default',
+      allow_delegation: false,
+      enabled: true,
       created_at: now,
       updated_at: now
     }
