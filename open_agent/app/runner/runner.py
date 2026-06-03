@@ -16,11 +16,13 @@ from open_agent.app.runner.models import (
 )
 from open_agent.app.runner.manager import ChatManager, get_chat_manager
 from open_agent.app.runner.file_parser import MAX_FILE_BYTES, attachment_to_context, parse_file_bytes
+from open_agent.schema import Message as AgentMessage
 
 logger = logging.getLogger(__name__)
 
 WORKSPACE_MAX_SELECTED_FILES = 20
 WORKSPACE_MAX_CONTEXT_CHARS = 60000
+AGENT_HISTORY_MAX_MESSAGES = 80
 
 
 class AgentRunner:
@@ -379,6 +381,45 @@ class AgentRunner:
         if isinstance(content, str):
             return bool(content.strip())
         return bool(content)
+
+    def _content_to_agent_text(self, content: Any) -> str | List[Dict[str, Any]]:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if text:
+                        text_parts.append(str(text))
+                    continue
+                text = getattr(item, "text", None) or getattr(item, "content", None)
+                if text:
+                    text_parts.append(str(text))
+            return "\n".join(text_parts).strip()
+        return str(content or "")
+
+    def _restore_agent_history(self, agent: Any, session_id: str) -> None:
+        system_content = getattr(agent, "system_prompt", "")
+        if getattr(agent, "messages", None):
+            first_message = agent.messages[0]
+            if getattr(first_message, "role", "") == "system":
+                system_content = first_message.content
+
+        restored: List[AgentMessage] = []
+        if system_content:
+            restored.append(AgentMessage(role="system", content=system_content))
+
+        persisted_messages = self.chat_manager.get_messages(session_id)
+        for stored in persisted_messages[-AGENT_HISTORY_MAX_MESSAGES:]:
+            if stored.role not in {"user", "assistant"}:
+                continue
+            content = self._content_to_agent_text(stored.content)
+            if isinstance(content, str) and not content.strip():
+                continue
+            restored.append(AgentMessage(role=stored.role, content=content))
+
+        agent.messages = restored or [AgentMessage(role="system", content=system_content or "")]
     
     async def process_message(
         self,
@@ -391,6 +432,7 @@ class AgentRunner:
         """
         session_id = request.session_id
         user_id = request.user_id
+        tool_access_mode = "full" if request.meta.get("tool_access_mode") == "full" else "default"
         
         # Get or create chat
         chat = await self.chat_manager.get_or_create_chat(
@@ -552,6 +594,9 @@ class AgentRunner:
                 status="error",
             )
             return
+
+        agent.tool_access_mode = tool_access_mode
+        self._restore_agent_history(agent, session_id)
         
         # Add user message to history
         user_attachments = []
@@ -581,7 +626,7 @@ class AgentRunner:
         runtime_turn = control_plane.start_runtime_turn(
             runtime_thread["thread_id"],
             user_input=user_content,
-            metadata={"agent_id": agent_id},
+            metadata={"agent_id": agent_id, "tool_access_mode": tool_access_mode},
         )
 
         def persist_event(event: AgentEvent) -> AgentEvent:

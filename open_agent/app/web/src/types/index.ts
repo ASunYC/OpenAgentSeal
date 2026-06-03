@@ -65,6 +65,12 @@ export interface WorkspaceSource {
   children_count?: number
 }
 
+export interface WorkspaceSourceState {
+  sources: WorkspaceSource[]
+  selected_paths: string[]
+  expanded_paths: string[]
+}
+
 export interface ForkChatResponse {
   chat: Chat
   source_session_id: string
@@ -99,6 +105,7 @@ export interface RunRequest {
   stream?: boolean
   workspace_sources?: WorkspaceSource[]
   selected_workspace_paths?: string[]
+  tool_access_mode?: 'default' | 'full'
 }
 
 export interface RuntimeThread {

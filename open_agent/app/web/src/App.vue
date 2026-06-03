@@ -149,17 +149,19 @@
               <span>{{ t('来源', 'Sources') }}</span>
               <button v-if="workspaceSources.length" @click="clearWorkspaceSources">{{ t('清空', 'Clear') }}</button>
             </div>
-            <div v-if="!workspaceSources.length" class="source-empty">{{ t('还没有添加来源', 'No sources added yet') }}</div>
-            <WorkspaceSourceTree
-              v-else
-              :sources="workspaceSources"
-              :selected-paths="selectedWorkspacePaths"
-              :expanded-paths="expandedWorkspacePaths"
-              @toggle-select="toggleWorkspaceSourceSelection"
-              @toggle-expanded="toggleWorkspaceSourceExpanded"
-              @remove-source="removeWorkspaceSource"
-              @open-location="openWorkspaceSourceLocation"
-            />
+            <div class="source-list-scroll">
+              <div v-if="!workspaceSources.length" class="source-empty">{{ t('还没有添加来源', 'No sources added yet') }}</div>
+              <WorkspaceSourceTree
+                v-else
+                :sources="workspaceSources"
+                :selected-paths="selectedWorkspacePaths"
+                :expanded-paths="expandedWorkspacePaths"
+                @toggle-select="toggleWorkspaceSourceSelection"
+                @toggle-expanded="toggleWorkspaceSourceExpanded"
+                @remove-source="removeWorkspaceSource"
+                @open-location="openWorkspaceSourceLocation"
+              />
+            </div>
           </section>
         </aside>
 
@@ -239,7 +241,7 @@
               </div>
             </div>
           </div>
-          <footer v-if="isWorkspaceOpen" class="chat-footer panel-chat-footer">
+          <footer v-if="isChatConstrained" class="chat-footer panel-chat-footer">
             <div
               class="input-area composer-shell"
               :class="{ 'drag-over': isComposerDragging }"
@@ -326,6 +328,24 @@
                       </button>
                     </div>
                   </div>
+                  <label
+                    class="tool-access-mode"
+                    :class="{ 'full-access': toolAccessMode === 'full' }"
+                    :title="toolAccessModeTitle"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M12 3 5 6v5c0 4.5 2.9 8.4 7 10 4.1-1.6 7-5.5 7-10V6l-7-3z"/>
+                      <path d="M9 12l2 2 4-4"/>
+                    </svg>
+                    <select
+                      v-model="toolAccessMode"
+                      @change="persistToolAccessMode"
+                      :aria-label="t('访问权限', 'Access mode')"
+                    >
+                      <option value="default">{{ t('默认权限', 'Default') }}</option>
+                      <option value="full">{{ t('完全访问', 'Full access') }}</option>
+                    </select>
+                  </label>
                   <span
                     :class="{ 'cot-active': settingsStore.settings.useCoT }"
                     class="cot-status"
@@ -613,7 +633,7 @@
       </div>
       
       <!-- 底部工具栏-->
-      <footer v-if="!isWorkspaceOpen" class="chat-footer">
+      <footer v-if="!isChatConstrained" class="chat-footer">
         <div
           class="input-area composer-shell"
           :class="{ 'drag-over': isComposerDragging }"
@@ -700,6 +720,24 @@
                   </button>
                 </div>
               </div>
+              <label
+                class="tool-access-mode"
+                :class="{ 'full-access': toolAccessMode === 'full' }"
+                :title="toolAccessModeTitle"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 3 5 6v5c0 4.5 2.9 8.4 7 10 4.1-1.6 7-5.5 7-10V6l-7-3z"/>
+                  <path d="M9 12l2 2 4-4"/>
+                </svg>
+                <select
+                  v-model="toolAccessMode"
+                  @change="persistToolAccessMode"
+                  :aria-label="t('访问权限', 'Access mode')"
+                >
+                  <option value="default">{{ t('默认权限', 'Default') }}</option>
+                  <option value="full">{{ t('完全访问', 'Full access') }}</option>
+                </select>
+              </label>
               <span
                 :class="{ 'cot-active': settingsStore.settings.useCoT }"
                 class="cot-status"
@@ -814,7 +852,7 @@ import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
-import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode } from '@/types'
+import type { AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
@@ -824,6 +862,7 @@ const chatStore = useChatStore()
 // 褰撳墠瑙嗗浘
 type WorkspacePanel = '' | 'browser' | 'runtime'
 type RuntimePanelTab = 'chats' | 'runtime'
+type ToolAccessMode = 'default' | 'full'
 
 const activeWorkspacePanel = ref<WorkspacePanel>('')
 const runtimePanelTab = ref<RuntimePanelTab>('chats')
@@ -835,12 +874,14 @@ const isClearingChat = ref(false)
 const showClearAllChatsConfirm = ref(false)
 const isClearingAllChats = ref(false)
 const isSourceWorkspaceOpen = ref(false)
+const isChatConstrained = computed(() => isWorkspaceOpen.value || isSourceWorkspaceOpen.value)
 const sourceWorkspaceRef = ref<HTMLElement | null>(null)
 const sourceDragDepth = ref(0)
 const isSourceDragging = computed(() => sourceDragDepth.value > 0)
 const workspaceSources = ref<WorkspaceSource[]>([])
 const selectedWorkspacePaths = ref<string[]>([])
 const expandedWorkspacePaths = ref<string[]>([])
+const workspaceSourceStateLoaded = ref(false)
 const showWebSourceInput = ref(false)
 const webSourceUrl = ref('')
 const webSourceInputRef = ref<HTMLInputElement | null>(null)
@@ -855,7 +896,10 @@ const WORKSPACE_DEFAULT_WIDTH = 560
 const WORKSPACE_MIN_WIDTH = 360
 const WORKSPACE_MAX_WIDTH = 820
 const WORKSPACE_MIN_CHAT_WIDTH = 480
-const WORKSPACE_RIGHT_GUTTER = 18
+const WORKSPACE_DUAL_MIN_CHAT_WIDTH = 300
+const PANEL_RESIZER_WIDTH = 8
+const SOURCE_WORKSPACE_LEFT_MARGIN = 9
+const WORKSPACE_RIGHT_MARGIN = 9
 
 const workspaceLayoutStyle = computed<Record<string, string>>(() => {
   return {
@@ -869,17 +913,20 @@ function clampSourceWorkspaceWidth(width: number): number {
     return Math.min(Math.max(width, SOURCE_WORKSPACE_MIN_WIDTH), SOURCE_WORKSPACE_MAX_WIDTH)
   }
 
-  const reservedRight = isWorkspaceOpen.value ? workspaceWidth.value : 0
+  const minChatWidth = isWorkspaceOpen.value ? WORKSPACE_DUAL_MIN_CHAT_WIDTH : WORKSPACE_MIN_CHAT_WIDTH
+  const reservedRight = isWorkspaceOpen.value
+    ? workspaceWidth.value + WORKSPACE_RIGHT_MARGIN + PANEL_RESIZER_WIDTH
+    : 0
   const viewportMax = Math.max(
     SOURCE_WORKSPACE_MIN_WIDTH,
-    window.innerWidth - WORKSPACE_MIN_CHAT_WIDTH - reservedRight - WORKSPACE_RIGHT_GUTTER,
+    window.innerWidth - minChatWidth - reservedRight - SOURCE_WORKSPACE_LEFT_MARGIN - PANEL_RESIZER_WIDTH,
   )
   const maxWidth = Math.min(SOURCE_WORKSPACE_MAX_WIDTH, viewportMax)
   return Math.round(Math.min(Math.max(width, SOURCE_WORKSPACE_MIN_WIDTH), maxWidth))
 }
 
 function updateSourceWorkspaceWidthFromPointer(clientX: number): void {
-  sourceWorkspaceWidth.value = clampSourceWorkspaceWidth(clientX)
+  sourceWorkspaceWidth.value = clampSourceWorkspaceWidth(clientX - SOURCE_WORKSPACE_LEFT_MARGIN)
 }
 
 function startSourceWorkspaceResize(event: PointerEvent): void {
@@ -931,9 +978,13 @@ function clampWorkspaceWidth(width: number): number {
     return Math.min(Math.max(width, WORKSPACE_MIN_WIDTH), WORKSPACE_MAX_WIDTH)
   }
 
+  const minChatWidth = isSourceWorkspaceOpen.value ? WORKSPACE_DUAL_MIN_CHAT_WIDTH : WORKSPACE_MIN_CHAT_WIDTH
+  const reservedLeft = isSourceWorkspaceOpen.value
+    ? sourceWorkspaceWidth.value + SOURCE_WORKSPACE_LEFT_MARGIN + PANEL_RESIZER_WIDTH
+    : 0
   const viewportMax = Math.max(
     WORKSPACE_MIN_WIDTH,
-    window.innerWidth - WORKSPACE_MIN_CHAT_WIDTH - WORKSPACE_RIGHT_GUTTER,
+    window.innerWidth - reservedLeft - minChatWidth - WORKSPACE_RIGHT_MARGIN - PANEL_RESIZER_WIDTH,
   )
   const maxWidth = Math.min(WORKSPACE_MAX_WIDTH, viewportMax)
   return Math.round(Math.min(Math.max(width, WORKSPACE_MIN_WIDTH), maxWidth))
@@ -941,7 +992,7 @@ function clampWorkspaceWidth(width: number): number {
 
 function updateWorkspaceWidthFromPointer(clientX: number): void {
   if (typeof window === 'undefined') return
-  workspaceWidth.value = clampWorkspaceWidth(window.innerWidth - clientX - WORKSPACE_RIGHT_GUTTER)
+  workspaceWidth.value = clampWorkspaceWidth(window.innerWidth - clientX - WORKSPACE_RIGHT_MARGIN)
 }
 
 function startWorkspaceResize(event: PointerEvent): void {
@@ -974,6 +1025,19 @@ function stopWorkspaceResize(): void {
 
 function resetWorkspaceWidth(): void {
   workspaceWidth.value = clampWorkspaceWidth(WORKSPACE_DEFAULT_WIDTH)
+}
+
+function syncPanelWidths(): void {
+  if (isWorkspaceOpen.value) {
+    workspaceWidth.value = clampWorkspaceWidth(workspaceWidth.value)
+  }
+  if (isSourceWorkspaceOpen.value) {
+    sourceWorkspaceWidth.value = clampSourceWorkspaceWidth(sourceWorkspaceWidth.value)
+  }
+}
+
+function handlePanelViewportResize(): void {
+  syncPanelWidths()
 }
 
 type BrowserLoadState = 'idle' | 'loading' | 'loaded'
@@ -1025,6 +1089,13 @@ const attachmentInput = ref<HTMLInputElement | null>(null)
 const pendingAttachments = ref<ChatAttachment[]>([])
 const canSendMessage = computed(() => !!inputMessage.value.trim() || pendingAttachments.value.length > 0)
 const composerMenuOpen = ref(false)
+const TOOL_ACCESS_MODE_STORAGE_KEY = 'tool_access_mode'
+const toolAccessMode = ref<ToolAccessMode>('default')
+const toolAccessModeTitle = computed(() => {
+  return toolAccessMode.value === 'full'
+    ? t('完全访问权限：写入和命令类工具将自动通过审批', 'Full access: write and command tools are auto-approved')
+    : t('默认权限：写入和命令类工具需要审批', 'Default access: write and command tools require approval')
+})
 const composerDragDepth = ref(0)
 const isComposerDragging = computed(() => composerDragDepth.value > 0)
 const loading = ref(false)
@@ -1042,6 +1113,19 @@ let unlistenDesktopFileDrops: (() => void) | null = null
 // 缈昏瘧鍑芥暟
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
+}
+
+function normalizeToolAccessMode(value: unknown): ToolAccessMode {
+  return value === 'full' ? 'full' : 'default'
+}
+
+function persistToolAccessMode() {
+  toolAccessMode.value = normalizeToolAccessMode(toolAccessMode.value)
+  localStorage.setItem(TOOL_ACCESS_MODE_STORAGE_KEY, toolAccessMode.value)
+}
+
+function loadToolAccessMode() {
+  toolAccessMode.value = normalizeToolAccessMode(localStorage.getItem(TOOL_ACCESS_MODE_STORAGE_KEY))
 }
 
 // 鍙敤妯″瀷
@@ -1229,6 +1313,7 @@ async function openRuntimePanel() {
 
   isBrowserFullscreen.value = false
   activeWorkspacePanel.value = 'runtime'
+  syncPanelWidths()
   runtimePanelTab.value = 'chats'
   await chatStore.loadChats()
 }
@@ -1577,11 +1662,50 @@ async function addDroppedFilePaths(paths: string[]) {
   }
 }
 
+function workspaceSourceState(): WorkspaceSourceState {
+  return {
+    sources: workspaceSources.value,
+    selected_paths: selectedWorkspacePaths.value,
+    expanded_paths: expandedWorkspacePaths.value,
+  }
+}
+
+async function loadWorkspaceSourceState() {
+  try {
+    const state = await api.getWorkspaceSourcesState()
+    workspaceSources.value = state.sources || []
+    const availablePaths = new Set<string>()
+    const collect = (source: WorkspaceSourceNode) => {
+      availablePaths.add(source.path)
+      for (const child of source.children || []) collect(child)
+    }
+    for (const source of workspaceSources.value) collect(source)
+    selectedWorkspacePaths.value = normalizeWorkspaceSourceSelection(
+      (state.selected_paths || []).filter(path => availablePaths.has(path)),
+    )
+    expandedWorkspacePaths.value = Array.from(new Set(state.expanded_paths || []))
+  } catch (error) {
+    console.error('Failed to load library sources:', error)
+  } finally {
+    workspaceSourceStateLoaded.value = true
+  }
+}
+
+function saveWorkspaceSourceState() {
+  if (!workspaceSourceStateLoaded.value) return
+  void api.saveWorkspaceSourcesState(workspaceSourceState()).catch(error => {
+    console.error('Failed to save library sources:', error)
+  })
+}
+
 function toggleSourceWorkspace() {
   isSourceWorkspaceOpen.value = !isSourceWorkspaceOpen.value
   if (!isSourceWorkspaceOpen.value) {
     stopSourceWorkspaceResize()
+    return
   }
+
+  syncPanelWidths()
 }
 
 async function addWorkspaceSourcePaths(paths: string[]) {
@@ -1594,6 +1718,9 @@ async function addWorkspaceSourcePaths(paths: string[]) {
     const incomingDirectories = incoming.filter(source => source.type === 'directory').map(source => source.path)
     if (incomingDirectories.length) {
       expandedWorkspacePaths.value = Array.from(new Set([...expandedWorkspacePaths.value, ...incomingDirectories]))
+    }
+    if (incoming.length) {
+      saveWorkspaceSourceState()
     }
     if (result.rejected?.length) {
       const first = result.rejected[0]
@@ -1634,10 +1761,63 @@ function collectWorkspaceSourcePaths(source: WorkspaceSourceNode): string[] {
   return [source.path, ...childPaths]
 }
 
+function findWorkspaceSourceNode(path: string, sources: WorkspaceSourceNode[] = workspaceSources.value): WorkspaceSourceNode | null {
+  for (const source of sources) {
+    if (source.path === path) return source
+    const match = findWorkspaceSourceNode(path, source.children || [])
+    if (match) return match
+  }
+  return null
+}
+
+function normalizeWorkspaceSourceSelection(paths: Iterable<string>): string[] {
+  const selected = new Set(paths)
+  const available = new Set<string>()
+
+  const visit = (source: WorkspaceSourceNode): boolean => {
+    available.add(source.path)
+    const children = source.children || []
+    if (!children.length) {
+      return selected.has(source.path)
+    }
+
+    const allChildrenSelected = children.map(visit).every(Boolean)
+    if (allChildrenSelected) {
+      selected.add(source.path)
+      return true
+    }
+
+    selected.delete(source.path)
+    return false
+  }
+
+  workspaceSources.value.forEach(visit)
+  return Array.from(selected).filter(path => available.has(path))
+}
+
+function compactSelectedWorkspacePaths(): string[] {
+  const selected = new Set(selectedWorkspacePaths.value)
+  const compacted: string[] = []
+
+  const visit = (source: WorkspaceSourceNode, ancestorSelected = false) => {
+    const isSelected = selected.has(source.path)
+    if (isSelected && !ancestorSelected) {
+      compacted.push(source.path)
+    }
+    for (const child of source.children || []) {
+      visit(child, ancestorSelected || isSelected)
+    }
+  }
+
+  workspaceSources.value.forEach(source => visit(source))
+  return compacted
+}
+
 function clearWorkspaceSources() {
   workspaceSources.value = []
   selectedWorkspacePaths.value = []
   expandedWorkspacePaths.value = []
+  saveWorkspaceSourceState()
 }
 
 function openWebSourceInput() {
@@ -1671,6 +1851,7 @@ function addWebSource() {
   })
   webSourceUrl.value = ''
   showWebSourceInput.value = false
+  saveWorkspaceSourceState()
 }
 
 function normalizeWebSourceUrl(rawUrl: string): string {
@@ -1696,13 +1877,19 @@ function webSourceName(url: string): string {
 }
 
 function toggleWorkspaceSourceSelection(path: string) {
+  const source = findWorkspaceSourceNode(path)
+  const paths = source ? collectWorkspaceSourcePaths(source) : [path]
   const selected = new Set(selectedWorkspacePaths.value)
-  if (selected.has(path)) {
-    selected.delete(path)
+  const isFullySelected = paths.every(item => selected.has(item))
+
+  if (isFullySelected) {
+    paths.forEach(item => selected.delete(item))
   } else {
-    selected.add(path)
+    paths.forEach(item => selected.add(item))
   }
-  selectedWorkspacePaths.value = Array.from(selected)
+
+  selectedWorkspacePaths.value = normalizeWorkspaceSourceSelection(selected)
+  saveWorkspaceSourceState()
 }
 
 function toggleWorkspaceSourceExpanded(path: string) {
@@ -1713,6 +1900,7 @@ function toggleWorkspaceSourceExpanded(path: string) {
     expanded.add(path)
   }
   expandedWorkspacePaths.value = Array.from(expanded)
+  saveWorkspaceSourceState()
 }
 
 function removeWorkspaceSource(sourceIdOrPath: string) {
@@ -1721,6 +1909,7 @@ function removeWorkspaceSource(sourceIdOrPath: string) {
   workspaceSources.value = workspaceSources.value.filter(source => source.id !== sourceIdOrPath && source.path !== sourceIdOrPath)
   selectedWorkspacePaths.value = selectedWorkspacePaths.value.filter(path => !removedPaths.has(path))
   expandedWorkspacePaths.value = expandedWorkspacePaths.value.filter(path => !removedPaths.has(path))
+  saveWorkspaceSourceState()
 }
 
 async function openWorkspaceSourceLocation(source: WorkspaceSourceNode) {
@@ -1776,7 +1965,11 @@ async function onSourceDrop(event: DragEvent) {
     children_count: 0,
   }))
   const existing = new Set(workspaceSources.value.map(source => `${source.name}:${source.size || 0}`))
-  workspaceSources.value.push(...sources.filter(source => !existing.has(`${source.name}:${source.size || 0}`)))
+  const incoming = sources.filter(source => !existing.has(`${source.name}:${source.size || 0}`))
+  workspaceSources.value.push(...incoming)
+  if (incoming.length) {
+    saveWorkspaceSourceState()
+  }
 }
 
 async function addFiles(files: File[]) {
@@ -1858,7 +2051,7 @@ async function sendMessage() {
   const userMessage = inputMessage.value.trim()
   const attachments = [...pendingAttachments.value]
   const workspacePayload = workspaceSources.value
-  const selectedWorkspacePayload = [...selectedWorkspacePaths.value]
+  const selectedWorkspacePayload = compactSelectedWorkspacePaths()
   inputMessage.value = ''
   pendingAttachments.value = []
   
@@ -2005,7 +2198,7 @@ async function sendMessage() {
           assistantMessage.thinking.isThinking = false
         }
       }
-    }, attachments, workspacePayload, selectedWorkspacePayload)
+    }, attachments, workspacePayload, selectedWorkspacePayload, toolAccessMode.value)
 
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
       await loadRuntimeReplay()
@@ -2164,6 +2357,7 @@ function createBrowserTab(rawUrl: string = BROWSER_HOME) {
   activeBrowserTabId.value = tab.id
   browserAddress.value = url
   activeWorkspacePanel.value = 'browser'
+  syncPanelWidths()
 }
 
 function openBrowserHome() {
@@ -2179,6 +2373,7 @@ function openBrowserHome() {
 
   browserAddress.value = activeBrowserTab.value.url
   activeWorkspacePanel.value = 'browser'
+  syncPanelWidths()
 }
 
 function openBrowserTab(rawUrl: string) {
@@ -2208,6 +2403,7 @@ function navigateActiveBrowserTab(rawUrl: string, replace = false) {
 
   browserAddress.value = url
   activeWorkspacePanel.value = 'browser'
+  syncPanelWidths()
 }
 
 function goBrowserAddress() {
@@ -2221,6 +2417,7 @@ function switchBrowserTab(tabId: string) {
   activeBrowserTabId.value = tab.id
   browserAddress.value = tab.url
   activeWorkspacePanel.value = 'browser'
+  syncPanelWidths()
 }
 
 function closeBrowserTab(tabId: string) {
@@ -2355,6 +2552,8 @@ function isDesktopDropOverSourceWorkspace(position: { x?: number; y?: number } |
 onMounted(async () => {
   window.addEventListener('click', closeComposerMenu)
   window.addEventListener('keydown', handleGlobalKeydown)
+  window.addEventListener('resize', handlePanelViewportResize)
+  loadToolAccessMode()
   await listenForDesktopNavigation()
   await listenForDesktopFileDrops()
 
@@ -2362,6 +2561,7 @@ onMounted(async () => {
   await agentStore.loadModelConfigs()
   await chatStore.loadChats()
   await syncSkillsSetting()
+  await loadWorkspaceSourceState()
   
   // 灏濊瘯鎭㈠涔嬪墠閫変腑鐨勬櫤鑳戒綋
   const savedAgentId = localStorage.getItem('selected_agent_id')
@@ -2396,6 +2596,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('click', closeComposerMenu)
   window.removeEventListener('keydown', handleGlobalKeydown)
+  window.removeEventListener('resize', handlePanelViewportResize)
   unlistenDesktopFileDrops?.()
   unlistenDesktopFileDrops = null
   stopSourceWorkspaceResize()
@@ -3460,9 +3661,53 @@ onUnmounted(() => {
 
 .composer-plus svg,
 .composer-menu svg,
+.tool-access-mode svg,
 .btn-send svg {
   width: 18px;
   height: 18px;
+}
+
+.tool-access-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  max-width: 150px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--glass-bg-strong);
+  color: var(--text-secondary);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
+  transition: border-color 0.18s ease, color 0.18s ease, background 0.18s ease;
+}
+
+.tool-access-mode:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.tool-access-mode.full-access {
+  border-color: rgba(47, 110, 244, 0.42);
+  color: var(--primary-color);
+  background: rgba(47, 110, 244, 0.08);
+}
+
+.tool-access-mode select {
+  min-width: 0;
+  max-width: 108px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: currentColor;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.tool-access-mode select option {
+  color: #111827;
+  background: #ffffff;
 }
 
 .composer-menu {
@@ -3742,6 +3987,8 @@ onUnmounted(() => {
   flex: 0 0 var(--source-workspace-width, 320px);
   min-width: 320px;
   max-width: 700px;
+  height: calc(100% - 16px);
+  max-height: calc(100% - 16px);
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -3808,6 +4055,7 @@ onUnmounted(() => {
 }
 
 .source-drop-zone {
+  flex: 0 0 auto;
   margin: 14px;
   min-height: 174px;
   display: flex;
@@ -3923,16 +4171,28 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 10px;
   padding: 0 14px 14px;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .source-list-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
+}
+
+.source-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+  padding-right: 2px;
+  scrollbar-gutter: stable;
 }
 
 .source-empty {
@@ -4035,6 +4295,11 @@ onUnmounted(() => {
 .chat-body.dual-panel .private-chat-panel {
   flex: 1 1 54%;
   min-width: 420px;
+}
+
+.chat-body.source-open.dual-panel .private-chat-panel {
+  flex-basis: 0;
+  min-width: 300px;
 }
 
 .chat-body.dual-panel .chat-messages {

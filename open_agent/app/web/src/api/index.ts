@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource } from '@/types'
+import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
 const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -87,6 +87,7 @@ export async function* runAgentStream(
   userId = 'default',
   workspaceSources: WorkspaceSource[] = [],
   selectedWorkspacePaths: string[] = [],
+  toolAccessMode: 'default' | 'full' = 'default',
 ): AsyncGenerator<AgentEvent> {
   const response = await fetch(`${API_BASE}/run`, {
     method: 'POST',
@@ -98,6 +99,7 @@ export async function* runAgentStream(
       stream: true,
       workspace_sources: workspaceSources,
       selected_workspace_paths: selectedWorkspacePaths,
+      tool_access_mode: toolAccessMode,
     }),
   })
 
@@ -400,10 +402,11 @@ export async function chatWithAgent(
   attachments: ChatAttachment[] = [],
   workspaceSources: WorkspaceSource[] = [],
   selectedWorkspacePaths: string[] = [],
+  toolAccessMode: 'default' | 'full' = 'default',
 ): Promise<void> {
   const messages: Message[] = [{ role: 'user' as const, content: message, attachments }]
   
-  for await (const event of runAgentStream(agentId, messages, 'default', workspaceSources, selectedWorkspacePaths)) {
+  for await (const event of runAgentStream(agentId, messages, 'default', workspaceSources, selectedWorkspacePaths, toolAccessMode)) {
     onEvent(event)
   }
 }
@@ -437,6 +440,17 @@ export const fileApi = {
     return request<{ sources: WorkspaceSource[]; rejected: Array<{ path: string; reason: string }> }>('/workspace/local-sources', {
       method: 'POST',
       body: JSON.stringify({ paths }),
+    })
+  },
+
+  async getWorkspaceSourcesState(): Promise<WorkspaceSourceState> {
+    return request<WorkspaceSourceState>('/workspace/sources')
+  },
+
+  async saveWorkspaceSourcesState(state: WorkspaceSourceState): Promise<WorkspaceSourceState> {
+    return request<WorkspaceSourceState>('/workspace/sources', {
+      method: 'POST',
+      body: JSON.stringify(state),
     })
   }
 }
@@ -511,4 +525,6 @@ export const api = {
   uploadFile: fileApi.upload,
   createLocalAttachments: fileApi.createLocalAttachments,
   createWorkspaceSources: fileApi.createWorkspaceSources,
+  getWorkspaceSourcesState: fileApi.getWorkspaceSourcesState,
+  saveWorkspaceSourcesState: fileApi.saveWorkspaceSourcesState,
 }

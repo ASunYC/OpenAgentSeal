@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from open_agent.app.runner.models import ChatSpec, ChatHistory, AgentRequest, AgentEvent, Message
 from open_agent.app.runner.manager import get_chat_manager
 from open_agent.app.runner.runner import get_runner
 from open_agent.app.runner.file_parser import MAX_FILE_BYTES
+from open_agent.utils.path_utils import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ class RunRequest(BaseModel):
     stream: bool = True
     workspace_sources: List[dict] = []
     selected_workspace_paths: List[str] = []
+    tool_access_mode: str = "default"
 
 
 class LocalAttachmentRequest(BaseModel):
@@ -66,6 +68,12 @@ class WorkspaceSourceRequest(BaseModel):
     paths: List[str]
 
 
+class WorkspaceSourceState(BaseModel):
+    sources: List[dict] = Field(default_factory=list)
+    selected_paths: List[str] = Field(default_factory=list)
+    expanded_paths: List[str] = Field(default_factory=list)
+
+
 class PersistMessagesRequest(BaseModel):
     messages: List[dict] = []
 
@@ -74,6 +82,73 @@ def _get_control_plane():
     from open_agent.control_plane import get_control_plane
 
     return get_control_plane()
+
+
+def _workspace_state_path() -> Path:
+    return get_data_dir() / "workspace_sources.json"
+
+
+def _sanitize_workspace_state(state: WorkspaceSourceState) -> WorkspaceSourceState:
+    available_paths = {
+        str(source.get("path"))
+        for source in state.sources
+        if isinstance(source, dict) and source.get("path")
+    }
+    return WorkspaceSourceState(
+        sources=state.sources[:50],
+        selected_paths=[path for path in state.selected_paths if path in available_paths],
+        expanded_paths=state.expanded_paths[:500],
+    )
+
+
+def _refresh_workspace_source(source: dict) -> dict | None:
+    source_type = source.get("type")
+    if source_type == "web":
+        return source
+
+    raw_path = source.get("path")
+    if not raw_path:
+        return None
+
+    path = Path(str(raw_path))
+    if not path.exists():
+        return source
+
+    refreshed = _workspace_source_from_path(path)
+    if source.get("id"):
+        refreshed["id"] = source["id"]
+    return refreshed
+
+
+def _read_workspace_source_state() -> WorkspaceSourceState:
+    path = _workspace_state_path()
+    if not path.exists():
+        return WorkspaceSourceState()
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        state = WorkspaceSourceState(**raw)
+    except Exception as exc:
+        logger.error("Failed to read workspace source state from %s: %s", path, exc)
+        return WorkspaceSourceState()
+
+    refreshed_sources = []
+    for source in state.sources:
+        if not isinstance(source, dict):
+            continue
+        refreshed = _refresh_workspace_source(source)
+        if refreshed:
+            refreshed_sources.append(refreshed)
+    state.sources = refreshed_sources
+    return _sanitize_workspace_state(state)
+
+
+def _write_workspace_source_state(state: WorkspaceSourceState) -> WorkspaceSourceState:
+    state = _sanitize_workspace_state(state)
+    path = _workspace_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+    return state
 
 
 # Chat endpoints
@@ -273,6 +348,20 @@ async def create_workspace_sources(request: WorkspaceSourceRequest) -> dict:
     return {"sources": sources, "rejected": rejected}
 
 
+@router.get("/workspace/sources")
+async def get_workspace_sources() -> dict:
+    """Get persisted library source state."""
+    state = _read_workspace_source_state()
+    return state.model_dump()
+
+
+@router.post("/workspace/sources")
+async def save_workspace_sources(state: WorkspaceSourceState) -> dict:
+    """Persist library source state under the user data directory."""
+    saved = _write_workspace_source_state(state)
+    return saved.model_dump()
+
+
 def _workspace_source_from_path(path: Path) -> dict:
     is_dir = path.is_dir()
     stat = path.stat()
@@ -453,6 +542,7 @@ async def run_agent(request: RunRequest):
         meta={
             "workspace_sources": request.workspace_sources,
             "selected_workspace_paths": request.selected_workspace_paths,
+            "tool_access_mode": "full" if request.tool_access_mode == "full" else "default",
         },
     )
     

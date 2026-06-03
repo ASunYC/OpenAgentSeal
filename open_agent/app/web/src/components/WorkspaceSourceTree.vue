@@ -4,7 +4,11 @@
       v-for="source in sources"
       :key="source.path"
       class="source-tree-item"
-      :class="{ nested: level > 0, selected: selectedPathSet.has(source.path) }"
+      :class="{
+        nested: level > 0,
+        selected: selectionState(source) === 'full',
+        partial: selectionState(source) === 'partial',
+      }"
     >
       <div class="source-tree-row" @click="onRowClick(source)">
         <button
@@ -23,7 +27,9 @@
         <label class="source-check" @click.stop>
           <input
             type="checkbox"
-            :checked="selectedPathSet.has(source.path)"
+            :checked="selectionState(source) === 'full'"
+            :indeterminate="selectionState(source) === 'partial'"
+            :aria-checked="selectionState(source) === 'partial' ? 'mixed' : selectionState(source) === 'full' ? 'true' : 'false'"
             @change="$emit('toggle-select', source.path)"
           />
           <span></span>
@@ -112,6 +118,20 @@ const emit = defineEmits<{
 
 const selectedPathSet = computed(() => new Set(props.selectedPaths))
 const expandedPathSet = computed(() => new Set(props.expandedPaths))
+type SourceSelectionState = 'none' | 'partial' | 'full'
+
+function collectPaths(source: WorkspaceSourceNode): string[] {
+  const childPaths = (source.children || []).flatMap(collectPaths)
+  return [source.path, ...childPaths]
+}
+
+function selectionState(source: WorkspaceSourceNode): SourceSelectionState {
+  const paths = collectPaths(source)
+  const selectedCount = paths.filter(path => selectedPathSet.value.has(path)).length
+  if (selectedCount === 0) return 'none'
+  if (selectedCount === paths.length) return 'full'
+  return 'partial'
+}
 
 function directorySummary(source: WorkspaceSourceNode): string {
   const count = source.children_count ?? source.children?.length ?? 0
@@ -130,16 +150,19 @@ function onRowClick(source: WorkspaceSourceNode): void {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
+  overflow-anchor: none;
 }
 
 .workspace-source-tree.nested {
   gap: 6px;
-  margin: 6px 0 0 20px;
-  padding-left: 12px;
+  margin: 6px 0 0 10px;
+  padding-left: 8px;
   border-left: 1px solid var(--border-color);
 }
 
 .source-tree-item {
+  min-width: 0;
   border: 1px solid var(--border-color);
   border-radius: 14px;
   background: var(--glass-bg-strong);
@@ -156,11 +179,17 @@ function onRowClick(source: WorkspaceSourceNode): void {
   background: color-mix(in srgb, var(--glass-bg-strong) 86%, rgba(47, 110, 244, 0.1));
 }
 
+.source-tree-item.partial {
+  border-color: color-mix(in srgb, var(--primary-color) 28%, var(--border-color));
+  background: color-mix(in srgb, var(--glass-bg-strong) 92%, rgba(47, 110, 244, 0.08));
+}
+
 .source-tree-row {
   display: grid;
-  grid-template-columns: 22px 22px 34px minmax(0, 1fr) 58px;
+  grid-template-columns: 22px 22px 34px minmax(0, 1fr) auto;
   align-items: start;
   gap: 7px;
+  min-width: 0;
   min-height: 58px;
   padding: 8px;
   cursor: pointer;
@@ -209,6 +238,7 @@ function onRowClick(source: WorkspaceSourceNode): void {
 }
 
 .source-check {
+  position: relative;
   width: 22px;
   height: 22px;
   display: inline-flex;
@@ -219,8 +249,12 @@ function onRowClick(source: WorkspaceSourceNode): void {
 
 .source-check input {
   position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
   opacity: 0;
-  pointer-events: none;
+  cursor: pointer;
 }
 
 .source-check span {
@@ -237,6 +271,24 @@ function onRowClick(source: WorkspaceSourceNode): void {
   border-color: var(--primary-color);
   background: var(--primary-color);
   box-shadow: inset 0 0 0 3px var(--glass-bg-strong);
+}
+
+.source-check input:indeterminate + span {
+  position: relative;
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 18%, var(--glass-bg));
+}
+
+.source-check input:indeterminate + span::after {
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  right: 3px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--primary-color);
+  content: '';
+  transform: translateY(-50%);
 }
 
 .source-type-icon {
@@ -283,6 +335,7 @@ function onRowClick(source: WorkspaceSourceNode): void {
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
+  min-width: 56px;
 }
 
 .source-action {

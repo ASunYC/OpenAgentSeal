@@ -64,10 +64,12 @@ class Agent:
         token_limit: int = 80000,  # Summary triggered when tokens exceed this value
         interactive: bool = True,  # Whether to ask user for tool selection when multiple options exist
         status_callback: Optional[Callable] = None,  # 状态回调函数，用于实时报告状态
+        tool_access_mode: str = "default",
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
         self.tool_registry = build_tool_registry(tools)
+        self.tool_access_mode = "full" if tool_access_mode == "full" else "default"
         self.max_steps = max_steps
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
@@ -604,7 +606,8 @@ Requirements:
                     arguments.pop("_approved", None)
                     result = ToolResult(success=False, content="", error="Tool approval cannot be supplied by model-controlled arguments.")
                 else:
-                    allowed, policy_error = self.tool_registry.check_call(function_name, arguments, approved=False)
+                    tool_approved = self.tool_access_mode == "full"
+                    allowed, policy_error = self.tool_registry.check_call(function_name, arguments, approved=tool_approved)
                     if not allowed:
                         result = ToolResult(success=False, content="", error=policy_error)
                     else:
