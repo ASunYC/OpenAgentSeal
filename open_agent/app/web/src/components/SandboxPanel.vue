@@ -76,33 +76,31 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { sandboxApi, type SandboxCliStatus, type SandboxProviderStatus } from '@/api'
 import { useSettingsStore } from '@/stores/settings'
+import { useSandboxStore, type SandboxProvider, type SandboxTabState } from '@/stores/sandbox'
 
-type SandboxProvider = 'claude' | 'codex' | 'codewhale' | 'deepseek' | 'kimi' | 'opencode'
-
-interface SandboxTab {
-  localId: string
-  provider: SandboxProvider
-  sessionId: string
-  socket: WebSocket | null
+interface SandboxTerminalRuntime {
   terminal: Terminal | null
   fitAddon: FitAddon | null
-  exited: boolean
-  initializing: boolean
+  socket: WebSocket | null
+  dataDisposable: { dispose: () => void } | null
+  exitNoticeWritten: boolean
 }
 
 const settingsStore = useSettingsStore()
+const sandboxStore = useSandboxStore()
+const { tabs, activeTabId } = storeToRefs(sandboxStore)
 const statusLoading = ref(false)
 const statusError = ref('')
 const cliStatus = ref<SandboxCliStatus | null>(null)
-const tabs = reactive<SandboxTab[]>([])
-const activeTabId = ref('')
 const terminalElements = new Map<string, HTMLElement>()
+const terminalRuntimes = new Map<string, SandboxTerminalRuntime>()
 let resizeObserver: ResizeObserver | null = null
 
 const fallbackProviders: SandboxProviderStatus[] = [
@@ -155,7 +153,7 @@ function providerTooltip(provider: SandboxProviderStatus): string {
 }
 
 function isProviderRunning(provider: string): boolean {
-  return tabs.some(tab => tab.provider === provider && !tab.exited)
+  return tabs.value.some(tab => tab.provider === provider && !tab.exited)
 }
 
 function setTerminalRef(localId: string, element: unknown) {
@@ -184,25 +182,16 @@ async function loadCliStatus() {
 async function startProvider(provider: string) {
   if (!canStartProvider.value) return
   const typedProvider = provider as SandboxProvider
-  const tab: SandboxTab = {
-    localId: `sandbox_tab_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    provider: typedProvider,
-    sessionId: '',
-    socket: null,
-    terminal: null,
-    fitAddon: null,
-    exited: false,
-    initializing: true,
-  }
-  tabs.push(tab)
-  activeTabId.value = tab.localId
+  const tab = sandboxStore.addTab(typedProvider)
   await nextTick()
-  await initializeTerminal(tab)
+  await attachTerminal(tab)
+  await startSession(tab)
 }
 
-async function initializeTerminal(tab: SandboxTab) {
+async function attachTerminal(tab: SandboxTabState) {
   const element = terminalElements.get(tab.localId)
   if (!element) return
+  if (terminalRuntimes.get(tab.localId)?.terminal) return
 
   const terminal = new Terminal({
     cursorBlink: true,
@@ -219,53 +208,81 @@ async function initializeTerminal(tab: SandboxTab) {
   const fitAddon = new FitAddon()
   terminal.loadAddon(fitAddon)
   terminal.open(element)
+
+  const runtime: SandboxTerminalRuntime = {
+    terminal,
+    fitAddon,
+    socket: null,
+    dataDisposable: null,
+    exitNoticeWritten: false,
+  }
+  terminalRuntimes.set(tab.localId, runtime)
+  runtime.dataDisposable = terminal.onData(data => {
+    if (runtime.socket?.readyState === WebSocket.OPEN) {
+      runtime.socket.send(JSON.stringify({ type: 'input', data }))
+    }
+  })
   fitTerminal(tab, fitAddon)
-  terminal.writeln(`OpenAgentSeal sandbox: agent-switch ${tab.provider}`)
-  terminal.writeln('')
 
-  tab.terminal = terminal
-  tab.fitAddon = fitAddon
-
-  try {
-    const session = await sandboxApi.createSession(tab.provider, terminal.cols || 100, terminal.rows || 30)
-    tab.sessionId = session.session_id
-    terminal.writeln(`cwd: ${session.cwd}`)
-    terminal.writeln(`command: ${session.command}`)
-    terminal.writeln('')
+  if (tab.sessionId) {
     connectSession(tab)
-  } catch (error) {
-    tab.exited = true
-    terminal.writeln(`\x1b[31m${error instanceof Error ? error.message : String(error)}\x1b[0m`)
-  } finally {
-    tab.initializing = false
+  } else if (tab.initializing) {
+    terminal.writeln(`OpenAgentSeal sandbox: agent-switch ${tab.provider}`)
+    terminal.writeln('')
   }
 }
 
-function connectSession(tab: SandboxTab) {
-  if (!tab.sessionId || !tab.terminal) return
-  const socket = new WebSocket(sandboxApi.sessionWebSocketUrl(tab.sessionId))
-  tab.socket = socket
-
-  tab.terminal.onData(data => {
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'input', data }))
+async function startSession(tab: SandboxTabState) {
+  const runtime = terminalRuntimes.get(tab.localId)
+  const terminal = runtime?.terminal
+  if (!terminal) {
+    sandboxStore.updateTab(tab.localId, { exited: true, initializing: false })
+    return
+  }
+  try {
+    const session = await sandboxApi.createSession(tab.provider, terminal.cols || 100, terminal.rows || 30)
+    sandboxStore.updateTab(tab.localId, { sessionId: session.session_id })
+    if (terminalRuntimes.get(tab.localId)?.terminal === terminal) {
+      terminal.writeln(`cwd: ${session.cwd}`)
+      terminal.writeln(`command: ${session.command}`)
+      terminal.writeln('')
+      connectSession({ ...tab, sessionId: session.session_id })
     }
-  })
+  } catch (error) {
+    sandboxStore.updateTab(tab.localId, { exited: true })
+    if (terminalRuntimes.get(tab.localId)?.terminal === terminal) {
+      terminal.writeln(`\x1b[31m${error instanceof Error ? error.message : String(error)}\x1b[0m`)
+    }
+  } finally {
+    sandboxStore.updateTab(tab.localId, { initializing: false })
+  }
+}
+
+function connectSession(tab: SandboxTabState) {
+  const runtime = terminalRuntimes.get(tab.localId)
+  if (!tab.sessionId || !runtime?.terminal) return
+  if (runtime.socket && runtime.socket.readyState !== WebSocket.CLOSED) return
+
+  const socket = new WebSocket(sandboxApi.sessionWebSocketUrl(tab.sessionId))
+  runtime.socket = socket
 
   socket.addEventListener('open', () => {
     sendResize(tab)
   })
   socket.addEventListener('message', event => {
-    const terminal = tab.terminal
+    const terminal = runtime.terminal
     if (!terminal) return
     try {
       const message = JSON.parse(String(event.data))
       if (message.type === 'output') {
         terminal.write(String(message.data || ''))
       } else if (message.type === 'exit') {
-        tab.exited = true
-        terminal.writeln('')
-        terminal.writeln('\x1b[90m[process exited]\x1b[0m')
+        sandboxStore.updateTab(tab.localId, { exited: true, initializing: false })
+        if (!runtime.exitNoticeWritten) {
+          runtime.exitNoticeWritten = true
+          terminal.writeln('')
+          terminal.writeln('\x1b[90m[process exited]\x1b[0m')
+        }
       } else if (message.type === 'error') {
         terminal.writeln(`\x1b[31m${message.message || 'Sandbox error'}\x1b[0m`)
       }
@@ -274,15 +291,18 @@ function connectSession(tab: SandboxTab) {
     }
   })
   socket.addEventListener('close', () => {
-    tab.exited = true
+    if (runtime.socket === socket) {
+      runtime.socket = null
+    }
   })
   socket.addEventListener('error', () => {
-    tab.terminal?.writeln('\x1b[31m[websocket error]\x1b[0m')
+    runtime.terminal?.writeln('\x1b[31m[websocket error]\x1b[0m')
   })
 }
 
-function fitTerminal(tab: SandboxTab, addon = tab.fitAddon) {
-  if (!addon || !tab.terminal) return
+function fitTerminal(tab: SandboxTabState, addon = terminalRuntimes.get(tab.localId)?.fitAddon) {
+  const runtime = terminalRuntimes.get(tab.localId)
+  if (!addon || !runtime?.terminal) return
   try {
     addon.fit()
     sendResize(tab)
@@ -291,48 +311,49 @@ function fitTerminal(tab: SandboxTab, addon = tab.fitAddon) {
   }
 }
 
-function sendResize(tab: SandboxTab) {
-  if (!tab.terminal || !tab.socket || tab.socket.readyState !== WebSocket.OPEN) return
-  tab.socket.send(JSON.stringify({
+function sendResize(tab: SandboxTabState) {
+  const runtime = terminalRuntimes.get(tab.localId)
+  if (!runtime?.terminal || !runtime.socket || runtime.socket.readyState !== WebSocket.OPEN) return
+  runtime.socket.send(JSON.stringify({
     type: 'resize',
-    rows: tab.terminal.rows,
-    cols: tab.terminal.cols,
+    rows: runtime.terminal.rows,
+    cols: runtime.terminal.cols,
   }))
 }
 
 async function activateTab(localId: string) {
-  activeTabId.value = localId
+  sandboxStore.activateTab(localId)
   await nextTick()
-  const tab = tabs.find(item => item.localId === localId)
+  const tab = tabs.value.find(item => item.localId === localId)
   if (tab) fitTerminal(tab)
 }
 
 async function closeTab(localId: string) {
-  const index = tabs.findIndex(tab => tab.localId === localId)
+  const index = tabs.value.findIndex(tab => tab.localId === localId)
   if (index === -1) return
-  const tab = tabs[index]
+  const tab = tabs.value[index]
+  const runtime = terminalRuntimes.get(tab.localId)
   try {
-    tab.socket?.send(JSON.stringify({ type: 'terminate' }))
+    runtime?.socket?.send(JSON.stringify({ type: 'terminate' }))
   } catch {
     // Ignore websocket close races.
   }
-  tab.socket?.close()
+  runtime?.socket?.close()
   if (tab.sessionId) {
     await sandboxApi.deleteSession(tab.sessionId).catch(() => undefined)
   }
-  tab.terminal?.dispose()
-  tabs.splice(index, 1)
+  runtime?.dataDisposable?.dispose()
+  runtime?.terminal?.dispose()
+  terminalRuntimes.delete(tab.localId)
+  sandboxStore.removeTab(localId)
   terminalElements.delete(localId)
-  if (activeTabId.value === localId) {
-    activeTabId.value = tabs[Math.min(index, tabs.length - 1)]?.localId || ''
-    await nextTick()
-    const active = tabs.find(item => item.localId === activeTabId.value)
-    if (active) fitTerminal(active)
-  }
+  await nextTick()
+  const active = tabs.value.find(item => item.localId === activeTabId.value)
+  if (active) fitTerminal(active)
 }
 
 function refitActiveTerminal() {
-  const active = tabs.find(tab => tab.localId === activeTabId.value)
+  const active = tabs.value.find(tab => tab.localId === activeTabId.value)
   if (active) fitTerminal(active)
 }
 
@@ -343,6 +364,9 @@ onMounted(() => {
     for (const element of terminalElements.values()) {
       resizeObserver?.observe(element)
     }
+    for (const tab of tabs.value) {
+      void attachTerminal(tab)
+    }
   })
   window.addEventListener('resize', refitActiveTerminal)
 })
@@ -350,9 +374,13 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('resize', refitActiveTerminal)
   resizeObserver?.disconnect()
-  for (const tab of [...tabs]) {
-    void closeTab(tab.localId)
+  for (const [localId, runtime] of terminalRuntimes) {
+    runtime.socket?.close()
+    runtime.dataDisposable?.dispose()
+    runtime.terminal?.dispose()
+    terminalRuntimes.delete(localId)
   }
+  terminalElements.clear()
 })
 </script>
 

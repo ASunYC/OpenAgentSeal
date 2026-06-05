@@ -109,7 +109,7 @@
         :class="{
           'dual-panel': isWorkspaceOpen,
           'source-open': isSourceWorkspaceOpen,
-          'browser-fullscreen': isBrowserPanelFullscreen,
+          'workspace-fullscreen': isWorkspacePanelFullscreen,
         }"
         :style="workspaceLayoutStyle"
       >
@@ -428,7 +428,7 @@
         </div>
 
         <button
-          v-if="isWorkspaceOpen && !isBrowserPanelFullscreen"
+          v-if="isWorkspaceOpen && !isWorkspacePanelFullscreen"
           class="workspace-resizer"
           :class="{ active: isResizingWorkspace }"
           type="button"
@@ -440,7 +440,7 @@
           <span></span>
         </button>
 
-        <aside v-if="isWorkspaceOpen" class="workspace-panel" :class="{ 'browser-fullscreen-panel': isBrowserPanelFullscreen }">
+        <aside v-if="isWorkspaceOpen" class="workspace-panel" :class="{ 'workspace-fullscreen-panel': isWorkspacePanelFullscreen }">
           <header class="workspace-panel-header">
             <div class="workspace-panel-title">
               <svg v-if="activeWorkspacePanel === 'browser'" class="workspace-panel-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -464,12 +464,12 @@
             </div>
             <div class="workspace-panel-actions">
               <button
-                v-if="activeWorkspacePanel === 'browser'"
+                v-if="activeWorkspacePanel === 'browser' || activeWorkspacePanel === 'sandbox'"
                 class="workspace-header-button"
-                @click="toggleBrowserFullscreen"
-                :title="isBrowserPanelFullscreen ? t('退出全屏', 'Exit fullscreen') : t('全屏浏览器', 'Fullscreen browser')"
+                @click="toggleWorkspaceFullscreen"
+                :title="isWorkspacePanelFullscreen ? t('退出全屏', 'Exit fullscreen') : t('最大化面板', 'Maximize panel')"
               >
-                <svg v-if="!isBrowserPanelFullscreen" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg v-if="!isWorkspacePanelFullscreen" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M8 3H5a2 2 0 0 0-2 2v3"/>
                   <path d="M16 3h3a2 2 0 0 1 2 2v3"/>
                   <path d="M21 16v3a2 2 0 0 1-2 2h-3"/>
@@ -968,8 +968,10 @@ type ToolAccessMode = 'default' | 'full'
 const activeWorkspacePanel = ref<WorkspacePanel>('')
 const runtimePanelTab = ref<RuntimePanelTab>('chats')
 const isWorkspaceOpen = computed(() => activeWorkspacePanel.value !== '')
-const isBrowserFullscreen = ref(false)
-const isBrowserPanelFullscreen = computed(() => activeWorkspacePanel.value === 'browser' && isBrowserFullscreen.value)
+const fullscreenWorkspacePanel = ref<'' | 'browser' | 'sandbox'>('')
+const isWorkspacePanelFullscreen = computed(() => {
+  return activeWorkspacePanel.value !== '' && activeWorkspacePanel.value === fullscreenWorkspacePanel.value
+})
 const showClearChatConfirm = ref(false)
 const isClearingChat = ref(false)
 const showClearAllChatsConfirm = ref(false)
@@ -1494,7 +1496,7 @@ async function openRuntimePanel() {
     return
   }
 
-  isBrowserFullscreen.value = false
+  fullscreenWorkspacePanel.value = ''
   activeWorkspacePanel.value = 'runtime'
   syncPanelWidths()
   runtimePanelTab.value = 'chats'
@@ -1507,7 +1509,7 @@ function openSandboxPanel() {
     return
   }
 
-  isBrowserFullscreen.value = false
+  fullscreenWorkspacePanel.value = ''
   activeWorkspacePanel.value = 'sandbox'
   syncPanelWidths()
 }
@@ -2809,7 +2811,7 @@ function closeBrowserTab(tabId: string) {
     activeBrowserTabId.value = nextTab?.id || ''
     browserAddress.value = nextTab?.url || ''
     if (!nextTab) {
-      isBrowserFullscreen.value = false
+      fullscreenWorkspacePanel.value = ''
       activeWorkspacePanel.value = ''
     }
   }
@@ -2817,16 +2819,16 @@ function closeBrowserTab(tabId: string) {
 
 function closeWorkspacePanel() {
   stopWorkspaceResize()
-  isBrowserFullscreen.value = false
+  fullscreenWorkspacePanel.value = ''
   activeWorkspacePanel.value = ''
 }
 
-function toggleBrowserFullscreen(): void {
-  if (activeWorkspacePanel.value !== 'browser') return
+function toggleWorkspaceFullscreen(): void {
+  if (activeWorkspacePanel.value !== 'browser' && activeWorkspacePanel.value !== 'sandbox') return
 
   stopSourceWorkspaceResize()
   stopWorkspaceResize()
-  isBrowserFullscreen.value = !isBrowserFullscreen.value
+  fullscreenWorkspacePanel.value = isWorkspacePanelFullscreen.value ? '' : activeWorkspacePanel.value
 }
 
 function browserBack() {
@@ -5092,20 +5094,20 @@ onUnmounted(() => {
   -webkit-backdrop-filter: blur(18px) saturate(160%);
 }
 
-.chat-body.browser-fullscreen {
+.chat-body.workspace-fullscreen {
   position: relative;
   flex-direction: column;
   align-items: stretch;
 }
 
-.chat-body.browser-fullscreen .source-workspace-panel,
-.chat-body.browser-fullscreen .source-resizer,
-.chat-body.browser-fullscreen .private-chat-panel,
-.chat-body.browser-fullscreen .workspace-resizer {
+.chat-body.workspace-fullscreen .source-workspace-panel,
+.chat-body.workspace-fullscreen .source-resizer,
+.chat-body.workspace-fullscreen .private-chat-panel,
+.chat-body.workspace-fullscreen .workspace-resizer {
   display: none;
 }
 
-.chat-body.browser-fullscreen .workspace-panel.browser-fullscreen-panel {
+.chat-body.workspace-fullscreen .workspace-panel.workspace-fullscreen-panel {
   flex: 1 1 auto;
   width: auto;
   min-width: 0;
@@ -5118,11 +5120,11 @@ onUnmounted(() => {
   background: var(--glass-bg-strong);
 }
 
-.chat-body.browser-fullscreen .workspace-panel-header {
+.chat-body.workspace-fullscreen .workspace-panel-header {
   padding: 12px 16px;
 }
 
-.chat-body.browser-fullscreen .browser-frame-area {
+.chat-body.workspace-fullscreen .browser-frame-area {
   margin: 10px;
   border-radius: 14px;
 }
