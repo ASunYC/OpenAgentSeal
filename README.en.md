@@ -60,21 +60,30 @@
 - ✅ **Memory System** - Tree-structured memory with SQLite backend and temporal graph RAG
 - ✅ **Task Queue** - Priority scheduling and concurrency control
 - ✅ **Logging System** - Tiered logging with automatic rotation
+- ✅ **Plugin System** - Plugin discovery, registration, lifecycle management, UI search/install/uninstall
+- ✅ **Sandbox Execution** - Isolated secure code execution environment
+- ✅ **Local Control Plane** - SQLite persistence (sessions, messages, goals, tool_calls, approvals, scheduler_jobs)
+- ✅ **Knowledge Graph** - Memory Tree + provenance tracking + Markdown vault export
+- ✅ **Tool Access Control** - Toggle between default approval and full access modes
+- ✅ **Agent Profiles** - Role-based agents with delegation, permissions, profile-specific skills/MCP
 
 ### Advanced Features
 
 - ✅ **MCP Protocol** - Support for Model Context Protocol tools
 - ✅ **ACP Protocol** - Agent Communication Protocol for external integration
 - ✅ **System Tray** - Background running with tray minimization
-- ✅ **Tauri Desktop Shell** - Native window, tray menu, backend lifecycle management, and Windows packaging
+- ✅ **Tauri Desktop Shell** - Native window, tray menu, backend lifecycle management, Windows packaging, splash screen animation
 
 ### Web UI (Vue3)
 
 - ✅ **Streaming Chat** - Real-time AI response display
 - ✅ **Model Switching** - Support for multiple model configurations
 - ✅ **Thinking Process** - Display CoT reasoning steps
-- ✅ **Settings Panel** - User/Model/Agent/MCP/Skill/Workspace configuration
+- ✅ **Settings Panel** - User/Model/Agent/MCP/Skill/Workspace/Plugin configuration
 - ✅ **Overview Canvas** - Agent status visualization
+- ✅ **Knowledge Base** - Markdown + wiki-links + knowledge graph preview
+- ✅ **Splash Screen** - Transparent centered welcome animation on startup
+- ✅ **Port 10086** - Fixed web port to avoid conflicts with common ports
 
 ---
 
@@ -133,13 +142,13 @@ open-agent --task "Create a Python script"
 open-agent --cli-only
 
 # Web UI only mode
-open-agent --web-only --port 9998
+open-agent --web-only --port 10086
 
 # ACP service mode
 open-agent-acp --port 8080
 ```
 
-Visit Web UI at: http://127.0.0.1:9998
+Visit Web UI at: http://127.0.0.1:10086
 
 ### 4. Desktop Shell
 

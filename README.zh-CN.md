@@ -41,21 +41,33 @@ TypeScript/Node.js 版本请查看：[OpenAgentSeal-JS](https://github.com/ASunY
 - **工具系统**：包含文件操作、命令执行、笔记、MCP 工具和 Skills 工具。
 - **记忆系统**：基于 SQLite 的树状记忆和检索能力。
 - **任务队列**：支持任务调度、后台执行和并发控制。
+- **插件系统**：支持插件发现、注册、生命周期管理、UI 搜索/安装/卸载。
+- **沙箱执行**：安全代码执行隔离环境。
+- **本地控制平面**：SQLite 持久化（sessions, messages, goals, tool_calls, approvals, scheduler_jobs）。
+- **知识图谱**：Memory Tree + 来源溯源 + Markdown vault 导出。
+- **工具访问控制**：支持默认权限（需审批）和完全访问权限切换。
 
 ### 应用形态
 
 - **CLI 模式**：适合开发者在终端中直接使用 Agent。
 - **Web UI 模式**：通过浏览器访问本地 FastAPI + Vue 应用。
-- **桌面模式**：通过 Tauri 轻量壳运行，支持窗口和系统托盘。
+- **桌面模式**：通过 Tauri 轻量壳运行，支持窗口和系统托盘，内置透明欢迎页（Splash Window）。
 - **ACP 服务模式**：作为 Agent Communication Protocol 服务集成到外部系统。
 
 ### Web UI
 
 - 实时聊天和流式输出
 - 模型配置和切换
-- Agent 配置管理
-- MCP、Skills、Workspace 设置
+- Agent 配置管理（角色智能体、委托能力、权限、角色专属技能/MCP）
+- MCP、Skills、Workspace、Plugins 设置
+- 知识库组件（Markdown + 双向链接 + 知识图谱预览）
 - 历史会话和运行状态查看
+- 欢迎界面（透明居中动画）
+
+### 桌面应用
+
+- **启动欢迎页**：启动时显示透明居中欢迎界面。
+- **Web 端口**：固定 `10086`，避免与常用端口冲突。
 
 ---
 
