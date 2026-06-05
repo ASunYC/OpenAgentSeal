@@ -6,6 +6,15 @@
       <span class="count-pill">{{ t('插件', 'Plugins') }} {{ pluginCount }}</span>
     </div>
 
+    <div class="settings-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/>
+        <path d="m21 21-4.3-4.3"/>
+      </svg>
+      <input v-model="searchQuery" type="search" :placeholder="t('搜索插件名称、市场、描述或状态', 'Search plugins by name, marketplace, description, or status')" />
+      <button v-if="searchQuery" type="button" @click="searchQuery = ''">{{ t('清除', 'Clear') }}</button>
+    </div>
+
     <section class="marketplace-bar">
       <div class="marketplace-input">
         <input v-model="marketplaceSource" type="text" :placeholder="t('本地路径、Git URL 或 owner/repo', 'Local path, Git URL, or owner/repo')" @keydown.enter="addMarketplace" />
@@ -25,8 +34,12 @@
       <span>{{ t('还没有插件市场。添加本地市场路径或 Git 地址后即可安装插件。', 'No marketplaces yet. Add a local marketplace path or Git URL to install plugins.') }}</span>
     </div>
 
+    <div v-else-if="filteredMarketplaces.length === 0" class="empty-state">
+      <span>{{ t('没有匹配的插件', 'No matching plugins') }}</span>
+    </div>
+
     <div v-else class="marketplace-list">
-      <section v-for="marketplace in marketplaces" :key="marketplace.name" class="marketplace-card">
+      <section v-for="marketplace in filteredMarketplaces" :key="marketplace.name" class="marketplace-card">
         <header class="marketplace-header">
           <div>
             <h4>{{ marketplace.interface?.displayName || marketplace.interface?.display_name || marketplace.name }}</h4>
@@ -121,8 +134,22 @@ const addingMarketplace = ref(false)
 const upgrading = ref(false)
 const busyPlugin = ref<string | null>(null)
 const error = ref<string | null>(null)
+const searchQuery = ref('')
 
 const pluginCount = computed(() => marketplaces.value.reduce((count, marketplace) => count + marketplace.plugins.length, 0))
+const filteredMarketplaces = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return marketplaces.value
+  return marketplaces.value
+    .map((marketplace) => {
+      const marketplaceName = marketplace.interface?.displayName || marketplace.interface?.display_name || marketplace.name
+      const marketplaceHaystack = [marketplace.name, marketplaceName, marketplace.path].filter(Boolean).join(' ').toLowerCase()
+      if (marketplaceHaystack.includes(query)) return marketplace
+      const plugins = marketplace.plugins.filter((plugin) => pluginMatchesQuery(plugin, query))
+      return { ...marketplace, plugins }
+    })
+    .filter((marketplace) => marketplace.plugins.length > 0)
+})
 
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
@@ -130,6 +157,33 @@ function t(zh: string, en: string): string {
 
 function displayName(plugin: PluginSummary) {
   return plugin.interface?.displayName || plugin.interface?.display_name || plugin.name
+}
+
+function pluginMatchesQuery(plugin: PluginSummary, query: string) {
+  return [
+    plugin.id,
+    plugin.name,
+    plugin.marketplace_name,
+    displayName(plugin),
+    plugin.local_version,
+    plugin.install_policy,
+    plugin.auth_policy,
+    plugin.interface?.shortDescription,
+    plugin.interface?.short_description,
+    plugin.interface?.longDescription,
+    plugin.interface?.long_description,
+    plugin.interface?.developerName,
+    plugin.interface?.developer_name,
+    plugin.interface?.category,
+    ...(plugin.interface?.capabilities || []),
+    ...(plugin.keywords || []),
+    plugin.installed ? 'installed 已安装' : 'not installed 未安装',
+    plugin.enabled ? 'enabled 已启用' : 'disabled 已禁用',
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(query)
 }
 
 function countUnknown(value: unknown) {
@@ -300,6 +354,42 @@ onMounted(() => {
   color: var(--text-secondary);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.settings-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--main-bg);
+}
+
+.settings-search svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.settings-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.settings-search button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 12px;
 }
 
 .marketplace-bar,

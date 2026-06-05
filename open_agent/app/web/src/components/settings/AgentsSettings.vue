@@ -5,10 +5,19 @@
       <p>{{ t('管理您的 AI 智能体', 'Manage your AI agents') }}</p>
     </div>
     
+    <div class="settings-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/>
+        <path d="m21 21-4.3-4.3"/>
+      </svg>
+      <input v-model="searchQuery" type="search" :placeholder="t('搜索智能体名称、描述或模型', 'Search agents by name, description, or model')" />
+      <button v-if="searchQuery" type="button" @click="searchQuery = ''">{{ t('清除', 'Clear') }}</button>
+    </div>
+
     <div class="agents-list">
       <div 
         class="agent-card" 
-        v-for="agent in agentStore.agents" 
+        v-for="agent in filteredAgents" 
         :key="agent.id"
       >
         <div class="agent-avatar seal-avatar" :style="{ background: getAgentColor(agent.id) }" :aria-label="agent.name">
@@ -49,6 +58,10 @@
         </div>
       </div>
       
+      <div v-if="filteredAgents.length === 0" class="empty-state">
+        {{ t('没有匹配的智能体', 'No matching agents') }}
+      </div>
+
       <div class="add-agent" @click="createAgent">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="12" y1="5" x2="12" y2="19"/>
@@ -187,6 +200,7 @@ import type { AgentConfig } from '@/types'
 
 const settingsStore = useSettingsStore()
 const agentStore = useAgentStore()
+const searchQuery = ref('')
 
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
@@ -227,6 +241,30 @@ const newSkill = ref({
 function isMainAgent(agent: AgentConfig): boolean {
   return agent.id === 'main'
 }
+
+const filteredAgents = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return agentStore.agents
+  return agentStore.agents.filter((agent) => {
+    const modelName = getModelName(agent.model_id)
+    const role = isMainAgent(agent) ? 'main 主智能体' : 'profile 角色智能体'
+    const status = agent.enabled === false ? 'disabled 已停用' : 'enabled 已启用'
+    return [
+      agent.id,
+      agent.name,
+      agent.description,
+      agent.system_prompt,
+      agent.model_id,
+      modelName,
+      role,
+      status,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+      .includes(query)
+  })
+})
 
 // 获取智能体颜色
 function getAgentColor(agentId: string): string {
@@ -414,6 +452,42 @@ onMounted(async () => {
   font-size: 13px;
   color: var(--text-muted);
   margin: 0;
+}
+
+.settings-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--main-bg);
+}
+
+.settings-search svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.settings-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.settings-search button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 12px;
 }
 
 .agents-list {
@@ -630,6 +704,16 @@ onMounted(async () => {
 
 .add-agent span {
   font-size: 14px;
+}
+
+.empty-state {
+  padding: 18px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--main-bg);
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 13px;
 }
 
 /* 对话框样式 */

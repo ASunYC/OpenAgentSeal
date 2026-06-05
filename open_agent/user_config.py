@@ -256,6 +256,20 @@ class UserConfigManager:
             "audio_model_id": "",
             "fallback_model_id": ""
         },
+        "web_search": {
+            "enabled": True,
+            "search_backend": "auto",
+            "extract_backend": "auto",
+            "searxng_url": "",
+            "api_keys": {
+                "serper": "",
+                "brave": "",
+                "tavily": "",
+                "jina": "",
+                "exa": "",
+                "firecrawl": ""
+            }
+        },
         "default_model_id": None,
         "default_agent_id": None
     }
@@ -605,6 +619,56 @@ class UserConfigManager:
         self._save_config()
 
     # ==================== 智能路由配置 ====================
+
+    def get_web_search_config(self, include_secrets: bool = False) -> Dict[str, Any]:
+        """Get web search configuration with defaults."""
+        defaults = copy.deepcopy(self.DEFAULT_CONFIG["web_search"])
+        data = self._config.get("web_search", {})
+        if isinstance(data, dict):
+            for key in ("enabled", "search_backend", "extract_backend", "searxng_url"):
+                if key in data:
+                    defaults[key] = data.get(key)
+            if isinstance(data.get("api_keys"), dict):
+                defaults["api_keys"].update(data.get("api_keys") or {})
+
+        defaults["enabled"] = bool(defaults.get("enabled", True))
+        defaults["search_backend"] = str(defaults.get("search_backend") or "auto")
+        defaults["extract_backend"] = str(defaults.get("extract_backend") or "auto")
+        defaults["searxng_url"] = str(defaults.get("searxng_url") or "")
+
+        if not include_secrets:
+            defaults["api_keys"] = {
+                name: ("***" if value else "")
+                for name, value in defaults.get("api_keys", {}).items()
+            }
+        return defaults
+
+    def update_web_search_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist web search configuration."""
+        current = self.get_web_search_config(include_secrets=True)
+        if not isinstance(config, dict):
+            config = {}
+
+        if "enabled" in config:
+            current["enabled"] = bool(config.get("enabled"))
+        for key in ("search_backend", "extract_backend", "searxng_url"):
+            if key in config:
+                current[key] = str(config.get(key) or "")
+
+        incoming_keys = config.get("api_keys")
+        if isinstance(incoming_keys, dict):
+            api_keys = current.setdefault("api_keys", {})
+            for name in self.DEFAULT_CONFIG["web_search"]["api_keys"]:
+                if name not in incoming_keys:
+                    continue
+                value = str(incoming_keys.get(name) or "")
+                if value == "***":
+                    continue
+                api_keys[name] = value
+
+        self._config["web_search"] = current
+        self._save_config()
+        return self.get_web_search_config(include_secrets=False)
 
     def get_smart_routing(self) -> Dict[str, Any]:
         """Get smart routing configuration with defaults filled in."""

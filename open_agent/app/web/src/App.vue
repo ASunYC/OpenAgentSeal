@@ -82,6 +82,18 @@
               <path d="M10 14a5 5 0 0 0 5 5h3.2L21 21.5V19a5 5 0 0 0-3-9h-3a5 5 0 0 0-5 5Z"/>
             </svg>
           </button>
+          <button
+            class="btn-settings"
+            :class="{ active: activeWorkspacePanel === 'sandbox' }"
+            @click="openSandboxPanel"
+            :title="t('沙盒', 'Sandbox')"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 17 10 11 4 5"/>
+              <path d="M12 19h8"/>
+              <path d="M20 5H12"/>
+            </svg>
+          </button>
           <button class="btn-settings" @click="openSettings" :title="t('设置', 'Settings')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"/>
@@ -440,6 +452,11 @@
                 <path d="M8 15.5 4 19v-4.4A6.6 6.6 0 0 1 10.6 4H13a6.6 6.6 0 0 1 6.4 5"/>
                 <path d="M10 14a5 5 0 0 0 5 5h3.2L21 21.5V19a5 5 0 0 0-3-9h-3a5 5 0 0 0-5 5Z"/>
               </svg>
+              <svg v-if="activeWorkspacePanel === 'sandbox'" class="workspace-panel-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 17 10 11 4 5"/>
+                <path d="M12 19h8"/>
+                <path d="M20 5H12"/>
+              </svg>
               <div class="workspace-panel-copy">
                 <h3>{{ workspacePanelTitle }}</h3>
                 <p>{{ workspacePanelSubtitle }}</p>
@@ -671,6 +688,8 @@
               </div>
             </template>
           </section>
+
+          <SandboxPanel v-if="activeWorkspacePanel === 'sandbox'" />
         </aside>
       </div>
       
@@ -930,6 +949,7 @@ import { api } from '@/api'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
+import SandboxPanel from '@/components/SandboxPanel.vue'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
@@ -941,7 +961,7 @@ const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
 
 // 褰撳墠瑙嗗浘
-type WorkspacePanel = '' | 'browser' | 'runtime'
+type WorkspacePanel = '' | 'browser' | 'runtime' | 'sandbox'
 type RuntimePanelTab = 'chats' | 'runtime'
 type ToolAccessMode = 'default' | 'full'
 
@@ -1045,12 +1065,14 @@ function resetSourceWorkspaceWidth(): void {
 const workspacePanelTitle = computed(() => {
   if (activeWorkspacePanel.value === 'browser') return t('浏览器', 'Browser')
   if (activeWorkspacePanel.value === 'runtime') return t('对话与运行', 'Chats & runtime')
+  if (activeWorkspacePanel.value === 'sandbox') return t('沙盒', 'Sandbox')
   return t('工作区', 'Workspace')
 })
 
 const workspacePanelSubtitle = computed(() => {
   if (activeWorkspacePanel.value === 'browser') return t('网页浏览与检索辅助', 'Web browsing and research')
   if (activeWorkspacePanel.value === 'runtime') return t('对话管理与运行事件', 'Chat management and runtime events')
+  if (activeWorkspacePanel.value === 'sandbox') return t('使用 agent-switch 启动 CLI 终端', 'Launch CLI terminals through agent-switch')
   return t('当前工作区', 'Current workspace')
 })
 
@@ -1477,6 +1499,17 @@ async function openRuntimePanel() {
   syncPanelWidths()
   runtimePanelTab.value = 'chats'
   await chatStore.loadChats()
+}
+
+function openSandboxPanel() {
+  if (activeWorkspacePanel.value === 'sandbox') {
+    closeWorkspacePanel()
+    return
+  }
+
+  isBrowserFullscreen.value = false
+  activeWorkspacePanel.value = 'sandbox'
+  syncPanelWidths()
 }
 
 async function switchRuntimePanelTab(tab: RuntimePanelTab) {

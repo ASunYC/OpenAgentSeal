@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import AsyncGenerator, Optional, Callable, Any, Dict, List
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 WORKSPACE_MAX_SELECTED_FILES = 20
 WORKSPACE_MAX_CONTEXT_CHARS = 60000
 AGENT_HISTORY_MAX_MESSAGES = 80
+WEB_SEARCH_CONTEXT_MAX_CHARS = 12000
+WEB_SEARCH_QUERY_MAX_CHARS = 500
 
 
 class AgentRunner:
@@ -383,6 +386,118 @@ class AgentRunner:
             return bool(content.strip())
         return bool(content)
 
+    def _looks_like_web_search_request(self, text: str) -> bool:
+        normalized = (text or "").strip().lower()
+        if not normalized:
+            return False
+
+        search_terms = (
+            "联网",
+            "搜索",
+            "网上",
+            "查一下",
+            "查下",
+            "帮我找",
+            "找到",
+            "原地址",
+            "原文",
+            "原链接",
+            "链接",
+            "网址",
+            "来源",
+            "出处",
+            "报道",
+            "新闻",
+            "最新",
+            "site:",
+            "http://",
+            "https://",
+        )
+        return any(term in normalized for term in search_terms)
+
+    def _build_web_search_query(self, text: str) -> str:
+        query = re.sub(r"\s+", " ", (text or "").strip())
+        if len(query) <= WEB_SEARCH_QUERY_MAX_CHARS:
+            return query
+
+        title_match = re.match(r"^([^，。！？!?]{8,120})", query)
+        if title_match:
+            return title_match.group(1).strip()
+        return query[:WEB_SEARCH_QUERY_MAX_CHARS].strip()
+
+    async def _prefetch_web_search_context(self, text: str) -> str:
+        if not self._looks_like_web_search_request(text):
+            return ""
+
+        query = self._build_web_search_query(text)
+        if not query:
+            return ""
+
+        try:
+            from open_agent.tools.web_search import web_search
+
+            loop = asyncio.get_event_loop()
+            results, backend = await loop.run_in_executor(
+                None,
+                lambda: web_search(query, 8),
+            )
+        except Exception as exc:
+            logger.warning("Web search prefetch failed: %s", exc)
+            return (
+                "\n\n[联网搜索预取失败]\n"
+                f"搜索词：{query}\n"
+                f"错误：{exc}\n"
+                "请优先尝试继续调用 web_search 或 web_browse 工具完成用户的联网查询。"
+            )
+
+        if not results:
+            return (
+                "\n\n[联网搜索预取结果]\n"
+                f"搜索词：{query}\n"
+                f"后端：{backend}\n"
+                "未找到候选结果。请尝试继续调用 web_search 更换关键词，或明确说明未检索到可靠来源。"
+            )
+
+        lines = [
+            "\n\n[联网搜索预取结果]",
+            "用户问题明显需要联网核验。下面是 OpenAgentSeal 预先搜索到的候选结果；回答时请优先基于这些结果，并保留可点击链接。若结果不充分，请继续调用 web_search 或 web_browse。",
+            f"搜索词：{query}",
+            f"后端：{backend}",
+            "",
+        ]
+        for index, item in enumerate(results[:8], 1):
+            title = str(item.get("title") or "无标题").strip()
+            link = str(item.get("link") or item.get("url") or "").strip()
+            snippet = str(item.get("snippet") or item.get("description") or "").strip()
+            lines.append(f"{index}. {title}")
+            if link:
+                lines.append(f"   URL: {link}")
+            if snippet:
+                lines.append(f"   摘要: {snippet}")
+
+        context = "\n".join(lines)
+        if len(context) > WEB_SEARCH_CONTEXT_MAX_CHARS:
+            context = context[:WEB_SEARCH_CONTEXT_MAX_CHARS] + "\n\n[联网搜索预取结果已截断]"
+        return context
+
+    def _append_context_to_agent_content(
+        self,
+        content: str | List[Dict[str, Any]],
+        context: str,
+    ) -> str | List[Dict[str, Any]]:
+        if not context:
+            return content
+
+        if isinstance(content, list):
+            blocks = list(content)
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    block["text"] = f"{block.get('text') or ''}{context}"
+                    return blocks
+            return [{"type": "text", "text": context.strip()}, *blocks]
+
+        return f"{content}{context}"
+
     def _content_to_agent_text(self, content: Any) -> str | List[Dict[str, Any]]:
         if isinstance(content, str):
             return content
@@ -529,6 +644,8 @@ class AgentRunner:
 
         agent.tool_access_mode = tool_access_mode
         self._restore_agent_history(agent, session_id, chat_manager)
+        search_context = await self._prefetch_web_search_context(user_content)
+        agent_user_content = self._append_context_to_agent_content(agent_user_content, search_context)
         
         # Add user message to history
         user_attachments = []
@@ -806,22 +923,26 @@ class AgentRunner:
                 logger.warning("Failed to load agent control tools: %s", exc)
             skill_loader = None
 
-            # Web search tools
+            # Web search tools. Keep them available by default; only an explicit
+            # config switch should remove the agent's network search capability.
             config_obj = None
             try:
                 from open_agent.config import Config
                 config_path = Config.get_default_config_path()
                 if config_path and config_path.exists():
                     config_obj = Config.from_yaml(config_path)
-                    if config_obj.tools.enable_web_search:
-                        from open_agent.tools.web_search import (
-                            WebSearchTool,
-                            WebBrowseTool,
-                        )
-                        tools.append(WebSearchTool())
-                        tools.append(WebBrowseTool())
             except Exception:
-                pass
+                logger.warning("Failed to read config.yaml while loading web search tools", exc_info=True)
+            if config_obj is None or config_obj.tools.enable_web_search:
+                try:
+                    from open_agent.tools.web_search import (
+                        WebSearchTool,
+                        WebBrowseTool,
+                    )
+                    tools.append(WebSearchTool())
+                    tools.append(WebBrowseTool())
+                except Exception:
+                    logger.warning("Failed to load web search tools", exc_info=True)
 
             # Skills tools
             try:

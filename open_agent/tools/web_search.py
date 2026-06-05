@@ -1288,3 +1288,90 @@ def get_browse_status() -> dict[str, Any]:
             "key_set": bool(os.environ.get("JINA_API_KEY")),
         },
     }
+
+
+# ============================================================================
+# Hermes-style provider override
+# ============================================================================
+
+try:
+    from .web_search_providers import (
+        browse_webpage as _provider_browse_webpage,
+        get_browse_status as _provider_browse_status,
+        get_search_status as _provider_search_status,
+        web_search as _provider_web_search,
+    )
+
+    web_search = _provider_web_search
+    browse_webpage = _provider_browse_webpage
+    get_search_status = _provider_search_status
+    get_browse_status = _provider_browse_status
+
+    class ProviderWebSearchTool(WebSearchTool):
+        @property
+        def description(self) -> str:
+            return (
+                "Search the web for current or external information. Use this for news, "
+                "source URLs, citations, latest information, product data, technical docs, "
+                "or anything that may have changed. OpenAgentSeal selects the best configured "
+                "provider automatically and keeps the old Bing HTML search only as a fallback. "
+                "Return and cite URLs from the results. If results are weak, run another focused "
+                "search or use web_browse on promising URLs."
+            )
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query. Use the user's wording when possible, or a concise focused query when the original text is too long.",
+                    },
+                    "num_results": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: 5, max: 20).",
+                        "default": 5,
+                    },
+                    "backend": {
+                        "type": "string",
+                        "description": "Optional backend override. Use auto unless a specific provider is required.",
+                        "enum": ["auto", "firecrawl", "tavily", "exa", "brave", "serper", "jina", "searxng", "ddgs", "duckduckgo_html", "legacy_bing", "default", "bing"],
+                    },
+                },
+                "required": ["query"],
+            }
+
+    class ProviderWebBrowseTool(WebBrowseTool):
+        @property
+        def description(self) -> str:
+            return (
+                "Read and extract useful content from a specific web page URL. "
+                "OpenAgentSeal selects the best configured extractor automatically, "
+                "with a built-in HTTP reader as fallback. Use this after web_search "
+                "when the answer needs details from a source page."
+            )
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL of the web page to read. It must start with http:// or https://.",
+                    },
+                    "backend": {
+                        "type": "string",
+                        "description": "Optional extractor override. Use auto unless a specific provider is required.",
+                        "enum": ["auto", "jina", "firecrawl", "built_in", "default"],
+                    },
+                },
+                "required": ["url"],
+            }
+
+    WebSearchTool = ProviderWebSearchTool
+    WebBrowseTool = ProviderWebBrowseTool
+except Exception:
+    # Keep the legacy implementation usable if the provider module cannot load.
+    pass

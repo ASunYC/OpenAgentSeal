@@ -74,8 +74,10 @@ def create_app() -> FastAPI:
 
     # Include chat router
     from open_agent.app.runner import chat_router
+    from open_agent.app.sandbox import router as sandbox_router
 
     app.include_router(chat_router)
+    app.include_router(sandbox_router)
 
     # Include application routes not owned by the chat router.
     _setup_app_routes(app)
@@ -765,6 +767,43 @@ def _setup_app_routes(app: FastAPI):
             return {"success": True, "data": config}
         except Exception as e:
             logger.error(f"Failed to update smart routing config: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/web-search/config")
+    async def get_web_search_config():
+        """Get web search configuration and provider status."""
+        try:
+            from open_agent.user_config import get_user_config
+            from open_agent.tools.web_search import get_browse_status, get_search_status
+
+            manager = get_user_config()
+            return {
+                "success": True,
+                "config": manager.get_web_search_config(include_secrets=False),
+                "search_status": get_search_status(),
+                "extract_status": get_browse_status(),
+            }
+        except Exception as e:
+            logger.error(f"Failed to get web search config: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.post("/api/web-search/config")
+    async def update_web_search_config(data: dict):
+        """Update web search configuration."""
+        try:
+            from open_agent.user_config import get_user_config
+            from open_agent.tools.web_search import get_browse_status, get_search_status
+
+            manager = get_user_config()
+            config = manager.update_web_search_config(data)
+            return {
+                "success": True,
+                "config": config,
+                "search_status": get_search_status(),
+                "extract_status": get_browse_status(),
+            }
+        except Exception as e:
+            logger.error(f"Failed to update web search config: {e}")
             return {"success": False, "error": str(e)}
 
     @app.get("/api/settings/work-directory")

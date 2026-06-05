@@ -75,6 +75,109 @@
 
     <section class="settings-card">
       <div class="card-heading">
+        <div>
+          <h4>{{ t('\u8054\u7f51\u641c\u7d22', 'Web Search') }}</h4>
+          <span>{{ t('\u4f18\u5148\u4f7f\u7528 API \u641c\u7d22\u63d0\u4f9b\u5546\uff0c\u65e7\u641c\u7d22\u4f5c\u4e3a\u515c\u5e95', 'Prefer API-backed providers, with legacy search as fallback') }}</span>
+        </div>
+        <div class="card-actions">
+          <button class="refresh-button" :disabled="webSearchLoading" @click="loadWebSearchConfig">
+            {{ webSearchLoading ? t('\u52a0\u8f7d\u4e2d...', 'Loading...') : t('\u5237\u65b0', 'Refresh') }}
+          </button>
+          <button class="primary-button" :disabled="webSearchSaving" @click="saveWebSearchConfig">
+            {{ webSearchSaving ? t('\u4fdd\u5b58\u4e2d...', 'Saving...') : t('\u4fdd\u5b58', 'Save') }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="webSearchError" class="state-line error">
+        {{ webSearchError }}
+      </div>
+
+      <div class="toggle-list compact">
+        <label class="toggle-item">
+          <div>
+            <strong>{{ t('\u542f\u7528\u8054\u7f51\u641c\u7d22', 'Enable web search') }}</strong>
+            <p>{{ t('\u667a\u80fd\u4f53\u9700\u8981\u6700\u65b0\u4fe1\u606f\u3001\u65b0\u95fb\u539f\u5730\u5740\u6216\u7f51\u9875\u6765\u6e90\u65f6\u53ef\u4f7f\u7528', 'Allow agents to search when they need current information, news sources, or web citations') }}</p>
+          </div>
+          <input v-model="webSearchConfig.enabled" type="checkbox" />
+        </label>
+      </div>
+
+      <div class="field-grid web-grid">
+        <label class="field">
+          <span>{{ t('\u641c\u7d22\u63d0\u4f9b\u5546', 'Search provider') }}</span>
+          <select v-model="webSearchConfig.search_backend">
+            <option v-for="provider in searchBackends" :key="provider.value" :value="provider.value">
+              {{ provider.label }}
+            </option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>{{ t('\u7f51\u9875\u8bfb\u53d6\u63d0\u4f9b\u5546', 'Page reader') }}</span>
+          <select v-model="webSearchConfig.extract_backend">
+            <option v-for="provider in extractBackends" :key="provider.value" :value="provider.value">
+              {{ provider.label }}
+            </option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>SearXNG URL</span>
+          <input
+            v-model="webSearchConfig.searxng_url"
+            type="text"
+            placeholder="http://localhost:8080"
+          />
+        </label>
+      </div>
+
+      <div class="api-key-grid">
+        <label v-for="provider in apiKeyProviders" :key="provider.key" class="field">
+          <span>{{ provider.label }} API Key</span>
+          <input
+            v-model="webSearchConfig.api_keys[provider.key]"
+            type="password"
+            :placeholder="t('\u7559\u7a7a\u8868\u793a\u4e0d\u4fee\u6539', 'Leave blank to keep unchanged')"
+            autocomplete="off"
+          />
+        </label>
+      </div>
+
+      <div class="provider-status">
+        <div class="status-column">
+          <strong>{{ t('\u641c\u7d22\u72b6\u6001', 'Search status') }}</strong>
+          <div class="status-list">
+            <span
+              v-for="provider in searchStatusList"
+              :key="provider.name"
+              class="provider-pill"
+              :class="{ available: provider.available }"
+            >
+              {{ provider.display_name || provider.name }}
+              <small>{{ provider.available ? t('\u53ef\u7528', 'Ready') : t('\u672a\u914d\u7f6e', 'Not configured') }}</small>
+            </span>
+          </div>
+        </div>
+        <div class="status-column">
+          <strong>{{ t('\u8bfb\u53d6\u72b6\u6001', 'Reader status') }}</strong>
+          <div class="status-list">
+            <span
+              v-for="provider in extractStatusList"
+              :key="provider.name"
+              class="provider-pill"
+              :class="{ available: provider.available }"
+            >
+              {{ provider.display_name || provider.name }}
+              <small>{{ provider.available ? t('\u53ef\u7528', 'Ready') : t('\u672a\u914d\u7f6e', 'Not configured') }}</small>
+            </span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="settings-card">
+      <div class="card-heading">
         <h4>{{ t('\u5173\u4e8e', 'About') }}</h4>
         <button class="refresh-button" :disabled="versionLoading" @click="loadVersion">
           {{ versionLoading ? t('\u52a0\u8f7d\u4e2d...', 'Loading...') : t('\u5237\u65b0', 'Refresh') }}
@@ -100,9 +203,9 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { api } from '@/api'
+import { api, webSearchApi, type WebSearchConfig, type WebSearchProviderStatus } from '@/api'
 import { useSettingsStore } from '@/stores/settings'
 
 const settingsStore = useSettingsStore()
@@ -111,9 +214,119 @@ const appVersion = ref('')
 const releaseDate = ref('')
 const versionLoading = ref(false)
 const versionError = ref('')
+const webSearchLoading = ref(false)
+const webSearchSaving = ref(false)
+const webSearchError = ref('')
+const searchStatus = ref<Record<string, WebSearchProviderStatus>>({})
+const extractStatus = ref<Record<string, WebSearchProviderStatus>>({})
+const webSearchConfig = reactive<WebSearchConfig>({
+  enabled: true,
+  search_backend: 'auto',
+  extract_backend: 'auto',
+  searxng_url: '',
+  api_keys: {
+    serper: '',
+    brave: '',
+    tavily: '',
+    jina: '',
+    exa: '',
+    firecrawl: '',
+  },
+})
+
+const searchBackends = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'firecrawl', label: 'Firecrawl' },
+  { value: 'tavily', label: 'Tavily' },
+  { value: 'exa', label: 'Exa' },
+  { value: 'brave', label: 'Brave Search' },
+  { value: 'serper', label: 'Serper' },
+  { value: 'jina', label: 'Jina' },
+  { value: 'searxng', label: 'SearXNG' },
+  { value: 'ddgs', label: 'DuckDuckGo' },
+  { value: 'duckduckgo_html', label: 'DuckDuckGo HTML' },
+  { value: 'legacy_bing', label: 'Legacy Bing (fallback)' },
+]
+
+const extractBackends = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'jina', label: 'Jina Reader' },
+  { value: 'firecrawl', label: 'Firecrawl' },
+  { value: 'built_in', label: 'Built-in reader' },
+]
+
+const apiKeyProviders = [
+  { key: 'firecrawl', label: 'Firecrawl' },
+  { key: 'tavily', label: 'Tavily' },
+  { key: 'exa', label: 'Exa' },
+  { key: 'brave', label: 'Brave' },
+  { key: 'serper', label: 'Serper' },
+  { key: 'jina', label: 'Jina' },
+]
+
+const searchStatusList = computed(() => providerStatusList(searchStatus.value))
+const extractStatusList = computed(() => providerStatusList(extractStatus.value))
 
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
+}
+
+function providerStatusList(status: Record<string, WebSearchProviderStatus>) {
+  return Object.values(status).sort((a, b) => {
+    if (a.available !== b.available) return a.available ? -1 : 1
+    return (a.display_name || a.name).localeCompare(b.display_name || b.name)
+  })
+}
+
+function applyWebSearchConfig(config: WebSearchConfig) {
+  webSearchConfig.enabled = config.enabled
+  webSearchConfig.search_backend = config.search_backend || 'auto'
+  webSearchConfig.extract_backend = config.extract_backend || 'auto'
+  webSearchConfig.searxng_url = config.searxng_url || ''
+  const keys = { ...webSearchConfig.api_keys, ...(config.api_keys || {}) }
+  webSearchConfig.api_keys = keys
+}
+
+async function loadWebSearchConfig() {
+  webSearchLoading.value = true
+  webSearchError.value = ''
+  try {
+    const result = await webSearchApi.getConfig()
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to load web search config')
+    }
+    applyWebSearchConfig(result.config)
+    searchStatus.value = result.search_status || {}
+    extractStatus.value = result.extract_status || {}
+  } catch (error) {
+    webSearchError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    webSearchLoading.value = false
+  }
+}
+
+async function saveWebSearchConfig() {
+  webSearchSaving.value = true
+  webSearchError.value = ''
+  try {
+    const result = await webSearchApi.saveConfig({
+      enabled: webSearchConfig.enabled,
+      search_backend: webSearchConfig.search_backend,
+      extract_backend: webSearchConfig.extract_backend,
+      searxng_url: webSearchConfig.searxng_url,
+      api_keys: { ...webSearchConfig.api_keys },
+    })
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to save web search config')
+    }
+    applyWebSearchConfig(result.config)
+    searchStatus.value = result.search_status || {}
+    extractStatus.value = result.extract_status || {}
+  } catch (error) {
+    webSearchError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    webSearchSaving.value = false
+  }
 }
 
 async function loadVersion() {
@@ -135,6 +348,7 @@ async function loadVersion() {
 
 onMounted(() => {
   void loadVersion()
+  void loadWebSearchConfig()
 })
 </script>
 
@@ -175,6 +389,13 @@ onMounted(() => {
   gap: 12px;
 }
 
+.card-heading > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .card-heading h4 {
   margin: 0;
   color: var(--text-primary);
@@ -187,10 +408,22 @@ onMounted(() => {
   font-size: 12px;
 }
 
+.card-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+}
+
+.field-grid.web-grid {
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
 }
 
 .field {
@@ -205,7 +438,8 @@ onMounted(() => {
   font-weight: 500;
 }
 
-.field select {
+.field select,
+.field input {
   width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--border-color);
@@ -213,17 +447,29 @@ onMounted(() => {
   background: var(--hover-bg);
   color: var(--text-primary);
   font-size: 13px;
+  box-sizing: border-box;
 }
 
-.field select:focus {
+.field select:focus,
+.field input:focus {
   outline: none;
   border-color: var(--primary-color);
+}
+
+.api-key-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .toggle-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.toggle-list.compact {
+  gap: 0;
 }
 
 .toggle-item {
@@ -298,9 +544,80 @@ onMounted(() => {
   font-size: 12px;
 }
 
-.refresh-button:disabled {
+.primary-button {
+  padding: 7px 14px;
+  border: 1px solid var(--primary-color);
+  border-radius: 8px;
+  background: var(--primary-color);
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.refresh-button:hover:not(:disabled),
+.primary-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.refresh-button:disabled,
+.primary-button:disabled {
   opacity: 0.7;
   cursor: default;
+}
+
+.provider-status {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.status-column {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--hover-bg);
+}
+
+.status-column strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.status-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.provider-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--main-bg);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.provider-pill.available {
+  border-color: color-mix(in srgb, var(--primary-color) 45%, var(--border-color));
+  color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--main-bg));
+}
+
+.provider-pill small {
+  color: inherit;
+  opacity: 0.76;
+  font-size: 11px;
 }
 
 .state-line {
@@ -317,8 +634,20 @@ onMounted(() => {
 
 @media (max-width: 1100px) {
   .field-grid,
-  .about-grid {
+  .api-key-grid,
+  .about-grid,
+  .provider-status {
     grid-template-columns: 1fr;
+  }
+
+  .card-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .card-actions {
+    width: 100%;
+    justify-content: flex-end;
   }
 }
 </style>

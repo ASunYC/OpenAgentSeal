@@ -133,6 +133,21 @@ fn python_executable(root: &Path) -> PathBuf {
 }
 
 fn resolve_backend_command(app: &tauri::App) -> BackendCommand {
+    let root = repo_root().unwrap_or_else(|_| PathBuf::from("."));
+
+    #[cfg(debug_assertions)]
+    {
+        let use_sidecar = env::var("OPEN_AGENT_DESKTOP_USE_SIDECAR")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        if !use_sidecar {
+            return BackendCommand::Python {
+                executable: python_executable(&root),
+                root,
+            };
+        }
+    }
+
     if let Some(path) = find_sidecar(app) {
         return BackendCommand::Sidecar {
             path,
@@ -147,7 +162,6 @@ fn resolve_backend_command(app: &tauri::App) -> BackendCommand {
         };
     }
 
-    let root = repo_root().unwrap_or_else(|_| PathBuf::from("."));
     BackendCommand::Python {
         executable: python_executable(&root),
         root,

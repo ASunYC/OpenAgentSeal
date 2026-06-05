@@ -8,6 +8,9 @@ import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
 const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 export const API_BASE = isTauriRuntime ? `${DESKTOP_BACKEND}/api` : '/api'
+const WS_BASE = isTauriRuntime
+  ? 'ws://127.0.0.1:9998/api'
+  : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api`
 
 // Helper for API calls
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -180,6 +183,53 @@ export const runtimeApi = {
       `/runtime/threads/${encodeURIComponent(threadId)}/events?${params.toString()}`,
     )
     return result.events
+  },
+}
+
+export interface SandboxProviderStatus {
+  provider: string
+  label: string
+  available: boolean
+  status: string
+  command: string
+  target_command: string
+}
+
+export interface SandboxCliStatus {
+  windows: boolean
+  pty_available: boolean
+  agent_switch_available: boolean
+  workspace: string
+  providers: SandboxProviderStatus[]
+}
+
+export interface SandboxSession {
+  session_id: string
+  provider: string
+  cwd: string
+  command: string
+}
+
+export const sandboxApi = {
+  async getCliStatus(): Promise<SandboxCliStatus> {
+    return request<SandboxCliStatus>('/sandbox/cli-status')
+  },
+
+  async createSession(provider: string, cols: number, rows: number): Promise<SandboxSession> {
+    return request<SandboxSession>('/sandbox/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ provider, cols, rows }),
+    })
+  },
+
+  async deleteSession(sessionId: string): Promise<{ success: boolean }> {
+    return request<{ success: boolean }>(`/sandbox/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+    })
+  },
+
+  sessionWebSocketUrl(sessionId: string): string {
+    return `${WS_BASE}/sandbox/sessions/${encodeURIComponent(sessionId)}/ws`
   },
 }
 
@@ -361,6 +411,45 @@ export const smartRoutingApi = {
 
   async save(config: SmartRoutingConfig): Promise<ApiResponse<SmartRoutingConfig>> {
     return request<ApiResponse<SmartRoutingConfig>>('/smart-routing', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  },
+}
+
+export interface WebSearchProviderStatus {
+  name: string
+  display_name: string
+  supports_search: boolean
+  supports_extract: boolean
+  available: boolean
+  requires_key: boolean
+  note?: string
+}
+
+export interface WebSearchConfig {
+  enabled: boolean
+  search_backend: string
+  extract_backend: string
+  searxng_url: string
+  api_keys: Record<string, string>
+}
+
+export interface WebSearchConfigResponse {
+  success: boolean
+  config: WebSearchConfig
+  search_status: Record<string, WebSearchProviderStatus>
+  extract_status: Record<string, WebSearchProviderStatus>
+  error?: string
+}
+
+export const webSearchApi = {
+  async getConfig(): Promise<WebSearchConfigResponse> {
+    return request<WebSearchConfigResponse>('/web-search/config')
+  },
+
+  async saveConfig(config: WebSearchConfig): Promise<WebSearchConfigResponse> {
+    return request<WebSearchConfigResponse>('/web-search/config', {
       method: 'POST',
       body: JSON.stringify(config),
     })
@@ -675,6 +764,8 @@ export const api = {
   setWorkDirectory: settingsApi.setWorkDirectory,
   getSmartRouting: smartRoutingApi.get,
   saveSmartRouting: smartRoutingApi.save,
+  getWebSearchConfig: webSearchApi.getConfig,
+  saveWebSearchConfig: webSearchApi.saveConfig,
 
   // MCP
   getMcpConfig: mcpApi.getConfig,
@@ -690,6 +781,11 @@ export const api = {
   getRuntimeThread: runtimeApi.getThread,
   getRuntimeTurns: runtimeApi.listTurns,
   getRuntimeEvents: runtimeApi.listEvents,
+
+  // Sandbox
+  getSandboxCliStatus: sandboxApi.getCliStatus,
+  createSandboxSession: sandboxApi.createSession,
+  deleteSandboxSession: sandboxApi.deleteSession,
 
   // Version
   getVersion: versionApi.get,

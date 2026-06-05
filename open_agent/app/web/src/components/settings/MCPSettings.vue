@@ -3,12 +3,21 @@
     <div class="content-header">
       <h3>{{ t('MCP 设置', 'MCP Settings') }}</h3>
       <p>{{ t('管理智能体最终可用的 MCP 服务', 'Manage MCP servers available to the agent') }}</p>
-      <span class="count-pill">MCP {{ mcpServers.length }}</span>
+      <span class="count-pill">MCP {{ filteredServers.length }}/{{ mcpServers.length }}</span>
     </div>
 
     <div v-if="configPath" class="config-path">
       <span>{{ t('用户配置文件', 'User config file') }}</span>
       <code>{{ configPath }}</code>
+    </div>
+
+    <div class="settings-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/>
+        <path d="m21 21-4.3-4.3"/>
+      </svg>
+      <input v-model="searchQuery" type="search" :placeholder="t('搜索 MCP 名称、来源、命令或 URL', 'Search MCP by name, source, command, or URL')" />
+      <button v-if="searchQuery" type="button" @click="searchQuery = ''">{{ t('清除', 'Clear') }}</button>
     </div>
 
     <div v-if="loading" class="state-card">
@@ -20,7 +29,7 @@
     </div>
 
     <div v-else class="mcp-list">
-      <div v-for="server in mcpServers" :key="serverKey(server)" class="mcp-card" :class="{ readonly: server.readonly }">
+      <div v-for="server in filteredServers" :key="serverKey(server)" class="mcp-card" :class="{ readonly: server.readonly }">
         <div class="mcp-header">
           <div class="mcp-info">
             <h4>{{ server.name }}</h4>
@@ -73,6 +82,10 @@
         </div>
       </div>
 
+      <div v-if="filteredServers.length === 0" class="state-card">
+        {{ t('没有匹配的 MCP 服务', 'No matching MCP servers') }}
+      </div>
+
       <button class="add-mcp" @click="addServer">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="12" y1="5" x2="12" y2="19" />
@@ -92,7 +105,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { mcpApi, type MCPServerConfig } from '@/api'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -108,6 +121,7 @@ const loading = ref(false)
 const saving = ref(false)
 const savingServer = ref<string | null>(null)
 const error = ref<string | null>(null)
+const searchQuery = ref('')
 
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
@@ -122,6 +136,28 @@ function sourceLabel(server: EditableMCPServer) {
     ? `${t('插件', 'Plugin')}: ${server.plugin_id || '-'}`
     : t('用户配置', 'User config')
 }
+
+const filteredServers = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return mcpServers.value
+  return mcpServers.value.filter((server) => [
+    server.name,
+    server.original_name,
+    server.type,
+    server.command,
+    server.url,
+    server.plugin_id,
+    server.source,
+    sourceLabel(server),
+    server.disabled ? 'disabled 已禁用' : 'enabled 已启用',
+    server.argsText,
+    server.envText,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(query))
+})
 
 function toEnvText(env?: Record<string, string>) {
   return Object.entries(env ?? {}).map(([key, value]) => `${key}=${value}`).join('\n')
@@ -333,6 +369,42 @@ onMounted(() => {
   font-size: 12px;
   line-height: 1.2;
   white-space: nowrap;
+}
+
+.settings-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--main-bg);
+}
+
+.settings-search svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.settings-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.settings-search button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 12px;
 }
 
 .config-path,
