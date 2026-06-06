@@ -63,8 +63,20 @@
           <span>{{ t('用户', 'User') }}</span>
         </div>
         
-        <div 
-          class="menu-item" 
+        <div
+          class="menu-item"
+          :class="{ active: currentTab === 'mobile' }"
+          @click="switchTab('mobile')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="7" y="2" width="10" height="20" rx="2"/>
+            <path d="M11 18h2"/>
+          </svg>
+          <span>{{ t('移动端', 'Mobile') }}</span>
+        </div>
+
+        <div
+          class="menu-item"
           :class="{ active: currentTab === 'models' }"
           @click="switchTab('models')"
         >
@@ -211,6 +223,7 @@
         
         <!-- 用户设置 -->
         <UserSettings v-else-if="currentTab === 'user'" />
+        <MobileSettings v-else-if="currentTab === 'mobile'" />
         
         <!-- 模型设置 -->
         <ModelsSettings v-else-if="currentTab === 'models'" />
@@ -251,6 +264,7 @@ import { useSettingsStore } from '@/stores/settings'
 import DashboardSettings from '@/components/settings/DashboardSettings.vue'
 import WorkspaceSettings from '@/components/settings/WorkspaceSettings.vue'
 import UserSettings from '@/components/settings/UserSettings.vue'
+import MobileSettings from '@/components/settings/MobileSettings.vue'
 import ModelsSettings from '@/components/settings/ModelsSettings.vue'
 import SmartRoutingSettings from '@/components/settings/SmartRoutingSettings.vue'
 import AgentsSettings from '@/components/settings/AgentsSettings.vue'

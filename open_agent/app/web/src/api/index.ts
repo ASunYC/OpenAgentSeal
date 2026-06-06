@@ -4,9 +4,12 @@
  */
 
 import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
+import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
 const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+export const isNativeMobileRuntime = Capacitor.isNativePlatform()
+export const MOBILE_SERVER_STORAGE_KEY = 'open-agent-mobile-server'
 export const API_BASE = isTauriRuntime ? `${DESKTOP_BACKEND}/api` : '/api'
 const WS_BASE = isTauriRuntime
   ? 'ws://127.0.0.1:9998/api'
@@ -17,6 +20,62 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
+  })
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status}`)
+  }
+  return response.json()
+}
+
+export function normalizeMobileServerUrl(value: string): string {
+  let normalized = value.trim()
+  if (!normalized) return ''
+  if (!/^https?:\/\//i.test(normalized)) normalized = `http://${normalized}`
+  normalized = normalized.replace(/\/+$/, '')
+  normalized = normalized.replace(/\/mobile(?:\?.*)?$/i, '')
+  normalized = normalized.replace(/\/api$/i, '')
+  return normalized
+}
+
+export function getMobileServerUrl(): string {
+  if (!isNativeMobileRuntime) return window.location.origin
+  return normalizeMobileServerUrl(localStorage.getItem(MOBILE_SERVER_STORAGE_KEY) || '')
+}
+
+export function setMobileServerUrl(value: string): string {
+  const normalized = normalizeMobileServerUrl(value)
+  if (normalized) {
+    localStorage.setItem(MOBILE_SERVER_STORAGE_KEY, normalized)
+  } else {
+    localStorage.removeItem(MOBILE_SERVER_STORAGE_KEY)
+  }
+  return normalized
+}
+
+function mobileApiBase(): string {
+  const server = getMobileServerUrl()
+  return server ? `${server}/api` : API_BASE
+}
+
+async function mobileRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`${mobileApiBase()}${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  })
+  if (!response.ok) {
+    throw new Error(`API Error: ${response.status}`)
+  }
+  return response.json()
+}
+
+async function requestWithToken<T>(path: string, token: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`${mobileApiBase()}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      ...(options?.headers || {}),
+    },
   })
   if (!response.ok) {
     throw new Error(`API Error: ${response.status}`)
@@ -230,6 +289,138 @@ export const sandboxApi = {
 
   sessionWebSocketUrl(sessionId: string): string {
     return `${WS_BASE}/sandbox/sessions/${encodeURIComponent(sessionId)}/ws`
+  },
+}
+
+export interface MobileAccessInfo {
+  success: boolean
+  mobile_path: string
+  bind_host: string
+  remote_enabled: boolean
+  local_urls: string[]
+  lan_urls: string[]
+  pairing_ttl_seconds: number
+  paired_devices: Array<{
+    id: string
+    name: string
+    created_at?: string
+    last_seen_at?: string
+    enabled: boolean
+  }>
+}
+
+export interface MobilePairingCode {
+  success: boolean
+  code: string
+  expires_at: string
+  mobile_url: string
+  mobile_urls: string[]
+}
+
+export interface MobileSummary {
+  success: boolean
+  device: {
+    id: string
+    name: string
+    created_at?: string
+    last_seen_at?: string
+    enabled: boolean
+  }
+  agents: AgentConfig[]
+  chats: Chat[]
+  running_tasks: Record<string, unknown>[]
+  server_time: string
+}
+
+export const mobileApi = {
+  async health(serverUrl?: string): Promise<{ status: string; ready: boolean }> {
+    if (serverUrl !== undefined) setMobileServerUrl(serverUrl)
+    return mobileRequest<{ status: string; ready: boolean }>('/health')
+  },
+
+  async getAccessInfo(): Promise<MobileAccessInfo> {
+    return request<MobileAccessInfo>('/mobile/access-info')
+  },
+
+  async createPairingCode(): Promise<MobilePairingCode> {
+    return request<MobilePairingCode>('/mobile/pairing-code', { method: 'POST' })
+  },
+
+  async pair(code: string, deviceName: string): Promise<{ success: boolean; token: string; device: MobileSummary['device'] }> {
+    return mobileRequest<{ success: boolean; token: string; device: MobileSummary['device'] }>('/mobile/pair', {
+      method: 'POST',
+      body: JSON.stringify({ code, device_name: deviceName }),
+    })
+  },
+
+  async getSummary(token: string, profileId = 'main'): Promise<MobileSummary> {
+    return requestWithToken<MobileSummary>(`/mobile/summary?profile_id=${encodeURIComponent(profileId)}`, token)
+  },
+
+  async getChatHistory(token: string, chatId: string, profileId = 'main'): Promise<ChatHistory> {
+    const result = await requestWithToken<{ success: boolean; chat_id: string; total: number; messages: Message[] }>(
+      `/mobile/chats/${encodeURIComponent(chatId)}/history?profile_id=${encodeURIComponent(profileId)}`,
+      token,
+    )
+    return { chat_id: result.chat_id, total: result.total, messages: result.messages }
+  },
+
+  async createChat(token: string, name = 'Mobile Chat', profileId = 'main'): Promise<Chat> {
+    return requestWithToken<Chat>('/mobile/chats', token, {
+      method: 'POST',
+      body: JSON.stringify({ name, profile_id: profileId }),
+    })
+  },
+
+  async revokeDevice(deviceId: string): Promise<{ success: boolean; device_id: string }> {
+    return request<{ success: boolean; device_id: string }>(`/mobile/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'DELETE',
+    })
+  },
+
+  async cancel(token: string, sessionId: string): Promise<{ success: boolean; session_id: string }> {
+    return requestWithToken<{ success: boolean; session_id: string }>(`/cancel?session_id=${encodeURIComponent(sessionId)}`, token, {
+      method: 'POST',
+    })
+  },
+
+  async *runAgentStream(token: string, runnerSessionId: string, content: string, profileId = 'main'): AsyncGenerator<AgentEvent> {
+    const response = await fetch(`${mobileApiBase()}/run`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        session_id: runnerSessionId,
+        user_id: 'mobile',
+        messages: [{ role: 'user', content }],
+        stream: true,
+        profile_id: profileId,
+      }),
+    })
+    if (!response.ok) {
+      throw new Error(`Run failed: ${response.status}`)
+    }
+    const reader = response.body?.getReader()
+    if (!reader) throw new Error('No response body')
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          yield JSON.parse(line.slice(6)) as AgentEvent
+        } catch {
+          // Ignore malformed SSE frames.
+        }
+      }
+    }
   },
 }
 

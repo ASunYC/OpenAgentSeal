@@ -18,7 +18,8 @@ use tauri::{
     Emitter, Manager,
 };
 
-const BACKEND_HOST: &str = "127.0.0.1";
+const BACKEND_BIND_HOST: &str = "0.0.0.0";
+const BACKEND_CONNECT_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: &str = "9998";
 const SIDECAR_NAME: &str = "open-agent-backend-x86_64-pc-windows-msvc.exe";
 const ABOUT_URL: &str = "https://github.com/ASunYC";
@@ -97,7 +98,7 @@ impl Drop for BackendProcess {
 
 #[tauri::command]
 fn backend_url() -> String {
-    format!("http://{}:{}", BACKEND_HOST, BACKEND_PORT)
+    format!("http://{}:{}", BACKEND_CONNECT_HOST, BACKEND_PORT)
 }
 
 #[tauri::command]
@@ -205,7 +206,7 @@ fn spawn_backend(command_config: &BackendCommand) -> Result<Child, String> {
             }
             command
                 .env("OPEN_AGENT_DESKTOP_WORKSPACE", workspace)
-                .env("OPEN_AGENT_DESKTOP_HOST", BACKEND_HOST)
+                .env("OPEN_AGENT_DESKTOP_HOST", BACKEND_BIND_HOST)
                 .env("OPEN_AGENT_DESKTOP_PORT", BACKEND_PORT);
             command
         }
@@ -218,7 +219,7 @@ fn spawn_backend(command_config: &BackendCommand) -> Result<Child, String> {
                 .arg("--web-only")
                 .arg("--no-browser")
                 .arg("--host")
-                .arg(BACKEND_HOST)
+                .arg(BACKEND_BIND_HOST)
                 .arg("--port")
                 .arg(BACKEND_PORT)
                 .arg("--workspace")
@@ -279,7 +280,7 @@ fn backend_healthy() -> bool {
 
     let request = format!(
         "GET /api/health HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
-        BACKEND_HOST, BACKEND_PORT
+        BACKEND_CONNECT_HOST, BACKEND_PORT
     );
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
@@ -305,7 +306,7 @@ fn wait_for_backend_ready() -> bool {
 }
 
 fn connect_backend() -> Result<TcpStream, String> {
-    let address: SocketAddr = format!("{}:{}", BACKEND_HOST, BACKEND_PORT)
+    let address: SocketAddr = format!("{}:{}", BACKEND_CONNECT_HOST, BACKEND_PORT)
         .parse()
         .map_err(|error| format!("Invalid backend address: {error}"))?;
 

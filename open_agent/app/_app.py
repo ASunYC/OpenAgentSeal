@@ -21,7 +21,7 @@ from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from open_agent.version import get_version
 
 logger = logging.getLogger(__name__)
@@ -74,9 +74,21 @@ def create_app() -> FastAPI:
 
     # Include chat router
     from open_agent.app.runner import chat_router
+    from open_agent.app.mobile import router as mobile_router
+    from open_agent.app.mobile import is_remote_api_request_allowed
     from open_agent.app.sandbox import router as sandbox_router
 
+    @app.middleware("http")
+    async def remote_api_guard(request: Request, call_next):
+        if not is_remote_api_request_allowed(request):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Mobile pairing is required for remote API access"},
+            )
+        return await call_next(request)
+
     app.include_router(chat_router)
+    app.include_router(mobile_router)
     app.include_router(sandbox_router)
 
     # Include application routes not owned by the chat router.

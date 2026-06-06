@@ -1,5 +1,7 @@
 # OpenAgentSeal
 
+移动端连接与 Android APK 构建说明见 [docs/mobile_shell.md](docs/mobile_shell.md)。
+
 <div align="center">
 
 <img alt="Python" src="https://img.shields.io/badge/python-3.10+-blue.svg"> <img alt="Vue" src="https://img.shields.io/badge/vue-3-green.svg"> <img alt="Tauri" src="https://img.shields.io/badge/tauri-2-24C8DB.svg"> <img alt="License" src="https://img.shields.io/github/license/ASunYC/OpenAgentSeal.svg">
