@@ -1,0 +1,20 @@
+{
+  "name": "openagentseal",
+  "interface": {
+    "displayName": "OpenAgentSeal 官方插件"
+  },
+  "plugins": [
+    {
+      "name": "mineru",
+      "source": {
+        "source": "local",
+        "path": "./plugins/mineru"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

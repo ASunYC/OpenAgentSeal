@@ -136,9 +136,33 @@
             <input 
               type="text"
               v-model="config.selectedModel"
+              @change="resolveContextWindow(config)"
               :placeholder="t('输入或选择模型', 'Enter or select model')"
               class="model-name-input"
             />
+          </div>
+
+          <div class="form-group context-window-group">
+            <div class="field-label-row">
+              <label>{{ t('上下文大小（Token）', 'Context Window (Tokens)') }}</label>
+              <span class="context-source" :class="`source-${config.contextWindowSource}`">
+                {{ contextSourceLabel(config.contextWindowSource) }}
+              </span>
+            </div>
+            <input
+              type="number"
+              v-model.number="config.contextWindow"
+              min="8000"
+              step="1000"
+              class="model-name-input"
+              @change="markContextWindowManual(config)"
+            />
+            <span class="field-hint">
+              {{ t(
+                `自动压缩约在 ${formatContextSize(Math.floor(config.contextWindow * 0.9))} Token 时触发`,
+                `Auto compaction starts at about ${formatContextSize(Math.floor(config.contextWindow * 0.9))} tokens`
+              ) }}
+            </span>
           </div>
           
           <div class="form-group">
@@ -230,6 +254,8 @@ interface LocalModelConfig {
   isNew: boolean  // 是否为新建的配置卡片
   models: string[]
   selectedModel: string
+  contextWindow: number
+  contextWindowSource: string
   display_name: string
   base_url?: string
   provider_type?: string
@@ -319,6 +345,8 @@ function createNewModel() {
     isNew: true,
     models: [],
     selectedModel: '',
+    contextWindow: 60000,
+    contextWindowSource: 'fallback',
     display_name: '',
     base_url: '',
     provider_type: 'openai',
@@ -425,11 +453,53 @@ async function onProviderChange(config: LocalModelConfig, provider: string) {
     } finally {
       config.loadingModels = false
     }
+    await resolveContextWindow(config)
   }
 }
 
-function selectModel(config: LocalModelConfig, model: string) {
+async function selectModel(config: LocalModelConfig, model: string) {
   config.selectedModel = model
+  await resolveContextWindow(config)
+}
+
+async function resolveContextWindow(config: LocalModelConfig) {
+  const modelName = config.selectedModel.trim()
+  if (!modelName) return
+  try {
+    const result = await api.resolveModelContextWindow(modelName, config.provider)
+    config.contextWindow = result.context_window
+    config.contextWindowSource = result.source
+  } catch (error) {
+    console.error('Failed to resolve model context window:', error)
+    config.contextWindow = config.contextWindow || 60000
+    config.contextWindowSource = 'fallback'
+  }
+}
+
+function markContextWindowManual(config: LocalModelConfig) {
+  config.contextWindow = Math.max(8000, Number(config.contextWindow) || 60000)
+  config.contextWindowSource = 'manual'
+}
+
+function contextSourceLabel(source: string): string {
+  const labels: Record<string, [string, string]> = {
+    manual: ['手动设置', 'Manual'],
+    provider: ['供应商返回', 'Provider'],
+    catalog: ['自动识别', 'Detected'],
+    fallback: ['默认值', 'Default'],
+  }
+  const label = labels[source] || labels.fallback
+  return t(label[0], label[1])
+}
+
+function formatContextSize(value: number): string {
+  if (value >= 1_000_000) {
+    return `${Number((value / 1_000_000).toFixed(1))}M`
+  }
+  if (value >= 1_000) {
+    return `${Number((value / 1_000).toFixed(1))}K`
+  }
+  return String(value)
 }
 
 function editConfig(config: LocalModelConfig) {
@@ -493,7 +563,9 @@ async function saveConfig(config: LocalModelConfig) {
       api_key: config.apiKey,
       base_url: config.base_url,
       provider_type: config.provider_type || 'openai',
-      is_default: config.is_default
+      is_default: config.is_default,
+      context_window: Math.max(8000, Number(config.contextWindow) || 60000),
+      context_window_source: config.contextWindowSource || 'manual'
     }
     
     const result = await api.saveModelConfig(modelConfig)
@@ -539,6 +611,8 @@ onMounted(async () => {
       isNew: false,  // 从后端加载的配置不是新建的
       models: models,
       selectedModel: config.name || '',
+      contextWindow: config.context_window || 60000,
+      contextWindowSource: config.context_window_source || 'fallback',
       display_name: config.display_name || '',
       base_url: config.base_url,
       provider_type: config.provider_type || 'openai',
@@ -565,6 +639,8 @@ onMounted(async () => {
         isNew: false,
         models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo', 'o1', 'o1-mini'],
         selectedModel: 'gpt-4o',
+        contextWindow: 128000,
+        contextWindowSource: 'catalog',
         display_name: '',
         showKey: false,
         saving: false,
@@ -583,6 +659,8 @@ onMounted(async () => {
         isNew: false,
         models: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307', 'claude-3-5-haiku-20241022'],
         selectedModel: 'claude-3-5-sonnet-20241022',
+        contextWindow: 200000,
+        contextWindowSource: 'catalog',
         display_name: '',
         showKey: false,
         saving: false,
@@ -735,6 +813,50 @@ onMounted(async () => {
   font-weight: 500;
   color: var(--text-secondary);
   margin-bottom: 8px;
+}
+
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.field-label-row label {
+  margin-bottom: 0;
+}
+
+.context-source {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: var(--hover-bg);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.context-source.source-manual {
+  color: var(--primary-color);
+  border-color: color-mix(in srgb, var(--primary-color) 45%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+}
+
+.context-source.source-catalog,
+.context-source.source-provider {
+  color: #059669;
+  border-color: rgba(5, 150, 105, 0.35);
+  background: rgba(5, 150, 105, 0.08);
+}
+
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .input-with-toggle {

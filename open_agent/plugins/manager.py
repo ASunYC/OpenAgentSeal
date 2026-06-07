@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -28,6 +29,10 @@ PLUGIN_MANIFEST_RELATIVE_PATHS = (
     ".codex-plugin/plugin.json",
     "plugin.json",
 )
+PLUGIN_SETTINGS_RELATIVE_PATHS = (
+    ".open-agent/settings.json",
+)
+SECRET_MASK = "********"
 
 
 def _safe_segment(value: str) -> str:
@@ -140,15 +145,50 @@ class Marketplace:
 class PluginManager:
     """Manage local plugins, marketplaces, and runtime capability projection."""
 
-    def __init__(self, data_root: Path | None = None):
+    def __init__(
+        self,
+        data_root: Path | None = None,
+        bundled_marketplace_path: Path | None = None,
+    ):
         self.root = data_root or (get_data_dir() / "plugins")
         self.cache_root = self.root / "cache"
         self.marketplaces_root = self.root / "marketplaces"
         self.git_sources_root = self.root / "git-sources"
         self.config_path = self.root / "config.json"
+        if bundled_marketplace_path is not None:
+            self.bundled_marketplace_path = bundled_marketplace_path
+        elif data_root is None:
+            self.bundled_marketplace_path = (
+                Path(__file__).resolve().parent
+                / "bundled"
+                / ".agents"
+                / "plugins"
+                / "marketplace.json"
+            )
+        else:
+            self.bundled_marketplace_path = None
 
     def _default_config(self) -> dict[str, Any]:
-        return {"marketplaces": {}, "plugins": {}}
+        return self._with_bundled_marketplace({"marketplaces": {}, "plugins": {}})
+
+    def _with_bundled_marketplace(self, config: dict[str, Any]) -> dict[str, Any]:
+        path = self.bundled_marketplace_path
+        if path is None or not path.exists():
+            return config
+        try:
+            raw = _read_json(path)
+            name = str(raw.get("name") or "openagentseal")
+            config.setdefault("marketplaces", {})[name] = {
+                "name": name,
+                "kind": "bundled",
+                "source": str(path),
+                "path": str(path),
+                "installed_root": None,
+                "ref": None,
+            }
+        except Exception as exc:
+            logger.warning("Failed to register bundled plugin marketplace %s: %s", path, exc)
+        return config
 
     def load_config(self) -> dict[str, Any]:
         if not self.config_path.exists():
@@ -159,7 +199,7 @@ class PluginManager:
                 return self._default_config()
             config.setdefault("marketplaces", {})
             config.setdefault("plugins", {})
-            return config
+            return self._with_bundled_marketplace(config)
         except Exception as exc:
             logger.warning("Failed to read plugin config %s: %s", self.config_path, exc)
             return self._default_config()
@@ -167,6 +207,7 @@ class PluginManager:
     def save_config(self, config: dict[str, Any]) -> None:
         config.setdefault("marketplaces", {})
         config.setdefault("plugins", {})
+        self._with_bundled_marketplace(config)
         _write_json(self.config_path, config)
 
     def _marketplace_entry(self, name: str) -> dict[str, Any] | None:
@@ -237,6 +278,9 @@ class PluginManager:
 
     def remove_marketplace(self, marketplace_name: str) -> dict[str, Any]:
         config = self.load_config()
+        current = config.get("marketplaces", {}).get(marketplace_name)
+        if isinstance(current, dict) and current.get("kind") == "bundled":
+            raise ValueError("bundled marketplaces cannot be removed")
         entry = config.get("marketplaces", {}).pop(marketplace_name, None)
         self.save_config(config)
         return {
@@ -465,6 +509,99 @@ class PluginManager:
         self.save_config(config)
         return {"success": True, "plugin_id": plugin_id, "enabled": enabled}
 
+    def _read_plugin_settings_schema(self, root: Path | None) -> dict[str, Any] | None:
+        if root is None:
+            return None
+        for relative in PLUGIN_SETTINGS_RELATIVE_PATHS:
+            path = root / relative
+            if not path.exists():
+                continue
+            try:
+                raw = _read_json(path)
+            except Exception as exc:
+                logger.warning("Failed to read plugin settings schema %s: %s", path, exc)
+                return None
+            if not isinstance(raw, dict) or not isinstance(raw.get("fields"), list):
+                return None
+            fields = []
+            for field_value in raw["fields"]:
+                if not isinstance(field_value, dict):
+                    continue
+                key = str(field_value.get("key") or "").strip()
+                field_type = str(field_value.get("type") or "text").strip()
+                if not key or field_type not in {"text", "url", "secret", "model", "select", "boolean"}:
+                    continue
+                fields.append({**field_value, "key": key, "type": field_type})
+            return {**raw, "fields": fields}
+        return None
+
+    def get_plugin_settings(self, plugin_id: str, reveal_secrets: bool = False) -> dict[str, Any]:
+        plugin_name, marketplace_name = _split_plugin_id(plugin_id)
+        root = self.installed_plugin_root(plugin_name, marketplace_name)
+        schema = self._read_plugin_settings_schema(root)
+        if schema is None:
+            return {}
+        config = self.load_config()
+        stored = config.get("plugins", {}).get(plugin_id, {}).get("settings", {})
+        stored = stored if isinstance(stored, dict) else {}
+        values: dict[str, Any] = {}
+        for field_value in schema.get("fields", []):
+            key = field_value["key"]
+            value = stored.get(key, field_value.get("default"))
+            if field_value["type"] == "secret" and value and not reveal_secrets:
+                value = SECRET_MASK
+            values[key] = value
+        return values
+
+    def save_plugin_settings(self, plugin_id: str, values: dict[str, Any]) -> dict[str, Any]:
+        plugin_name, marketplace_name = _split_plugin_id(plugin_id)
+        root = self.installed_plugin_root(plugin_name, marketplace_name)
+        if root is None:
+            raise ValueError("plugin must be installed before it can be configured")
+        schema = self._read_plugin_settings_schema(root)
+        if schema is None:
+            raise ValueError("plugin does not declare configurable settings")
+        if not isinstance(values, dict):
+            raise ValueError("settings values must be an object")
+
+        config = self.load_config()
+        plugin_config = config.setdefault("plugins", {}).setdefault(plugin_id, {})
+        previous = plugin_config.get("settings", {})
+        previous = previous if isinstance(previous, dict) else {}
+        next_values: dict[str, Any] = {}
+
+        for field_value in schema.get("fields", []):
+            key = field_value["key"]
+            field_type = field_value["type"]
+            value = values.get(key, field_value.get("default"))
+            if field_type == "secret" and value == SECRET_MASK:
+                value = previous.get(key, "")
+            if field_type == "boolean":
+                value = bool(value)
+            elif value is None:
+                value = ""
+            elif not isinstance(value, str):
+                value = str(value)
+            if field_value.get("required") and (value == "" or value is None):
+                raise ValueError(f"{field_value.get('label') or key} is required")
+            if field_type == "select":
+                allowed = {
+                    str(option.get("value"))
+                    for option in field_value.get("options", [])
+                    if isinstance(option, dict) and option.get("value") is not None
+                }
+                if value and value not in allowed:
+                    raise ValueError(f"invalid value for {key}")
+            next_values[key] = value
+
+        plugin_config["settings"] = next_values
+        self.save_config(config)
+        return {
+            "success": True,
+            "plugin_id": plugin_id,
+            "values": self.get_plugin_settings(plugin_id),
+        }
+
     def set_skill_enabled(self, skill_path: str, enabled: bool) -> dict[str, Any]:
         config = self.load_config()
         disabled = set(config.setdefault("skills", {}).setdefault("disabled_paths", []))
@@ -546,6 +683,7 @@ class PluginManager:
                     "name": marketplace.name,
                     "path": marketplace.path,
                     "interface": marketplace.interface,
+                    "kind": entry.get("kind", "local"),
                     "plugins": plugins,
                 })
             except Exception as exc:
@@ -598,11 +736,19 @@ class PluginManager:
                 ],
                 "apps": self._read_json_file(manifest.apps_path) if manifest and manifest.apps_path else [],
                 "hooks": self._read_manifest_hooks(manifest) if manifest else [],
+                "settings": {
+                    "schema": self._read_plugin_settings_schema(root),
+                    "values": self.get_plugin_settings(plugin_id),
+                },
             },
         }
 
     def _read_json_file(self, path: str | None) -> Any:
         if not path:
+            return None
+        try:
+            return _read_json(Path(path))
+        except Exception:
             return None
 
     def _read_manifest_hooks(self, manifest: PluginManifest) -> Any:
@@ -613,10 +759,6 @@ class PluginManager:
         if manifest.hooks_path:
             return self._read_json_file(manifest.hooks_path)
         return []
-        try:
-            return _read_json(Path(path))
-        except Exception:
-            return None
 
     def _read_plugin_mcp_servers(self, root: Path, manifest: PluginManifest) -> dict[str, Any]:
         if not manifest.mcp_servers_path:
@@ -674,6 +816,7 @@ class PluginManager:
             if not root or not manifest:
                 continue
             disabled = set(plugin_config.get("disabled_mcp_servers", []))
+            settings = self.get_plugin_settings(pid, reveal_secrets=True)
             for server_name, server_config in self._read_plugin_mcp_servers(root, manifest).items():
                 server_disabled = server_name in disabled
                 if server_disabled and not include_disabled_plugin_servers:
@@ -686,13 +829,51 @@ class PluginManager:
                     })
                     continue
                 if isinstance(server_config, dict):
-                    config_copy = dict(server_config)
+                    config_copy = self._interpolate_plugin_value(
+                        server_config,
+                        root=root,
+                        settings=settings,
+                    )
                     config_copy["_source"] = "plugin"
                     config_copy["_plugin_id"] = pid
                     if server_disabled:
                         config_copy["disabled"] = True
                     effective[server_name] = config_copy
         return effective, warnings
+
+    def _interpolate_plugin_value(
+        self,
+        value: Any,
+        *,
+        root: Path,
+        settings: dict[str, Any],
+    ) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: self._interpolate_plugin_value(item, root=root, settings=settings)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                self._interpolate_plugin_value(item, root=root, settings=settings)
+                for item in value
+            ]
+        if not isinstance(value, str):
+            return value
+
+        replacements = {
+            "plugin_root": str(root),
+            "open_agent_api_url": os.environ.get(
+                "OPEN_AGENT_API_URL",
+                "http://127.0.0.1:9998",
+            ).rstrip("/"),
+        }
+        result = value
+        for key, replacement in replacements.items():
+            result = result.replace(f"{{{{{key}}}}}", replacement)
+        for key, replacement in settings.items():
+            result = result.replace(f"{{{{setting.{key}}}}}", str(replacement or ""))
+        return result
 
 
 _manager: PluginManager | None = None

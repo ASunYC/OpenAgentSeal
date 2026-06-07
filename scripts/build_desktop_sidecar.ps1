@@ -49,7 +49,11 @@ Write-Host "[2/4] Building Python backend sidecar..."
     --add-data "$Root\open_agent\app\static;open_agent\app\static" `
     --add-data "$Root\open_agent\config;open_agent\config" `
     --add-data "$Root\open_agent\skills;open_agent\skills" `
+    --add-data "$Root\open_agent\plugins\bundled;open_agent\plugins\bundled" `
     --hidden-import "open_agent.cli" `
+    --hidden-import "open_agent.plugins.builtin.mineru_mcp" `
+    --hidden-import "open_agent.plugins.builtin.mineru_service" `
+    --hidden-import "markdown" `
     --hidden-import "uvicorn.logging" `
     --hidden-import "uvicorn.loops" `
     --hidden-import "uvicorn.loops.auto" `

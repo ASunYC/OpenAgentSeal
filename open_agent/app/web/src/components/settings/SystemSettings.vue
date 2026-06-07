@@ -70,7 +70,28 @@
           </div>
           <input v-model="settings.useCoT" type="checkbox" />
         </label>
+
+        <label class="toggle-item">
+          <div>
+            <strong>{{ t('\u81ea\u52a8\u538b\u7f29\u4e0a\u4e0b\u6587', 'Automatic context compaction') }}</strong>
+            <p>{{ t('\u4f1a\u8bdd\u8f83\u957f\u65f6\u5c06\u65e9\u671f\u5185\u5bb9\u538b\u7f29\u4e3a\u6301\u4e45\u5316\u6458\u8981\uff0c\u539f\u59cb\u804a\u5929\u8bb0\u5f55\u4ecd\u4f1a\u5b8c\u6574\u4fdd\u7559', 'Compress older messages into a persistent summary while keeping the full visible chat history') }}</p>
+          </div>
+          <input v-model="settings.autoContextCompaction" type="checkbox" />
+        </label>
       </div>
+
+      <label class="field compaction-limit">
+        <span>{{ t('\u672a\u77e5\u6a21\u578b\u9ed8\u8ba4\u4e0a\u4e0b\u6587\uff08Token\uff09', 'Default context for unknown models (tokens)') }}</span>
+        <input
+          v-model.number="settings.contextCompactionTokenLimit"
+          type="number"
+          min="8000"
+          max="500000"
+          step="1000"
+          :disabled="!settings.autoContextCompaction"
+        />
+        <small>{{ t('\u4ec5\u5728\u65e0\u6cd5\u8bc6\u522b\u6a21\u578b\u4e0a\u4e0b\u6587\u65f6\u4f7f\u7528\uff1b\u5df2\u8bc6\u522b\u6216\u624b\u52a8\u8bbe\u7f6e\u7684\u6a21\u578b\u4f18\u5148', 'Used only when model context cannot be detected; detected or manually configured model values take priority') }}</small>
+      </label>
     </section>
 
     <section class="settings-card">
@@ -436,6 +457,21 @@ onMounted(() => {
   color: var(--text-primary);
   font-size: 13px;
   font-weight: 500;
+}
+
+.field small {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.compaction-limit {
+  max-width: 320px;
+}
+
+.compaction-limit input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .field select,

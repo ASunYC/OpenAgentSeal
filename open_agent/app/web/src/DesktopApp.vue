@@ -365,14 +365,22 @@
                         <span>{{ t('清空会话', 'Clear chat') }}</span>
                       </button>
                       <div class="composer-menu-divider"></div>
-                      <button :class="{ active: settingsStore.settings.useCoT }" @click="runComposerAction('cot')">
+                      <button
+                        class="composer-toggle-row"
+                        :class="{ active: settingsStore.settings.useCoT }"
+                        :aria-pressed="settingsStore.settings.useCoT"
+                        @click="runComposerAction('cot')"
+                      >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M21 12a9 9 0 0 1-15.31 6.36"/>
                           <path d="M3 12A9 9 0 0 1 18.31 5.64"/>
                           <path d="M6 18H3v3"/>
                           <path d="M18 6h3V3"/>
                         </svg>
-                        <span>{{ settingsStore.settings.useCoT ? t('关闭迭代模式', 'Disable iteration') : t('开启迭代模式', 'Enable iteration') }}</span>
+                        <span class="composer-toggle-label">{{ t('迭代模式', 'Iteration mode') }}</span>
+                        <span class="composer-toggle-switch" aria-hidden="true">
+                          <span></span>
+                        </span>
                       </button>
                       <button :class="{ active: skillsEnabled }" @click="runComposerAction('skills')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -401,10 +409,17 @@
                     </select>
                   </label>
                   <span
-                    :class="{ 'cot-active': settingsStore.settings.useCoT }"
-                    class="cot-status"
+                    class="context-compaction-status"
+                    :class="{ disabled: !contextStatus.enabled }"
+                    :title="contextStatusTitle"
                   >
-                    {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
+                    <span
+                      class="context-usage-ring"
+                      :style="{ '--context-progress': `${contextUsageDegrees}deg` }"
+                      aria-hidden="true"
+                    ></span>
+                    <span>{{ t('压缩', 'Compact') }}</span>
+                    <span class="context-usage-label">{{ contextStatusLabel }}</span>
                   </span>
                 </div>
                 <button
@@ -791,14 +806,22 @@
                     <span>{{ t('清空会话', 'Clear chat') }}</span>
                   </button>
                   <div class="composer-menu-divider"></div>
-                  <button :class="{ active: settingsStore.settings.useCoT }" @click="runComposerAction('cot')">
+                  <button
+                    class="composer-toggle-row"
+                    :class="{ active: settingsStore.settings.useCoT }"
+                    :aria-pressed="settingsStore.settings.useCoT"
+                    @click="runComposerAction('cot')"
+                  >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M21 12a9 9 0 0 1-15.31 6.36"/>
                       <path d="M3 12A9 9 0 0 1 18.31 5.64"/>
                       <path d="M6 18H3v3"/>
                       <path d="M18 6h3V3"/>
                     </svg>
-                    <span>{{ settingsStore.settings.useCoT ? t('关闭迭代模式', 'Disable iteration') : t('开启迭代模式', 'Enable iteration') }}</span>
+                    <span class="composer-toggle-label">{{ t('迭代模式', 'Iteration mode') }}</span>
+                    <span class="composer-toggle-switch" aria-hidden="true">
+                      <span></span>
+                    </span>
                   </button>
                   <button :class="{ active: skillsEnabled }" @click="runComposerAction('skills')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -827,10 +850,17 @@
                 </select>
               </label>
               <span
-                :class="{ 'cot-active': settingsStore.settings.useCoT }"
-                class="cot-status"
+                class="context-compaction-status"
+                :class="{ disabled: !contextStatus.enabled }"
+                :title="contextStatusTitle"
               >
-                {{ settingsStore.settings.useCoT ? t('迭代模式已开启', 'Iteration mode enabled') : t('迭代模式已关闭', 'Iteration mode disabled') }}
+                <span
+                  class="context-usage-ring"
+                  :style="{ '--context-progress': `${contextUsageDegrees}deg` }"
+                  aria-hidden="true"
+                ></span>
+                <span>{{ t('压缩', 'Compact') }}</span>
+                <span class="context-usage-label">{{ contextStatusLabel }}</span>
               </span>
             </div>
             <button
@@ -953,7 +983,7 @@ import SandboxPanel from '@/components/SandboxPanel.vue'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
-import type { AgentConfig, AgentEvent, Chat, ChatAttachment, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
+import type { AgentConfig, AgentEvent, Chat, ChatAttachment, ContextCompactionStatus, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
@@ -1189,6 +1219,18 @@ const selectedAgentId = ref('')
 const selectedModelId = ref('')
 const runnerSessionId = ref('')
 const messages = ref<Message[]>([])
+const contextStatus = ref<ContextCompactionStatus>({
+  session_id: '',
+  enabled: true,
+  used_tokens: 0,
+  token_limit: 60000,
+  context_window: 60000,
+  context_window_source: 'fallback',
+  usage_percent: 0,
+  compacted: false,
+  compaction_count: 0,
+  updated_at: null,
+})
 const inputMessage = ref('')
 const attachmentInput = ref<HTMLInputElement | null>(null)
 const pendingAttachments = ref<ChatAttachment[]>([])
@@ -1287,6 +1329,36 @@ const dockAgents = computed(() => {
 
 const footerUserName = computed(() => {
   return localStorage.getItem('openagentseal_user_name') || 'admin'
+})
+
+const contextUsageDegrees = computed(() => {
+  return Math.min(100, Math.max(0, contextStatus.value.usage_percent)) * 3.6
+})
+
+const contextStatusLabel = computed(() => {
+  if (!contextStatus.value.enabled) {
+    return t('自动压缩已关闭', 'Auto compaction off')
+  }
+  return t(
+    `上下文已使用 ${contextStatus.value.usage_percent}%`,
+    `${contextStatus.value.usage_percent}% context used`,
+  )
+})
+
+const contextStatusTitle = computed(() => {
+  if (!contextStatus.value.enabled) {
+    return t(
+      '自动压缩上下文已关闭，可在系统设置中开启',
+      'Automatic context compaction is off. Enable it in System settings.',
+    )
+  }
+  const compacted = contextStatus.value.compaction_count > 0
+    ? t(`，已压缩 ${contextStatus.value.compaction_count} 次`, `, compacted ${contextStatus.value.compaction_count} time(s)`)
+    : ''
+  return t(
+    `当前模型 ${contextStatus.value.model_name || ''} 的上下文已使用 ${contextStatus.value.usage_percent}%（${contextStatus.value.used_tokens}/${contextStatus.value.context_window} Token），约在 ${contextStatus.value.token_limit} Token 时自动压缩${compacted}`,
+    `${contextStatus.value.usage_percent}% of ${contextStatus.value.model_name || 'the current model'} context is used (${contextStatus.value.used_tokens}/${contextStatus.value.context_window} tokens); auto compaction starts near ${contextStatus.value.token_limit} tokens${compacted}`,
+  )
 })
 
 // 鑾峰彇鏅鸿兘浣撳悕绉?
@@ -1476,6 +1548,36 @@ async function loadChatHistory() {
     } else {
       messages.value = []
     }
+  } finally {
+    await refreshContextStatus()
+  }
+}
+
+async function refreshContextStatus() {
+  const sessionId = runnerSessionId.value
+  if (!sessionId) {
+    contextStatus.value = {
+      ...contextStatus.value,
+      session_id: '',
+      used_tokens: 0,
+      usage_percent: 0,
+      compacted: false,
+      compaction_count: 0,
+      updated_at: null,
+    }
+    return
+  }
+
+  try {
+    const status = await api.getChatContextStatus(
+      sessionId,
+      selectedAgentId.value || 'main',
+    )
+    if (runnerSessionId.value === sessionId) {
+      contextStatus.value = status
+    }
+  } catch (error) {
+    console.debug('Failed to load context compaction status:', error)
   }
 }
 
@@ -1946,6 +2048,15 @@ async function startNewChat() {
     : `session_${selectedAgentId.value}_${Date.now()}`
   localStorage.setItem(`session_${selectedAgentId.value}`, runnerSessionId.value)
   messages.value = []
+  contextStatus.value = {
+    ...contextStatus.value,
+    session_id: runnerSessionId.value,
+    used_tokens: 0,
+    usage_percent: 0,
+    compacted: false,
+    compaction_count: 0,
+    updated_at: null,
+  }
   pendingAttachments.value = []
   inputMessage.value = ''
   resetRuntimeReplay()
@@ -2614,6 +2725,7 @@ async function sendMessage() {
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
       await chatStore.loadChats()
     }
+    await refreshContextStatus()
   }
 }
 
@@ -2649,6 +2761,7 @@ async function clearChat() {
       console.error('Failed to clear persisted chat messages:', error)
     }
   }
+  await refreshContextStatus()
 }
 
 // 婊氬姩鍒板簳閮?
@@ -4356,18 +4469,96 @@ onUnmounted(() => {
   background: var(--border-color);
 }
 
-.cot-status {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  transition: color 0.2s ease;
+.composer-menu button.composer-toggle-row {
+  gap: 10px;
 }
 
-.cot-status.cot-active {
-  color: var(--primary-color);
-  font-weight: 500;
+.composer-menu button.composer-toggle-row.active {
+  color: var(--text-primary);
+}
+
+.composer-toggle-label {
+  min-width: 0;
+  flex: 1;
+}
+
+.composer-toggle-switch {
+  position: relative;
+  width: 30px;
+  height: 18px;
+  flex: 0 0 30px;
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 20%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-secondary) 25%, transparent);
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.composer-toggle-switch > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.28);
+  transition: transform 0.2s ease;
+}
+
+.composer-toggle-row.active .composer-toggle-switch {
+  border-color: var(--primary-color);
+  background: var(--primary-color);
+}
+
+.composer-toggle-row.active .composer-toggle-switch > span {
+  transform: translateX(12px);
+}
+
+.context-compaction-status {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.context-compaction-status.disabled {
+  opacity: 0.65;
+}
+
+.context-usage-ring {
+  --context-progress: 0deg;
+  position: relative;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--primary-color) var(--context-progress),
+    color-mix(in srgb, var(--text-secondary) 24%, transparent) 0
+  );
+}
+
+.context-usage-ring::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--glass-bg-strong);
+}
+
+.context-compaction-status.disabled .context-usage-ring {
+  background: color-mix(in srgb, var(--text-secondary) 34%, transparent);
+}
+
+.context-usage-label {
+  overflow: hidden;
+  max-width: 150px;
+  color: color-mix(in srgb, var(--text-secondary) 82%, transparent);
+  text-overflow: ellipsis;
 }
 
 .btn-send {

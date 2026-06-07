@@ -45,7 +45,8 @@
             <h4>{{ marketplace.interface?.displayName || marketplace.interface?.display_name || marketplace.name }}</h4>
             <p>{{ marketplace.path }}</p>
           </div>
-          <button class="btn-danger" @click="removeMarketplace(marketplace.name)">{{ t('移除市场', 'Remove') }}</button>
+          <span v-if="marketplace.kind === 'bundled'" class="bundled-badge">{{ t('内置市场', 'Bundled') }}</span>
+          <button v-else class="btn-danger" @click="removeMarketplace(marketplace.name)">{{ t('移除市场', 'Remove') }}</button>
         </header>
 
         <div class="plugins-grid">
@@ -89,6 +90,51 @@
 
         <p class="detail-description">{{ selectedDetail.description || selectedDetail.summary.interface?.longDescription || selectedDetail.summary.interface?.long_description || t('暂无描述', 'No description') }}</p>
 
+        <div v-if="selectedDetail.settings?.schema?.fields?.length" class="detail-section plugin-settings">
+          <div class="settings-title">
+            <div>
+              <h5>{{ selectedDetail.settings.schema.title || t('插件配置', 'Plugin settings') }}</h5>
+              <p v-if="selectedDetail.settings.schema.description" class="muted">{{ selectedDetail.settings.schema.description }}</p>
+            </div>
+            <span v-if="settingsSaved" class="settings-saved">{{ t('已保存', 'Saved') }}</span>
+          </div>
+
+          <label v-for="field in selectedDetail.settings.schema.fields" :key="field.key" class="plugin-setting-field">
+            <span>
+              {{ field.label || field.key }}
+              <strong v-if="field.required">*</strong>
+            </span>
+            <select v-if="field.type === 'model'" v-model="pluginSettingsValues[field.key]">
+              <option value="">{{ t('请选择全局模型', 'Select a global model') }}</option>
+              <option v-for="model in models" :key="model.id" :value="model.id">
+                {{ model.display_name || model.name }}
+              </option>
+            </select>
+            <select v-else-if="field.type === 'select'" v-model="pluginSettingsValues[field.key]">
+              <option v-for="option in field.options || []" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+            <input
+              v-else-if="field.type === 'boolean'"
+              v-model="pluginSettingsValues[field.key]"
+              type="checkbox"
+            />
+            <input
+              v-else
+              v-model="pluginSettingsValues[field.key]"
+              :type="field.type === 'secret' ? 'password' : field.type === 'url' ? 'url' : 'text'"
+              :placeholder="field.description || ''"
+              autocomplete="off"
+            />
+            <small v-if="field.description">{{ field.description }}</small>
+          </label>
+
+          <button class="btn-primary settings-save" :disabled="savingSettings" @click="savePluginSettings">
+            {{ savingSettings ? t('保存中...', 'Saving...') : t('保存插件配置', 'Save plugin settings') }}
+          </button>
+        </div>
+
         <div class="detail-section">
           <h5>{{ t('技能', 'Skills') }} {{ selectedDetail.skills.length }}</h5>
           <div v-if="selectedDetail.skills.length === 0" class="muted">{{ t('无插件技能', 'No plugin skills') }}</div>
@@ -122,8 +168,9 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { pluginsApi, type PluginDetail, type PluginMarketplace, type PluginSummary } from '@/api'
+import { modelConfigApi, pluginsApi, type PluginDetail, type PluginMarketplace, type PluginSummary } from '@/api'
 import { useSettingsStore } from '@/stores/settings'
+import type { ModelConfig } from '@/types'
 
 const settingsStore = useSettingsStore()
 const marketplaces = ref<PluginMarketplace[]>([])
@@ -135,6 +182,10 @@ const upgrading = ref(false)
 const busyPlugin = ref<string | null>(null)
 const error = ref<string | null>(null)
 const searchQuery = ref('')
+const models = ref<ModelConfig[]>([])
+const pluginSettingsValues = ref<Record<string, unknown>>({})
+const savingSettings = ref(false)
+const settingsSaved = ref(false)
 
 const pluginCount = computed(() => marketplaces.value.reduce((count, marketplace) => count + marketplace.plugins.length, 0))
 const filteredMarketplaces = computed(() => {
@@ -294,8 +345,31 @@ async function openDetail(plugin: PluginSummary) {
     const response = await pluginsApi.read(plugin.id)
     if (!response.success) throw new Error(response.error || 'Failed to read plugin')
     selectedDetail.value = response.plugin
+    pluginSettingsValues.value = { ...(response.plugin.settings?.values || {}) }
+    settingsSaved.value = false
+    if (response.plugin.settings?.schema?.fields?.some((field) => field.type === 'model')) {
+      models.value = (await modelConfigApi.list()).filter((model) => !model.id.startsWith('default_'))
+    }
   } catch (e) {
     alert(e instanceof Error ? e.message : String(e))
+  }
+}
+
+async function savePluginSettings() {
+  if (!selectedDetail.value) return
+  savingSettings.value = true
+  settingsSaved.value = false
+  try {
+    const result = await pluginsApi.saveSettings(selectedDetail.value.summary.id, pluginSettingsValues.value)
+    if (!result.success) throw new Error(result.error || 'Failed to save plugin settings')
+    if (result.values) pluginSettingsValues.value = { ...result.values }
+    settingsSaved.value = true
+    const response = await pluginsApi.read(selectedDetail.value.summary.id)
+    if (response.success) selectedDetail.value = response.plugin
+  } catch (e) {
+    alert(e instanceof Error ? e.message : String(e))
+  } finally {
+    savingSettings.value = false
   }
 }
 
@@ -466,6 +540,16 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.bundled-badge {
+  align-self: flex-start;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 38%, var(--border-color));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--main-bg));
+  color: var(--primary-color);
+  font-size: 11px;
+}
+
 .plugins-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -607,6 +691,68 @@ onMounted(() => {
 
 .detail-section h5 {
   font-size: 13px;
+}
+
+.settings-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-title > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-saved {
+  color: #16a34a;
+  font-size: 12px;
+}
+
+.plugin-setting-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.plugin-setting-field > span {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.plugin-setting-field strong {
+  color: #ef4444;
+}
+
+.plugin-setting-field input:not([type='checkbox']),
+.plugin-setting-field select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  outline: none;
+  background: var(--input-bg, var(--main-bg));
+  color: var(--text-primary);
+}
+
+.plugin-setting-field input:focus,
+.plugin-setting-field select:focus {
+  border-color: var(--primary-color);
+}
+
+.plugin-setting-field small {
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.settings-save {
+  align-self: flex-start;
+  margin-top: 4px;
 }
 
 .detail-row {

@@ -32,6 +32,21 @@ export interface ChatHistory {
   messages: Message[]
 }
 
+export interface ContextCompactionStatus {
+  session_id: string
+  enabled: boolean
+  used_tokens: number
+  token_limit: number
+  context_window: number
+  context_window_source: string
+  model_id?: string | null
+  model_name?: string
+  usage_percent: number
+  compacted: boolean
+  compaction_count: number
+  updated_at?: string | null
+}
+
 export interface ChatAttachment {
   id: string
   name: string
@@ -171,6 +186,8 @@ export interface ModelConfig {
   base_url?: string
   provider_type: string
   is_default?: boolean
+  context_window?: number
+  context_window_source?: string
   available_models?: string[]  // 可用模型列表
 }
 
@@ -240,6 +257,8 @@ export interface SystemSettings {
   autoSave: boolean
   streamResponse: boolean
   useCoT: boolean  // 思考模式 (Chain of Thought)
+  autoContextCompaction: boolean
+  contextCompactionTokenLimit: number
 }
 
 // 统计数据
@@ -278,6 +297,8 @@ export interface AppSettings {
   streamResponse: boolean
   enable_skills?: boolean
   useCoT: boolean
+  autoContextCompaction: boolean
+  contextCompactionTokenLimit: number
 }
 
 export interface SmartRoutingConfig {

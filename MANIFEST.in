@@ -1,4 +1,5 @@
 recursive-include open_agent/skills *
+recursive-include open_agent/plugins/bundled *
 include open_agent/skills/README.md
 include open_agent/skills/THIRD_PARTY_NOTICES.md
 include open_agent/skills/agent_skills_spec.md
@@ -16,4 +17,3 @@ graft .ecc/hooks
 graft .ecc/rules
 graft .ecc/mcp-configs
 graft .ecc/scripts
-

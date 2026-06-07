@@ -13,6 +13,7 @@ Open Agent - Agent管理服务
 import asyncio
 import json
 import logging
+import os
 import threading
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -251,6 +252,9 @@ class AgentService:
                 import sys
                 if hasattr(sys.modules.get('launcher'), '_web_url'):
                     sys.modules['launcher']._web_url = f"http://{self.host}:{self.port}"
+
+            connect_host = "127.0.0.1" if self.host in {"0.0.0.0", "::"} else self.host
+            os.environ["OPEN_AGENT_API_URL"] = f"http://{connect_host}:{self.port}"
             
             # 初始化 ChatManager
             init_chat_manager()

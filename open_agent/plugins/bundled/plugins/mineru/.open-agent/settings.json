@@ -1,0 +1,53 @@
+{
+  "title": "MinerU 文档解析与翻译",
+  "description": "官方服务和自建服务使用同一套连接配置，插件会自动识别兼容的 MinerU API 协议。",
+  "fields": [
+    {
+      "key": "api_url",
+      "type": "url",
+      "label": "MinerU API 地址",
+      "description": "默认使用 MinerU 官方服务；自建服务填写其根地址。",
+      "default": "https://mineru.net",
+      "required": true
+    },
+    {
+      "key": "api_token",
+      "type": "secret",
+      "label": "API Token",
+      "description": "官方标准 API 需要 Token；无需鉴权的自建服务可以留空。",
+      "default": ""
+    },
+    {
+      "key": "translation_model_id",
+      "type": "model",
+      "label": "翻译模型",
+      "description": "从全局模型列表选择，插件不会创建或保存另一套大模型配置。",
+      "default": "",
+      "required": true
+    },
+    {
+      "key": "target_language",
+      "type": "select",
+      "label": "默认目标语言",
+      "default": "Simplified Chinese",
+      "options": [
+        {
+          "label": "简体中文",
+          "value": "Simplified Chinese"
+        },
+        {
+          "label": "English",
+          "value": "English"
+        },
+        {
+          "label": "日本語",
+          "value": "Japanese"
+        },
+        {
+          "label": "한국어",
+          "value": "Korean"
+        }
+      ]
+    }
+  ]
+}

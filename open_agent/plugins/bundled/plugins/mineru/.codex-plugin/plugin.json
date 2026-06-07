@@ -1,0 +1,30 @@
+{
+  "name": "mineru",
+  "version": "1.0.0",
+  "author": {
+    "name": "OpenAgentSeal"
+  },
+  "description": "使用 MinerU API 将 PDF、Office 文档和图片解析为适合智能体使用的 Markdown，并可翻译为新的 Markdown 与 PDF。",
+  "keywords": [
+    "mineru",
+    "pdf",
+    "document",
+    "ocr",
+    "translation"
+  ],
+  "skills": "./skills",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "MinerU 文档解析与翻译",
+    "shortDescription": "解析复杂文档，并生成结构化 Markdown 或翻译后的 PDF",
+    "longDescription": "通过统一的 MinerU API 配置解析 PDF、Office 文档与图片。翻译能力复用 OpenAgentSeal 全局模型，产物自动加入资料库。",
+    "developerName": "OpenAgentSeal",
+    "defaultPrompt": "使用 MinerU 解析或翻译我指定的文档，并将结果加入资料库。",
+    "category": "Productivity",
+    "capabilities": [
+      "Document parsing",
+      "OCR",
+      "PDF translation"
+    ]
+  }
+}

@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 
 # Global app instance
 _app: Optional[FastAPI] = None
+_mineru_mcp_app = None
+
+
+def _get_mineru_mcp_app():
+    global _mineru_mcp_app
+    if _mineru_mcp_app is None:
+        from open_agent.plugins.builtin.mineru_mcp import get_mineru_mcp_server
+
+        _mineru_mcp_app = get_mineru_mcp_server().streamable_http_app()
+    return _mineru_mcp_app
 
 
 @asynccontextmanager
@@ -39,8 +49,11 @@ async def lifespan(app: FastAPI):
     from open_agent.app.runner import init_chat_manager
 
     init_chat_manager()
+    from open_agent.plugins.builtin.mineru_mcp import get_mineru_mcp_server
 
-    yield
+    _get_mineru_mcp_app()
+    async with get_mineru_mcp_server().session_manager.run():
+        yield
 
     logger.info("🌐 Open Agent Web UI stopped")
 
@@ -90,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(mobile_router)
     app.include_router(sandbox_router)
+    app.mount("/api/plugins/mineru-mcp", _get_mineru_mcp_app())
 
     # Include application routes not owned by the chat router.
     _setup_app_routes(app)
@@ -365,7 +379,11 @@ def _setup_app_routes(app: FastAPI):
     async def get_model_configs():
         """Get model configuration list - returns array directly for frontend compatibility"""
         try:
-            from open_agent.user_config import get_user_config, ModelProvider
+            from open_agent.user_config import (
+                ModelProvider,
+                get_user_config,
+                resolve_model_context_window,
+            )
 
             manager = get_user_config()
             manager.reload()  # 每次请求都重新加载配置
@@ -473,6 +491,10 @@ def _setup_app_routes(app: FastAPI):
                     # 对于自定义提供商，使用原始值
                     provider_display_name = m.provider
 
+                context_window, context_window_source = resolve_model_context_window(
+                    m,
+                    manager.get_settings().context_compaction_token_limit,
+                )
                 result.append(
                     {
                         "id": m.id,
@@ -487,6 +509,8 @@ def _setup_app_routes(app: FastAPI):
                         "has_api_key": bool(m.api_key),
                         "base_url": m.base_url,
                         "provider_type": m.provider_type,
+                        "context_window": context_window,
+                        "context_window_source": context_window_source,
                         "available_models": available_models,
                     }
                 )
@@ -508,6 +532,20 @@ def _setup_app_routes(app: FastAPI):
 
             # 检查是否是更新现有配置（id 存在且配置已存在）
             existing_model = manager.get_model(model_id) if model_id else None
+            context_window_source = str(
+                data.get(
+                    "context_window_source",
+                    existing_model.context_window_source if existing_model else "",
+                )
+                or ""
+            )
+            context_window = data.get(
+                "context_window",
+                existing_model.context_window if existing_model else None,
+            )
+            if context_window_source in {"catalog", "fallback"}:
+                context_window = None
+                context_window_source = ""
 
             if existing_model:
                 # 更新现有配置 - 保留原有 ID
@@ -522,6 +560,8 @@ def _setup_app_routes(app: FastAPI):
                         "provider_type", existing_model.provider_type
                     ),
                     is_default=data.get("is_default", existing_model.is_default),
+                    context_window=context_window,
+                    context_window_source=context_window_source,
                 )
                 manager.update_model(model)
             else:
@@ -535,12 +575,42 @@ def _setup_app_routes(app: FastAPI):
                     provider_type=data.get("provider_type", "openai"),
                     is_default=data.get("is_default", False),
                 )
+                model.context_window = context_window
+                model.context_window_source = context_window_source
                 manager.add_model(model)
 
             return {"success": True, "data": {"id": model.id}}
         except Exception as e:
             logger.error(f"Failed to save model config: {e}")
             return {"success": False, "error": str(e)}
+
+    @app.get("/api/models/context-window")
+    async def get_model_context_window(model_name: str, provider: str = ""):
+        """Resolve known model context metadata with a configurable fallback."""
+        from open_agent.user_config import (
+            ModelConfig,
+            get_user_config,
+            resolve_model_context_window,
+        )
+
+        manager = get_user_config()
+        preview = ModelConfig(
+            id="preview",
+            name=model_name,
+            display_name=model_name,
+            provider=provider,
+            api_key="",
+        )
+        context_window, source = resolve_model_context_window(
+            preview,
+            manager.get_settings().context_compaction_token_limit,
+        )
+        return {
+            "model_name": model_name,
+            "provider": provider,
+            "context_window": context_window,
+            "source": source,
+        }
 
     @app.delete("/api/model-configs/{model_id}")
     async def delete_model_config(model_id: str):
@@ -707,6 +777,8 @@ def _setup_app_routes(app: FastAPI):
                 "stream_response": settings.stream_response,
                 "use_cot": settings.use_cot,
                 "enable_skills": settings.enable_skills,
+                "auto_context_compaction": settings.auto_context_compaction,
+                "context_compaction_token_limit": settings.context_compaction_token_limit,
             }
         except Exception as e:
             logger.error(f"Failed to get settings: {e}")
@@ -1222,6 +1294,17 @@ def _setup_app_routes(app: FastAPI):
             return get_plugin_manager().set_plugin_enabled(plugin_id, False)
         except Exception as e:
             logger.error(f"Failed to disable plugin: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.put("/api/plugins/{plugin_id}/settings")
+    async def save_plugin_settings(plugin_id: str, data: dict):
+        try:
+            from open_agent.plugins import get_plugin_manager
+
+            values = data.get("values", data)
+            return get_plugin_manager().save_plugin_settings(plugin_id, values)
+        except Exception as e:
+            logger.error(f"Failed to save plugin settings: {e}")
             return {"success": False, "error": str(e)}
 
     @app.get("/api/commands")

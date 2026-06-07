@@ -13,6 +13,7 @@ Open Agent - 用户配置管理模块
 
 import copy
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -105,7 +106,10 @@ class ModelConfig:
     base_url: Optional[str] = None       # 自定义 API 地址
     provider_type: str = "openai"        # SDK 类型: "openai" 或 "anthropic"
     is_default: bool = False             # 是否为默认模型
-    
+
+    context_window: Optional[int] = None
+    context_window_source: str = ""
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
     
@@ -131,6 +135,71 @@ class ModelConfig:
             provider_type=provider_type,
             is_default=is_default
         )
+
+
+MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4": 8_192,
+    "gpt-3.5-turbo": 16_385,
+    "o1": 200_000,
+    "o1-mini": 128_000,
+    "o1-preview": 128_000,
+    "claude-3-5-sonnet-20241022": 200_000,
+    "claude-3-5-haiku-20241022": 200_000,
+    "claude-3-opus-20240229": 200_000,
+    "claude-3-sonnet-20240229": 200_000,
+    "claude-3-haiku-20240307": 200_000,
+    "deepseek-chat": 128_000,
+    "deepseek-reasoner": 128_000,
+    "deepseek-coder": 128_000,
+    "qwen-max-longcontext": 1_000_000,
+}
+
+
+def infer_model_context_window(model_name: str, provider: str = "") -> Optional[int]:
+    """Infer context size only when the model identity is unambiguous."""
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized in MODEL_CONTEXT_WINDOWS:
+        return MODEL_CONTEXT_WINDOWS[normalized]
+
+    size_match = re.search(r"(?:^|[-_/])(\d{1,4})k(?:$|[-_/])", normalized)
+    if size_match:
+        return int(size_match.group(1)) * 1_000
+    if normalized.startswith("claude-3"):
+        return 200_000
+    if normalized.startswith("gpt-4o") or normalized.startswith("gpt-4-turbo"):
+        return 128_000
+    if normalized.startswith("deepseek-"):
+        return 128_000
+    return None
+
+
+def resolve_model_context_window(
+    model: Optional[ModelConfig],
+    fallback: int = 60_000,
+) -> tuple[int, str]:
+    """Resolve a model context window and its metadata source."""
+    fallback = max(8_000, int(fallback or 60_000))
+    if model and model.context_window:
+        return max(8_000, int(model.context_window)), (
+            model.context_window_source or "manual"
+        )
+    inferred = infer_model_context_window(
+        model.name if model else "",
+        model.provider if model else "",
+    )
+    if inferred:
+        return inferred, "catalog"
+    return fallback, "fallback"
+
+
+def model_auto_compact_token_limit(context_window: int) -> int:
+    """Match Codex's default behavior by compacting at 90%."""
+    return max(8_000, int(max(8_000, context_window) * 0.9))
 
 
 @dataclass
@@ -215,12 +284,23 @@ class AppSettings:
     use_cot: bool = False                # 思考/迭代模式
     enable_skills: bool = True             # 技能开关
 
+    auto_context_compaction: bool = True
+    context_compaction_token_limit: int = 60000
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppSettings":
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        values = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        try:
+            values["context_compaction_token_limit"] = max(
+                8000,
+                int(values.get("context_compaction_token_limit", 60000)),
+            )
+        except (TypeError, ValueError):
+            values["context_compaction_token_limit"] = 60000
+        return cls(**values)
 
 
 # ==================== 配置管理器 ====================
@@ -247,7 +327,9 @@ class UserConfigManager:
             "auto_save": True,
             "stream_response": True,
             "use_cot": False,
-            "enable_skills": True
+            "enable_skills": True,
+            "auto_context_compaction": True,
+            "context_compaction_token_limit": 60000
         },
         "smart_routing": {
             "enabled": False,

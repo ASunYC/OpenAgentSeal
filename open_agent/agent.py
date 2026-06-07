@@ -65,6 +65,7 @@ class Agent:
         interactive: bool = True,  # Whether to ask user for tool selection when multiple options exist
         status_callback: Optional[Callable] = None,  # 状态回调函数，用于实时报告状态
         tool_access_mode: str = "default",
+        auto_compaction_enabled: bool = True,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
@@ -74,6 +75,7 @@ class Agent:
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
         self.interactive = interactive
+        self.auto_compaction_enabled = auto_compaction_enabled
         # Cancellation event for interrupting agent execution (set externally, e.g., by Esc key)
         self.cancel_event: Optional[asyncio.Event] = None
         # User input callback for interactive mode
@@ -262,6 +264,9 @@ class Agent:
         - Local token estimation exceeds limit
         - API reported total_tokens exceeds limit
         """
+        if not self.auto_compaction_enabled:
+            return
+
         # Skip check if we just completed a summary (wait for next LLM call to update api_total_tokens)
         if self._skip_next_token_check:
             self._skip_next_token_check = False

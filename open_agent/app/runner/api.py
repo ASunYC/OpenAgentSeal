@@ -25,6 +25,11 @@ from open_agent.app.runner.models import ChatSpec, ChatHistory, AgentRequest, Ag
 from open_agent.app.runner.manager import get_chat_manager
 from open_agent.app.runner.runner import get_runner
 from open_agent.app.runner.file_parser import MAX_FILE_BYTES
+from open_agent.app.runner.context_compaction import (
+    COMPACTION_META_KEY,
+    build_effective_history,
+    estimate_messages_tokens,
+)
 from open_agent.utils.path_utils import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -309,6 +314,75 @@ async def get_chat_history(chat_id: str, profile_id: str = Query(None)) -> dict:
     }
 
 
+@router.get("/chats/session/{session_id}/context-status")
+async def get_chat_context_status(session_id: str, profile_id: str = Query(None)) -> dict:
+    """Return the active model-context usage for a persisted chat session."""
+    from open_agent.agent_profiles import get_agent_profile_manager
+    from open_agent.user_config import (
+        get_user_config,
+        model_auto_compact_token_limit,
+        resolve_model_context_window,
+    )
+
+    manager = _chat_manager_for_profile(profile_id)
+    chat = await manager.repo.find_by_session_id(session_id)
+    config_manager = get_user_config()
+    settings = config_manager.get_settings()
+    model_id = chat.meta.get("context_model_id") if chat else None
+    if not model_id:
+        profile = get_agent_profile_manager().get_agent_config(profile_id)
+        model_id = profile.model_id if profile else None
+    model_config = (
+        config_manager.get_model(model_id) if model_id else None
+    ) or config_manager.get_default_model()
+    context_window, context_window_source = resolve_model_context_window(
+        model_config,
+        getattr(settings, "context_compaction_token_limit", 60_000),
+    )
+    token_limit = model_auto_compact_token_limit(context_window)
+    enabled = bool(getattr(settings, "auto_context_compaction", True))
+
+    if not chat:
+        return {
+            "session_id": session_id,
+            "enabled": enabled,
+            "used_tokens": 0,
+            "token_limit": token_limit,
+            "context_window": context_window,
+            "context_window_source": context_window_source,
+            "model_id": model_config.id if model_config else model_id,
+            "model_name": model_config.name if model_config else "",
+            "usage_percent": 0,
+            "compacted": False,
+            "compaction_count": 0,
+            "updated_at": None,
+        }
+
+    state = chat.meta.get(COMPACTION_META_KEY)
+    state = state if isinstance(state, dict) else {}
+    effective_history = build_effective_history(
+        manager.get_messages(session_id),
+        state,
+    )
+    used_tokens = estimate_messages_tokens(effective_history)
+    usage_percent = min(100, max(0, round(used_tokens / context_window * 100)))
+
+    return {
+        "session_id": session_id,
+        "enabled": enabled,
+        "used_tokens": used_tokens,
+        "token_limit": token_limit,
+        "context_window": context_window,
+        "context_window_source": context_window_source,
+        "model_id": model_config.id if model_config else model_id,
+        "model_name": model_config.name if model_config else "",
+        "usage_percent": usage_percent,
+        "compacted": bool(state.get("summary")),
+        "compaction_count": int(state.get("compaction_count") or 0),
+        "updated_at": state.get("updated_at"),
+    }
+
+
 @router.delete("/chats/session/{session_id}/messages")
 async def clear_chat_messages(session_id: str, profile_id: str = Query(None)) -> dict:
     """Clear persisted messages for a chat session while keeping chat metadata."""
@@ -317,6 +391,7 @@ async def clear_chat_messages(session_id: str, profile_id: str = Query(None)) ->
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     manager.clear_messages(session_id)
+    chat.meta.pop("context_compaction", None)
     await manager.update_chat(chat)
     return {"success": True, "session_id": session_id}
 
@@ -339,6 +414,7 @@ async def persist_chat_messages(
         )
     messages = [Message.model_validate(message) for message in request.messages]
     manager.replace_messages(session_id, messages)
+    chat.meta.pop("context_compaction", None)
     await manager.update_chat(chat)
     return {"success": True, "session_id": session_id, "count": len(messages)}
 

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mineru": {
+      "type": "streamable_http",
+      "url": "{{open_agent_api_url}}/api/plugins/mineru-mcp/",
+      "connect_timeout": 15,
+      "execute_timeout": 1800,
+      "sse_read_timeout": 1800
+    }
+  }
+}

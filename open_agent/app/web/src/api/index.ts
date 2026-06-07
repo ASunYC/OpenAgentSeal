@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
+import type { Chat, ChatHistory, ContextCompactionStatus, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
 import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
@@ -122,6 +122,12 @@ export const chatApi = {
 
   async getHistory(chatId: string, profileId?: string): Promise<ChatHistory> {
     return request<ChatHistory>(`/chats/${chatId}/history${profileQuery(profileId)}`)
+  },
+
+  async getContextStatus(runnerSessionId: string, profileId?: string): Promise<ContextCompactionStatus> {
+    return request<ContextCompactionStatus>(
+      `/chats/session/${encodeURIComponent(runnerSessionId)}/context-status${profileQuery(profileId)}`,
+    )
   },
 
   async clearMessages(runnerSessionId: string, profileId?: string): Promise<void> {
@@ -512,6 +518,16 @@ export const modelConfigApi = {
   async setDefault(configId: string): Promise<ApiResponse<void>> {
     return request<ApiResponse<void>>(`/model-configs/${configId}/default`, { method: 'POST' })
   },
+
+  async resolveContextWindow(modelName: string, provider = ''): Promise<{
+    model_name: string
+    provider: string
+    context_window: number
+    source: string
+  }> {
+    const query = new URLSearchParams({ model_name: modelName, provider })
+    return request(`/models/context-window?${query.toString()}`)
+  },
 }
 
 // Provider API - 提供商相关接口
@@ -549,6 +565,8 @@ interface BackendAppSettings {
   stream_response?: boolean
   enable_skills?: boolean
   use_cot?: boolean
+  auto_context_compaction?: boolean
+  context_compaction_token_limit?: number
 }
 
 export const settingsApi = {
@@ -563,6 +581,8 @@ export const settingsApi = {
       streamResponse: data.stream_response ?? true,
       enable_skills: data.enable_skills ?? true,
       useCoT: data.use_cot ?? false,
+      autoContextCompaction: data.auto_context_compaction ?? true,
+      contextCompactionTokenLimit: data.context_compaction_token_limit ?? 60000,
     }
   },
 
@@ -576,6 +596,12 @@ export const settingsApi = {
     if (settings.streamResponse !== undefined) payload.stream_response = settings.streamResponse
     if (settings.enable_skills !== undefined) payload.enable_skills = settings.enable_skills
     if (settings.useCoT !== undefined) payload.use_cot = settings.useCoT
+    if (settings.autoContextCompaction !== undefined) {
+      payload.auto_context_compaction = settings.autoContextCompaction
+    }
+    if (settings.contextCompactionTokenLimit !== undefined) {
+      payload.context_compaction_token_limit = settings.contextCompactionTokenLimit
+    }
 
     return request<ApiResponse<AppSettings>>('/settings', {
       method: 'POST',
@@ -737,6 +763,7 @@ export interface PluginSummary {
 export interface PluginMarketplace {
   name: string
   path?: string
+  kind?: string
   interface?: { displayName?: string; display_name?: string }
   plugins: PluginSummary[]
 }
@@ -750,6 +777,24 @@ export interface PluginDetail {
   mcp_servers: { name: string; enabled: boolean; config: Record<string, unknown> }[]
   apps: unknown
   hooks: unknown
+  settings?: {
+    schema?: {
+      title?: string
+      description?: string
+      fields: PluginSettingField[]
+    } | null
+    values: Record<string, unknown>
+  }
+}
+
+export interface PluginSettingField {
+  key: string
+  type: 'text' | 'url' | 'secret' | 'model' | 'select' | 'boolean'
+  label?: string
+  description?: string
+  default?: unknown
+  required?: boolean
+  options?: Array<{ label: string; value: string }>
 }
 
 export const pluginsApi = {
@@ -774,6 +819,13 @@ export const pluginsApi = {
 
   async setEnabled(pluginId: string, enabled: boolean): Promise<ApiResponse<{ plugin_id: string; enabled: boolean }>> {
     return request(`/plugins/${encodeURIComponent(pluginId)}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' })
+  },
+
+  async saveSettings(pluginId: string, values: Record<string, unknown>): Promise<{ success: boolean; plugin_id?: string; values?: Record<string, unknown>; error?: string }> {
+    return request(`/plugins/${encodeURIComponent(pluginId)}/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ values }),
+    })
   },
 
   async listMarketplaces(): Promise<{ success: boolean; marketplaces: { name: string; path: string; plugin_count: number; kind: string }[]; errors?: { marketplace_name?: string; message: string }[] }> {
@@ -925,6 +977,7 @@ export const api = {
   deleteChat: chatApi.delete,
   deleteChats: chatApi.deleteMany,
   getChatHistory: chatApi.getHistory,
+  getChatContextStatus: chatApi.getContextStatus,
   clearChatMessages: chatApi.clearMessages,
   persistChatMessages: chatApi.persistMessages,
   forkChat: chatApi.fork,
@@ -940,6 +993,7 @@ export const api = {
   saveModelConfig: modelConfigApi.save,
   deleteModelConfig: modelConfigApi.delete,
   setDefaultModelConfig: modelConfigApi.setDefault,
+  resolveModelContextWindow: modelConfigApi.resolveContextWindow,
 
   // Provider
   getProviders: providerApi.list,

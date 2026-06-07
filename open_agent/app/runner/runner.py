@@ -18,6 +18,12 @@ from open_agent.app.runner.models import (
 )
 from open_agent.app.runner.manager import ChatManager, get_chat_manager
 from open_agent.app.runner.file_parser import MAX_FILE_BYTES, attachment_to_context, parse_file_bytes
+from open_agent.app.runner.context_compaction import (
+    COMPACTION_META_KEY,
+    COMPACTION_SUMMARY_PREFIX,
+    ContextCompactor,
+    build_effective_history,
+)
 from open_agent.schema import Message as AgentMessage
 
 logger = logging.getLogger(__name__)
@@ -515,7 +521,15 @@ class AgentRunner:
             return "\n".join(text_parts).strip()
         return str(content or "")
 
-    def _restore_agent_history(self, agent: Any, session_id: str, chat_manager: ChatManager | None = None) -> None:
+    def _restore_agent_history(
+        self,
+        agent: Any,
+        session_id: str,
+        chat_manager: ChatManager | None = None,
+        compaction_state: dict[str, Any] | None = None,
+        auto_compaction_enabled: bool = False,
+        fallback_recent_only: bool = False,
+    ) -> None:
         chat_manager = chat_manager or self.chat_manager
         system_content = getattr(agent, "system_prompt", "")
         if getattr(agent, "messages", None):
@@ -528,13 +542,34 @@ class AgentRunner:
             restored.append(AgentMessage(role="system", content=system_content))
 
         persisted_messages = chat_manager.get_messages(session_id)
-        for stored in persisted_messages[-AGENT_HISTORY_MAX_MESSAGES:]:
-            if stored.role not in {"user", "assistant"}:
-                continue
-            content = self._content_to_agent_text(stored.content)
-            if isinstance(content, str) and not content.strip():
-                continue
-            restored.append(AgentMessage(role=stored.role, content=content))
+        if auto_compaction_enabled:
+            effective_history = build_effective_history(
+                persisted_messages,
+                compaction_state,
+            )
+            if fallback_recent_only and len(effective_history) > AGENT_HISTORY_MAX_MESSAGES:
+                if (
+                    effective_history
+                    and isinstance(effective_history[0].content, str)
+                    and effective_history[0].content.startswith(
+                        COMPACTION_SUMMARY_PREFIX
+                    )
+                ):
+                    effective_history = [
+                        effective_history[0],
+                        *effective_history[-AGENT_HISTORY_MAX_MESSAGES:],
+                    ]
+                else:
+                    effective_history = effective_history[-AGENT_HISTORY_MAX_MESSAGES:]
+            restored.extend(effective_history)
+        else:
+            for stored in persisted_messages[-AGENT_HISTORY_MAX_MESSAGES:]:
+                if stored.role not in {"user", "assistant"}:
+                    continue
+                content = self._content_to_agent_text(stored.content)
+                if isinstance(content, str) and not content.strip():
+                    continue
+                restored.append(AgentMessage(role=stored.role, content=content))
 
         agent.messages = restored or [AgentMessage(role="system", content=system_content or "")]
     
@@ -643,7 +678,71 @@ class AgentRunner:
             return
 
         agent.tool_access_mode = tool_access_mode
-        self._restore_agent_history(agent, session_id, chat_manager)
+        from open_agent.user_config import (
+            model_auto_compact_token_limit,
+            resolve_model_context_window,
+        )
+
+        app_settings = config_manager.get_settings()
+        active_model_config = (
+            config_manager.get_model(agent_config.model_id)
+            or config_manager.get_default_model()
+        )
+        model_context_window, model_context_source = resolve_model_context_window(
+            active_model_config,
+            getattr(app_settings, "context_compaction_token_limit", 60000),
+        )
+        auto_compact_token_limit = model_auto_compact_token_limit(
+            model_context_window
+        )
+        chat.meta["context_model_id"] = (
+            active_model_config.id if active_model_config else agent_config.model_id
+        )
+        chat.meta["context_window"] = model_context_window
+        chat.meta["context_window_source"] = model_context_source
+        chat.meta["auto_compact_token_limit"] = auto_compact_token_limit
+        auto_compaction_enabled = bool(
+            getattr(app_settings, "auto_context_compaction", True)
+        )
+        compaction_state = chat.meta.get(COMPACTION_META_KEY)
+        compaction_result = None
+        compaction_failed = False
+        if auto_compaction_enabled:
+            try:
+                compactor = ContextCompactor(
+                    token_limit=auto_compact_token_limit
+                )
+                compaction_result = await compactor.compact_if_needed(
+                    chat_manager.get_messages(session_id),
+                    agent.llm,
+                    compaction_state,
+                )
+                if compaction_result:
+                    compaction_state = compaction_result.state
+                    chat.meta[COMPACTION_META_KEY] = compaction_state
+                    await chat_manager.update_chat(chat)
+                    logger.info(
+                        "Compacted session %s: %d -> %d tokens (%d messages)",
+                        session_id,
+                        compaction_result.before_tokens,
+                        compaction_result.after_tokens,
+                        compaction_result.compacted_messages,
+                    )
+            except Exception:
+                compaction_failed = True
+                logger.warning(
+                    "Context compaction failed for session %s; continuing with current history",
+                    session_id,
+                    exc_info=True,
+                )
+        self._restore_agent_history(
+            agent,
+            session_id,
+            chat_manager,
+            compaction_state=compaction_state,
+            auto_compaction_enabled=auto_compaction_enabled,
+            fallback_recent_only=compaction_failed,
+        )
         search_context = await self._prefetch_web_search_context(user_content)
         agent_user_content = self._append_context_to_agent_content(agent_user_content, search_context)
         
@@ -703,6 +802,25 @@ class AgentRunner:
             session_id=session_id,
             status="running",
         ))
+        if compaction_result:
+            yield persist_event(
+                AgentEvent(
+                    event="context_compaction",
+                    session_id=session_id,
+                    status="completed",
+                    content=(
+                        f"已自动压缩早期上下文："
+                        f"{compaction_result.before_tokens} → "
+                        f"{compaction_result.after_tokens} tokens"
+                    ),
+                    result={
+                        "before_tokens": compaction_result.before_tokens,
+                        "after_tokens": compaction_result.after_tokens,
+                        "compacted_messages": compaction_result.compacted_messages,
+                        "compaction_count": compaction_result.state.get("compaction_count"),
+                    },
+                )
+            )
         
         # Create event collector for status callback
         event_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
@@ -1079,6 +1197,20 @@ class AgentRunner:
                 "</agent_profile>"
             )
             
+            from open_agent.user_config import (
+                model_auto_compact_token_limit,
+                resolve_model_context_window,
+            )
+
+            model_context_window, _ = resolve_model_context_window(
+                model_config,
+                getattr(
+                    config_manager.get_settings(),
+                    "context_compaction_token_limit",
+                    60000,
+                ),
+            )
+
             # Create agent
             agent = Agent(
                 llm_client=llm_client,
@@ -1086,6 +1218,8 @@ class AgentRunner:
                 tools=tools,
                 max_steps=agent_config.max_steps if hasattr(agent_config, 'max_steps') and agent_config.max_steps else 100,
                 workspace_dir=str(workspace_dir),
+                token_limit=model_auto_compact_token_limit(model_context_window),
+                auto_compaction_enabled=True,
             )
             
             logger.info(f"Agent created successfully")

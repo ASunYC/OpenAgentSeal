@@ -15,6 +15,8 @@ const defaultSettings: SystemSettings = {
   streamResponse: true,
   enable_skills: true,
   useCoT: false,
+  autoContextCompaction: true,
+  contextCompactionTokenLimit: 60000,
 }
 
 export const useSettingsStore = defineStore('settings', () => {

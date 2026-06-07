@@ -18,6 +18,7 @@ dependencies = [
     "prompt-toolkit>=3.0.0",
     "anthropic>=0.39.0",
     "openai>=1.57.4",
+    "markdown>=3.7",
     "agent-client-protocol>=0.6.0",
     "pillow>=12.1.1",
     # Web UI dependencies
@@ -53,7 +54,7 @@ exclude = ["tests*"]
 # Include skills directory (git submodule) as package data
 # After moving submodule to open_agent/skills
 [tool.setuptools.package-data]
-open_agent = ["skills/**/*"]
+open_agent = ["skills/**/*", "plugins/bundled/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
