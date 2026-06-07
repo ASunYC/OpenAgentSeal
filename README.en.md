@@ -467,7 +467,7 @@ Welcome to join our community!
 
 ## License
 
-MIT License
+Apache-2.0 License
 
 ---
 
