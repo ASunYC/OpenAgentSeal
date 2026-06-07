@@ -163,6 +163,16 @@ class ChatManager:
                 if chat.session_id in self._session_messages:
                     del self._session_messages[chat.session_id]
                 self.message_repo.delete_session_messages(chat.session_id)
+                try:
+                    from open_agent.app.runner.context_store import get_context_block_store
+
+                    get_context_block_store().delete_session(chat.session_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to delete context blocks for session %s",
+                        chat.session_id,
+                        exc_info=True,
+                    )
         
         return await self.repo.delete_chats(chat_ids)
     

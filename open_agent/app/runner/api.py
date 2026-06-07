@@ -30,6 +30,7 @@ from open_agent.app.runner.context_compaction import (
     build_effective_history,
     estimate_messages_tokens,
 )
+from open_agent.app.runner.context_store import ContextBlock, get_context_block_store
 from open_agent.utils.path_utils import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -319,6 +320,7 @@ async def get_chat_context_status(session_id: str, profile_id: str = Query(None)
     """Return the active model-context usage for a persisted chat session."""
     from open_agent.agent_profiles import get_agent_profile_manager
     from open_agent.user_config import (
+        DEFAULT_CONTEXT_WINDOW,
         get_user_config,
         model_auto_compact_token_limit,
         resolve_model_context_window,
@@ -337,15 +339,17 @@ async def get_chat_context_status(session_id: str, profile_id: str = Query(None)
     ) or config_manager.get_default_model()
     context_window, context_window_source = resolve_model_context_window(
         model_config,
-        getattr(settings, "context_compaction_token_limit", 60_000),
+        getattr(settings, "context_compaction_token_limit", DEFAULT_CONTEXT_WINDOW),
     )
     token_limit = model_auto_compact_token_limit(context_window)
-    enabled = bool(getattr(settings, "auto_context_compaction", True))
+    adaptive_enabled = bool(getattr(settings, "auto_context_compaction", True))
+    enabled = True
 
     if not chat:
         return {
             "session_id": session_id,
             "enabled": enabled,
+            "adaptive_enabled": adaptive_enabled,
             "used_tokens": 0,
             "token_limit": token_limit,
             "context_window": context_window,
@@ -370,6 +374,7 @@ async def get_chat_context_status(session_id: str, profile_id: str = Query(None)
     return {
         "session_id": session_id,
         "enabled": enabled,
+        "adaptive_enabled": adaptive_enabled,
         "used_tokens": used_tokens,
         "token_limit": token_limit,
         "context_window": context_window,
@@ -377,9 +382,74 @@ async def get_chat_context_status(session_id: str, profile_id: str = Query(None)
         "model_id": model_config.id if model_config else model_id,
         "model_name": model_config.name if model_config else "",
         "usage_percent": usage_percent,
-        "compacted": bool(state.get("summary")),
+        "compacted": bool(state.get("summary") or state.get("blocks")),
         "compaction_count": int(state.get("compaction_count") or 0),
         "updated_at": state.get("updated_at"),
+    }
+
+
+def _context_block_summary(block: ContextBlock) -> dict:
+    return {
+        "ref_id": block.ref_id,
+        "session_id": block.session_id,
+        "profile_id": block.profile_id,
+        "through_message_id": block.through_message_id,
+        "message_ids": block.message_ids,
+        "kind": block.kind,
+        "compressed_text": block.compressed_text,
+        "token_before": block.token_before,
+        "token_after": block.token_after,
+        "created_at": block.created_at,
+    }
+
+
+@router.get("/chats/session/{session_id}/context-blocks")
+async def list_chat_context_blocks(
+    session_id: str,
+    profile_id: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
+    """List CCR/reversible context blocks for a chat session."""
+    manager = _chat_manager_for_profile(profile_id)
+    chat = await manager.repo.find_by_session_id(session_id)
+    if not chat:
+        return {
+            "success": True,
+            "session_id": session_id,
+            "blocks": [],
+        }
+
+    blocks = get_context_block_store().list_blocks(session_id, limit=limit)
+    return {
+        "success": True,
+        "session_id": session_id,
+        "blocks": [_context_block_summary(block) for block in blocks],
+    }
+
+
+@router.get("/chats/session/{session_id}/context-block")
+async def get_chat_context_block(
+    session_id: str,
+    ref_id: str = Query(...),
+    profile_id: str = Query(None),
+    max_chars: int = Query(50000, ge=1000, le=500000),
+) -> dict:
+    """Return one original CCR context block, clipped for UI display."""
+    manager = _chat_manager_for_profile(profile_id)
+    chat = await manager.repo.find_by_session_id(session_id)
+
+    block = get_context_block_store().get_block(ref_id, session_id=session_id)
+    if not block:
+        raise HTTPException(status_code=404, detail="Context block not found")
+    if chat and profile_id and block.profile_id != profile_id:
+        raise HTTPException(status_code=404, detail="Context block not found")
+
+    original_text = block.original_text or ""
+    return {
+        "success": True,
+        **_context_block_summary(block),
+        "original_text": original_text[:max_chars],
+        "truncated": len(original_text) > max_chars,
     }
 
 
@@ -392,6 +462,10 @@ async def clear_chat_messages(session_id: str, profile_id: str = Query(None)) ->
         raise HTTPException(status_code=404, detail="Chat not found")
     manager.clear_messages(session_id)
     chat.meta.pop("context_compaction", None)
+    try:
+        get_context_block_store().delete_session(session_id)
+    except Exception:
+        logger.warning("Failed to delete context blocks for session %s", session_id, exc_info=True)
     await manager.update_chat(chat)
     return {"success": True, "session_id": session_id}
 
@@ -415,6 +489,10 @@ async def persist_chat_messages(
     messages = [Message.model_validate(message) for message in request.messages]
     manager.replace_messages(session_id, messages)
     chat.meta.pop("context_compaction", None)
+    try:
+        get_context_block_store().delete_session(session_id)
+    except Exception:
+        logger.warning("Failed to delete context blocks for session %s", session_id, exc_info=True)
     await manager.update_chat(chat)
     return {"success": True, "session_id": session_id, "count": len(messages)}
 

@@ -3,10 +3,11 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, ContextCompactionStatus, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
+import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
 import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
+const DEFAULT_CONTEXT_WINDOW = 1_000_000
 const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 export const isNativeMobileRuntime = Capacitor.isNativePlatform()
 export const MOBILE_SERVER_STORAGE_KEY = 'open-agent-mobile-server'
@@ -127,6 +128,26 @@ export const chatApi = {
   async getContextStatus(runnerSessionId: string, profileId?: string): Promise<ContextCompactionStatus> {
     return request<ContextCompactionStatus>(
       `/chats/session/${encodeURIComponent(runnerSessionId)}/context-status${profileQuery(profileId)}`,
+    )
+  },
+
+  async listContextBlocks(runnerSessionId: string, profileId?: string): Promise<ContextBlockSummary[]> {
+    const query = new URLSearchParams()
+    if (profileId) query.set('profile_id', profileId)
+    query.set('limit', '200')
+    const response = await request<{ blocks: ContextBlockSummary[] }>(
+      `/chats/session/${encodeURIComponent(runnerSessionId)}/context-blocks?${query.toString()}`,
+    )
+    return response.blocks || []
+  },
+
+  async getContextBlock(runnerSessionId: string, refId: string, profileId?: string): Promise<ContextBlockDetail> {
+    const query = new URLSearchParams()
+    query.set('ref_id', refId)
+    query.set('max_chars', '120000')
+    if (profileId) query.set('profile_id', profileId)
+    return request<ContextBlockDetail>(
+      `/chats/session/${encodeURIComponent(runnerSessionId)}/context-block?${query.toString()}`,
     )
   },
 
@@ -582,7 +603,7 @@ export const settingsApi = {
       enable_skills: data.enable_skills ?? true,
       useCoT: data.use_cot ?? false,
       autoContextCompaction: data.auto_context_compaction ?? true,
-      contextCompactionTokenLimit: data.context_compaction_token_limit ?? 60000,
+      contextCompactionTokenLimit: data.context_compaction_token_limit ?? DEFAULT_CONTEXT_WINDOW,
     }
   },
 
@@ -978,6 +999,8 @@ export const api = {
   deleteChats: chatApi.deleteMany,
   getChatHistory: chatApi.getHistory,
   getChatContextStatus: chatApi.getContextStatus,
+  listChatContextBlocks: chatApi.listContextBlocks,
+  getChatContextBlock: chatApi.getContextBlock,
   clearChatMessages: chatApi.clearMessages,
   persistChatMessages: chatApi.persistMessages,
   forkChat: chatApi.fork,

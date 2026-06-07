@@ -81,7 +81,7 @@ class ModelProvider(Enum):
             cls.OPENAI: ["gpt-4o", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
             cls.ANTHROPIC: ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229"],
             cls.DEEPSEEK: ["deepseek-chat", "deepseek-coder"],
-            cls.QWEN: ["qwen-turbo", "qwen-plus", "qwen-max", "qwen-max-longcontext"],
+            cls.QWEN: ["qwen3.6-plus", "qwen-plus", "qwen-max", "qwen-max-longcontext", "qwen-turbo"],
             cls.ZHIPU: ["glm-4", "glm-4-plus", "glm-3-turbo"],
             cls.VOLCANO: [],
             cls.MINIMAX: ["MiniMax-M2.5", "MiniMax-Text-01", "MiniMax-VL-01"],
@@ -137,6 +137,10 @@ class ModelConfig:
         )
 
 
+DEFAULT_CONTEXT_WINDOW = 1_000_000
+LEGACY_DEFAULT_CONTEXT_WINDOW = 60_000
+
+
 MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
@@ -154,6 +158,9 @@ MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
     "deepseek-chat": 128_000,
     "deepseek-reasoner": 128_000,
     "deepseek-coder": 128_000,
+    "qwen3.6-plus": 1_000_000,
+    "qwen3-plus": 1_000_000,
+    "qwen-plus": 1_000_000,
     "qwen-max-longcontext": 1_000_000,
 }
 
@@ -175,15 +182,17 @@ def infer_model_context_window(model_name: str, provider: str = "") -> Optional[
         return 128_000
     if normalized.startswith("deepseek-"):
         return 128_000
+    if normalized.startswith("qwen3.6-") or normalized.startswith("qwen3-"):
+        return 1_000_000
     return None
 
 
 def resolve_model_context_window(
     model: Optional[ModelConfig],
-    fallback: int = 60_000,
+    fallback: int = DEFAULT_CONTEXT_WINDOW,
 ) -> tuple[int, str]:
     """Resolve a model context window and its metadata source."""
-    fallback = max(8_000, int(fallback or 60_000))
+    fallback = max(8_000, int(fallback or DEFAULT_CONTEXT_WINDOW))
     if model and model.context_window:
         return max(8_000, int(model.context_window)), (
             model.context_window_source or "manual"
@@ -285,7 +294,7 @@ class AppSettings:
     enable_skills: bool = True             # 技能开关
 
     auto_context_compaction: bool = True
-    context_compaction_token_limit: int = 60000
+    context_compaction_token_limit: int = DEFAULT_CONTEXT_WINDOW
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -294,12 +303,15 @@ class AppSettings:
     def from_dict(cls, data: Dict[str, Any]) -> "AppSettings":
         values = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         try:
+            raw_limit = values.get("context_compaction_token_limit", DEFAULT_CONTEXT_WINDOW)
+            if raw_limit == LEGACY_DEFAULT_CONTEXT_WINDOW:
+                raw_limit = DEFAULT_CONTEXT_WINDOW
             values["context_compaction_token_limit"] = max(
                 8000,
-                int(values.get("context_compaction_token_limit", 60000)),
+                int(raw_limit),
             )
         except (TypeError, ValueError):
-            values["context_compaction_token_limit"] = 60000
+            values["context_compaction_token_limit"] = DEFAULT_CONTEXT_WINDOW
         return cls(**values)
 
 
@@ -329,7 +341,7 @@ class UserConfigManager:
             "use_cot": False,
             "enable_skills": True,
             "auto_context_compaction": True,
-            "context_compaction_token_limit": 60000
+            "context_compaction_token_limit": DEFAULT_CONTEXT_WINDOW
         },
         "smart_routing": {
             "enabled": False,

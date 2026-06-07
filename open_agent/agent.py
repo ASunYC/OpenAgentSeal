@@ -88,6 +88,8 @@ class Agent:
         self.current_step = 0
         self.current_thinking = ""
         self.current_tool_call = None
+        self.session_id: str = ""
+        self.profile_id: str = "main"
 
         # Ensure workspace exists
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -671,9 +673,37 @@ Requirements:
                     )
 
                 # Add tool result message
+                tool_content_for_history = result.content if result.success else f"Error: {result.error}"
+                if result.success and result.content:
+                    try:
+                        from .app.runner.tool_output_compaction import compact_tool_output_if_needed
+
+                        compacted_tool_output = compact_tool_output_if_needed(
+                            content=result.content,
+                            tool_name=function_name,
+                            session_id=self.session_id or "agent-session",
+                            profile_id=self.profile_id,
+                            metadata={"tool_call_id": tool_call_id},
+                        )
+                        if compacted_tool_output:
+                            tool_content_for_history = compacted_tool_output.content
+                            print(
+                                f"{Colors.DIM}   Tool output compacted for context: "
+                                f"{compacted_tool_output.before_tokens} -> "
+                                f"{compacted_tool_output.after_tokens} tokens, "
+                                f"ref={compacted_tool_output.ref_id}{Colors.RESET}"
+                            )
+                    except Exception:
+                        import logging
+
+                        logging.getLogger(__name__).warning(
+                            "Failed to compact tool output for %s",
+                            function_name,
+                            exc_info=True,
+                        )
                 tool_msg = Message(
                     role="tool",
-                    content=result.content if result.success else f"Error: {result.error}",
+                    content=tool_content_for_history,
                     tool_call_id=tool_call_id,
                     name=function_name,
                 )

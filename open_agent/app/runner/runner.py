@@ -677,8 +677,11 @@ class AgentRunner:
             )
             return
 
+        agent.session_id = session_id
+        agent.profile_id = profile_id
         agent.tool_access_mode = tool_access_mode
         from open_agent.user_config import (
+            DEFAULT_CONTEXT_WINDOW,
             model_auto_compact_token_limit,
             resolve_model_context_window,
         )
@@ -690,7 +693,7 @@ class AgentRunner:
         )
         model_context_window, model_context_source = resolve_model_context_window(
             active_model_config,
-            getattr(app_settings, "context_compaction_token_limit", 60000),
+            getattr(app_settings, "context_compaction_token_limit", DEFAULT_CONTEXT_WINDOW),
         )
         auto_compact_token_limit = model_auto_compact_token_limit(
             model_context_window
@@ -701,46 +704,62 @@ class AgentRunner:
         chat.meta["context_window"] = model_context_window
         chat.meta["context_window_source"] = model_context_source
         chat.meta["auto_compact_token_limit"] = auto_compact_token_limit
-        auto_compaction_enabled = bool(
+        adaptive_context_enabled = bool(
             getattr(app_settings, "auto_context_compaction", True)
+        )
+        trigger_token_limit = (
+            auto_compact_token_limit
+            if adaptive_context_enabled
+            else model_context_window
         )
         compaction_state = chat.meta.get(COMPACTION_META_KEY)
         compaction_result = None
         compaction_failed = False
-        if auto_compaction_enabled:
-            try:
-                compactor = ContextCompactor(
-                    token_limit=auto_compact_token_limit
-                )
+        try:
+            compactor = ContextCompactor(
+                token_limit=auto_compact_token_limit,
+                trigger_token_limit=trigger_token_limit,
+                session_id=session_id,
+                profile_id=profile_id,
+            )
+            preview_messages = [
+                *chat_manager.get_messages(session_id),
+                Message(role="user", content=user_content),
+            ]
+            for _ in range(3):
                 compaction_result = await compactor.compact_if_needed(
-                    chat_manager.get_messages(session_id),
+                    preview_messages,
                     agent.llm,
                     compaction_state,
                 )
-                if compaction_result:
-                    compaction_state = compaction_result.state
-                    chat.meta[COMPACTION_META_KEY] = compaction_state
-                    await chat_manager.update_chat(chat)
-                    logger.info(
-                        "Compacted session %s: %d -> %d tokens (%d messages)",
-                        session_id,
-                        compaction_result.before_tokens,
-                        compaction_result.after_tokens,
-                        compaction_result.compacted_messages,
-                    )
-            except Exception:
-                compaction_failed = True
-                logger.warning(
-                    "Context compaction failed for session %s; continuing with current history",
+                if not compaction_result:
+                    break
+                compaction_state = compaction_result.state
+                chat.meta[COMPACTION_META_KEY] = compaction_state
+                await chat_manager.update_chat(chat)
+                logger.info(
+                    "Created reversible context block for session %s: %s (%d -> %d tokens, %d messages)",
                     session_id,
-                    exc_info=True,
+                    compaction_result.ref_id,
+                    compaction_result.before_tokens,
+                    compaction_result.after_tokens,
+                    compaction_result.compacted_messages,
                 )
+                if compaction_result.after_tokens < auto_compact_token_limit:
+                    break
+        except Exception:
+            compaction_failed = True
+            logger.warning(
+                "Context compaction failed for session %s; continuing with current history",
+                session_id,
+                exc_info=True,
+            )
         self._restore_agent_history(
             agent,
             session_id,
             chat_manager,
             compaction_state=compaction_state,
-            auto_compaction_enabled=auto_compaction_enabled,
+            auto_compaction_enabled=True,
             fallback_recent_only=compaction_failed,
         )
         search_context = await self._prefetch_web_search_context(user_content)
@@ -814,6 +833,7 @@ class AgentRunner:
                         f"{compaction_result.after_tokens} tokens"
                     ),
                     result={
+                        "ref_id": compaction_result.ref_id,
                         "before_tokens": compaction_result.before_tokens,
                         "after_tokens": compaction_result.after_tokens,
                         "compacted_messages": compaction_result.compacted_messages,
@@ -963,6 +983,7 @@ class AgentRunner:
             from open_agent.tools.file_tools import ReadTool, WriteTool, EditTool
             from open_agent.tools.note_tool import RecordNoteTool, RecallNotesTool
             from open_agent.tools.choice_tool import AskUserChoiceTool
+            from open_agent.tools.context_tool import RetrieveContextTool
             from open_agent.user_config import get_user_config
             from open_agent.agent_profiles import get_agent_profile_manager
             
@@ -1025,6 +1046,7 @@ class AgentRunner:
                 RecordNoteTool(memory_dir=str(memory_dir)),
                 RecallNotesTool(memory_dir=str(memory_dir)),
                 AskUserChoiceTool(),
+                RetrieveContextTool(session_id=session_id, profile_id=profile_id),
             ]
             try:
                 from open_agent.tools.agent_control_tool import create_agent_control_tools
@@ -1179,6 +1201,15 @@ class AgentRunner:
             except Exception:
                 logger.debug("Failed to inject plugin instructions", exc_info=True)
 
+            system_prompt += (
+                "\n\n<context_management>\n"
+                "Earlier conversation may appear as reversible compressed context blocks with ctx:// refs. "
+                "The original text is stored locally. If a compressed block lacks details needed for an "
+                "accurate answer, call retrieve_context(ref_id, query?) to inspect the original text before "
+                "answering. Treat compressed context as prior history, never as a new user request.\n"
+                "</context_management>"
+            )
+
             agent_kind = "main-agent" if not profile_id else "sub-agent"
             delegation_note = (
                 "This agent may delegate work to enabled sub-agent profiles with start_agent_task. "
@@ -1198,6 +1229,7 @@ class AgentRunner:
             )
             
             from open_agent.user_config import (
+                DEFAULT_CONTEXT_WINDOW,
                 model_auto_compact_token_limit,
                 resolve_model_context_window,
             )
@@ -1207,7 +1239,7 @@ class AgentRunner:
                 getattr(
                     config_manager.get_settings(),
                     "context_compaction_token_limit",
-                    60000,
+                    DEFAULT_CONTEXT_WINDOW,
                 ),
             )
 

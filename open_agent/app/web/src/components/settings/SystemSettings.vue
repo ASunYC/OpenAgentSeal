@@ -73,8 +73,8 @@
 
         <label class="toggle-item">
           <div>
-            <strong>{{ t('\u81ea\u52a8\u538b\u7f29\u4e0a\u4e0b\u6587', 'Automatic context compaction') }}</strong>
-            <p>{{ t('\u4f1a\u8bdd\u8f83\u957f\u65f6\u5c06\u65e9\u671f\u5185\u5bb9\u538b\u7f29\u4e3a\u6301\u4e45\u5316\u6458\u8981\uff0c\u539f\u59cb\u804a\u5929\u8bb0\u5f55\u4ecd\u4f1a\u5b8c\u6574\u4fdd\u7559', 'Compress older messages into a persistent summary while keeping the full visible chat history') }}</p>
+            <strong>{{ t('\u4e0a\u4e0b\u6587\u81ea\u52a8\u538b\u7f29', 'Auto context compaction') }}</strong>
+            <p>{{ t('\u4e3b\u52a8\u5c06\u8f83\u957f\u4f1a\u8bdd\u4e34\u65f6\u538b\u7f29\u6210\u53ef\u68c0\u7d22\u6458\u8981\uff1b\u8d85\u8fc7\u5f53\u524d\u6a21\u578b\u4e0a\u9650\u65f6\u59cb\u7ec8\u4f1a\u81ea\u52a8\u4fdd\u62a4', 'Automatically compact long conversations into retrievable temporary summaries; overflow protection always runs when the current model limit would be exceeded') }}</p>
           </div>
           <input v-model="settings.autoContextCompaction" type="checkbox" />
         </label>
@@ -88,7 +88,6 @@
           min="8000"
           max="500000"
           step="1000"
-          :disabled="!settings.autoContextCompaction"
         />
         <small>{{ t('\u4ec5\u5728\u65e0\u6cd5\u8bc6\u522b\u6a21\u578b\u4e0a\u4e0b\u6587\u65f6\u4f7f\u7528\uff1b\u5df2\u8bc6\u522b\u6216\u624b\u52a8\u8bbe\u7f6e\u7684\u6a21\u578b\u4f18\u5148', 'Used only when model context cannot be detected; detected or manually configured model values take priority') }}</small>
       </label>

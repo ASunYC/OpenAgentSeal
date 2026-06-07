@@ -382,6 +382,22 @@
                           <span></span>
                         </span>
                       </button>
+                      <button
+                        class="composer-toggle-row"
+                        :class="{ active: settingsStore.settings.autoContextCompaction }"
+                        :aria-pressed="settingsStore.settings.autoContextCompaction"
+                        @click="runComposerAction('context')"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M4 7h16"/>
+                          <path d="M7 12h10"/>
+                          <path d="M10 17h4"/>
+                        </svg>
+                        <span class="composer-toggle-label">{{ t('上下文自动压缩', 'Auto context compaction') }}</span>
+                        <span class="composer-toggle-switch" aria-hidden="true">
+                          <span></span>
+                        </span>
+                      </button>
                       <button :class="{ active: skillsEnabled }" @click="runComposerAction('skills')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
@@ -581,6 +597,13 @@
               >
                 {{ t('运行事件', 'Runtime events') }}
               </button>
+              <button
+                class="workspace-tab"
+                :class="{ active: runtimePanelTab === 'context' }"
+                @click="switchRuntimePanelTab('context')"
+              >
+                {{ t('上下文', 'Context') }}
+              </button>
             </div>
 
             <div v-if="runtimePanelTab === 'chats'" class="workspace-chats">
@@ -640,7 +663,7 @@
               </div>
             </div>
 
-            <template v-else>
+            <template v-else-if="runtimePanelTab === 'runtime'">
               <div class="runtime-toolbar">
                 <div class="runtime-summary">
                   <span class="runtime-summary-value">{{ runtimeEvents.length }}</span>
@@ -702,6 +725,90 @@
                 </div>
               </div>
             </template>
+
+            <div v-else class="context-workspace">
+              <div class="runtime-toolbar">
+                <div class="runtime-summary">
+                  <span class="runtime-summary-value">{{ contextBlocks.length }}</span>
+                  <span>{{ t('压缩块', 'Blocks') }}</span>
+                </div>
+                <button class="runtime-refresh" @click="loadContextBlocks" :disabled="contextBlocksLoading" :title="t('刷新', 'Refresh')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                    <path d="M21 3v6h-6"/>
+                  </svg>
+                </button>
+              </div>
+
+              <div class="context-meta">
+                <div>
+                  <span>{{ t('会话', 'Session') }}</span>
+                  <strong>{{ runnerSessionId || '-' }}</strong>
+                </div>
+                <div>
+                  <span>{{ t('当前上下文', 'Context') }}</span>
+                  <strong>{{ contextStatus.used_tokens }}/{{ contextStatus.context_window }} Token</strong>
+                </div>
+              </div>
+
+              <div v-if="contextBlocksError" class="runtime-empty">{{ contextBlocksError }}</div>
+              <div v-else-if="contextBlocksLoading" class="runtime-empty">{{ t('加载中...', 'Loading...') }}</div>
+              <div v-else-if="!contextBlocks.length" class="runtime-empty">
+                {{ t('当前会话还没有上下文压缩块', 'No compressed context blocks for this session yet') }}
+              </div>
+
+              <div v-else class="context-content">
+                <article
+                  v-for="block in contextBlocks"
+                  :key="block.ref_id"
+                  class="context-block-card"
+                  :class="{ active: selectedContextBlockRef === block.ref_id }"
+                >
+                  <div class="context-block-head">
+                    <span class="context-kind">{{ formatContextBlockKind(block.kind) }}</span>
+                    <time>{{ formatChatDate(block.created_at) }}</time>
+                  </div>
+                  <div class="context-ref">{{ block.ref_id }}</div>
+                  <p class="context-preview">{{ block.compressed_text }}</p>
+                  <div class="context-block-foot">
+                    <span>{{ block.token_before }} → {{ block.token_after }} Token</span>
+                    <div class="context-block-actions">
+                      <button type="button" class="context-open-original" @click="copyContextRef(block.ref_id)">
+                        {{ t('复制 ref', 'Copy ref') }}
+                      </button>
+                      <button type="button" class="context-open-original" @click="insertContextRef(block.ref_id)">
+                        {{ t('插入引用', 'Insert ref') }}
+                      </button>
+                      <button type="button" class="context-open-original primary" @click="openContextBlock(block.ref_id)">
+                        {{ selectedContextBlockRef === block.ref_id ? t('刷新原文', 'Reload original') : t('查看原文', 'View original') }}
+                      </button>
+                    </div>
+                  </div>
+                </article>
+
+                <section v-if="selectedContextBlock || selectedContextBlockLoading" class="context-original-panel">
+                  <div class="context-original-head">
+                    <div>
+                      <h4>{{ t('原文', 'Original text') }}</h4>
+                      <p>{{ selectedContextBlockRef }}</p>
+                    </div>
+                    <button type="button" class="workspace-chat-delete" @click="closeContextBlock">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6 6 18"/>
+                        <path d="m6 6 12 12"/>
+                      </svg>
+                    </button>
+                  </div>
+                  <div v-if="selectedContextBlockLoading" class="runtime-empty">{{ t('加载原文中...', 'Loading original text...') }}</div>
+                  <template v-else-if="selectedContextBlock">
+                    <div v-if="selectedContextBlock.truncated" class="context-truncated">
+                      {{ t('原文较长，当前仅展示前 120000 字符。智能体可通过 retrieve_context 获取完整内容。', 'This original text is long; showing the first 120000 characters. The agent can retrieve the full content with retrieve_context.') }}
+                    </div>
+                    <pre class="context-original-text">{{ selectedContextBlock.original_text }}</pre>
+                  </template>
+                </section>
+              </div>
+            </div>
           </section>
 
           <SandboxPanel v-if="activeWorkspacePanel === 'sandbox'" />
@@ -819,6 +926,22 @@
                       <path d="M18 6h3V3"/>
                     </svg>
                     <span class="composer-toggle-label">{{ t('迭代模式', 'Iteration mode') }}</span>
+                    <span class="composer-toggle-switch" aria-hidden="true">
+                      <span></span>
+                    </span>
+                  </button>
+                  <button
+                    class="composer-toggle-row"
+                    :class="{ active: settingsStore.settings.autoContextCompaction }"
+                    :aria-pressed="settingsStore.settings.autoContextCompaction"
+                    @click="runComposerAction('context')"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M4 7h16"/>
+                      <path d="M7 12h10"/>
+                      <path d="M10 17h4"/>
+                    </svg>
+                    <span class="composer-toggle-label">{{ t('上下文自动压缩', 'Auto context compaction') }}</span>
                     <span class="composer-toggle-switch" aria-hidden="true">
                       <span></span>
                     </span>
@@ -983,16 +1106,17 @@ import SandboxPanel from '@/components/SandboxPanel.vue'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
-import type { AgentConfig, AgentEvent, Chat, ChatAttachment, ContextCompactionStatus, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
+import type { AgentConfig, AgentEvent, Chat, ChatAttachment, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
 const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
+const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
 // 褰撳墠瑙嗗浘
 type WorkspacePanel = '' | 'browser' | 'runtime' | 'sandbox'
-type RuntimePanelTab = 'chats' | 'runtime'
+type RuntimePanelTab = 'chats' | 'runtime' | 'context'
 type ToolAccessMode = 'default' | 'full'
 
 const activeWorkspacePanel = ref<WorkspacePanel>('')
@@ -1222,9 +1346,10 @@ const messages = ref<Message[]>([])
 const contextStatus = ref<ContextCompactionStatus>({
   session_id: '',
   enabled: true,
+  adaptive_enabled: true,
   used_tokens: 0,
-  token_limit: 60000,
-  context_window: 60000,
+  token_limit: Math.floor(DEFAULT_CONTEXT_WINDOW * 0.9),
+  context_window: DEFAULT_CONTEXT_WINDOW,
   context_window_source: 'fallback',
   usage_percent: 0,
   compacted: false,
@@ -1265,6 +1390,12 @@ const runtimeTurns = ref<RuntimeTurn[]>([])
 const runtimeEvents = ref<RuntimeEvent[]>([])
 const runtimeLoading = ref(false)
 const runtimeError = ref('')
+const contextBlocks = ref<ContextBlockSummary[]>([])
+const contextBlocksLoading = ref(false)
+const contextBlocksError = ref('')
+const selectedContextBlockRef = ref('')
+const selectedContextBlock = ref<ContextBlockDetail | null>(null)
+const selectedContextBlockLoading = ref(false)
 let unlistenDesktopFileDrops: (() => void) | null = null
 
 // 缈昏瘧鍑芥暟
@@ -1387,6 +1518,11 @@ function formatChatDate(timestamp?: string): string {
   })
 }
 
+function formatContextBlockKind(kind?: string): string {
+  if (kind === 'tool_output') return t('工具输出', 'Tool output')
+  return t('会话', 'Chat')
+}
+
 // 娓叉煋 Markdown
 function renderMarkdown(content: string): string {
   try {
@@ -1467,8 +1603,11 @@ async function switchAgentSession(agentId: string) {
   }
   await loadChatHistory()
   resetRuntimeReplay()
+  resetContextBlocks()
   if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
     await loadRuntimeReplay()
+  } else if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'context') {
+    await loadContextBlocks()
   }
   await nextTick()
   scrollSelectedAgentIntoView()
@@ -1592,6 +1731,14 @@ function resetRuntimeReplay() {
   runtimeError.value = ''
 }
 
+function resetContextBlocks() {
+  contextBlocks.value = []
+  contextBlocksError.value = ''
+  selectedContextBlockRef.value = ''
+  selectedContextBlock.value = null
+  selectedContextBlockLoading.value = false
+}
+
 async function openRuntimePanel() {
   if (activeWorkspacePanel.value === 'runtime') {
     closeWorkspacePanel()
@@ -1622,7 +1769,11 @@ async function switchRuntimePanelTab(tab: RuntimePanelTab) {
     await chatStore.loadChats()
     return
   }
-  await loadRuntimeReplay()
+  if (tab === 'runtime') {
+    await loadRuntimeReplay()
+    return
+  }
+  await loadContextBlocks()
 }
 
 async function openManagedChat(chat: Chat) {
@@ -1638,11 +1789,14 @@ async function openManagedChat(chat: Chat) {
   pendingAttachments.value = []
   inputMessage.value = ''
   resetRuntimeReplay()
+  resetContextBlocks()
 
   await chatStore.selectChat(chat.id)
   await loadChatHistory()
   if (runtimePanelTab.value === 'runtime') {
     await loadRuntimeReplay()
+  } else if (runtimePanelTab.value === 'context') {
+    await loadContextBlocks()
   }
 }
 
@@ -1656,6 +1810,7 @@ async function deleteManagedChat(chat: Chat) {
     messages.value = []
     pendingAttachments.value = []
     resetRuntimeReplay()
+    resetContextBlocks()
     if (selectedAgentId.value) {
       localStorage.removeItem(`session_${selectedAgentId.value}`)
       await createOrGetSession()
@@ -1699,6 +1854,7 @@ async function clearAllManagedChats() {
     messages.value = []
     pendingAttachments.value = []
     resetRuntimeReplay()
+    resetContextBlocks()
     if (selectedAgentId.value) {
       localStorage.removeItem(`session_${selectedAgentId.value}`)
       await createOrGetSession()
@@ -1735,6 +1891,84 @@ async function loadRuntimeReplay() {
   } finally {
     runtimeLoading.value = false
   }
+}
+
+async function loadContextBlocks() {
+  const sessionId = runnerSessionId.value
+  if (!sessionId) {
+    resetContextBlocks()
+    return
+  }
+
+  contextBlocksLoading.value = true
+  contextBlocksError.value = ''
+  try {
+    const blocks = await api.listChatContextBlocks(sessionId, selectedAgentId.value || 'main')
+    if (runnerSessionId.value === sessionId) {
+      contextBlocks.value = blocks
+      if (selectedContextBlockRef.value && !blocks.some(block => block.ref_id === selectedContextBlockRef.value)) {
+        closeContextBlock()
+      }
+    }
+  } catch (error) {
+    contextBlocks.value = []
+    selectedContextBlock.value = null
+    selectedContextBlockRef.value = ''
+    const message = error instanceof Error ? error.message : String(error)
+    if (!message.includes('404')) {
+      contextBlocksError.value = message
+    }
+  } finally {
+    contextBlocksLoading.value = false
+  }
+}
+
+async function openContextBlock(refId: string) {
+  const sessionId = runnerSessionId.value
+  if (!sessionId || !refId) return
+
+  selectedContextBlockRef.value = refId
+  selectedContextBlockLoading.value = true
+  selectedContextBlock.value = null
+  try {
+    const block = await api.getChatContextBlock(sessionId, refId, selectedAgentId.value || 'main')
+    if (runnerSessionId.value === sessionId && selectedContextBlockRef.value === refId) {
+      selectedContextBlock.value = block
+    }
+  } catch (error) {
+    contextBlocksError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    selectedContextBlockLoading.value = false
+  }
+}
+
+async function copyContextRef(refId: string) {
+  if (!refId) return
+  try {
+    await navigator.clipboard?.writeText(refId)
+  } catch (error) {
+    console.warn('Failed to copy context ref:', error)
+  }
+}
+
+function insertContextRef(refId: string) {
+  if (!refId) return
+  const line = t(
+    `请读取这个上下文原文并继续分析：${refId}`,
+    `Please retrieve this context block and continue the analysis: ${refId}`,
+  )
+  inputMessage.value = inputMessage.value.trim()
+    ? `${inputMessage.value}\n${line}`
+    : line
+  nextTick(() => {
+    activeComposerTextarea?.focus()
+  })
+}
+
+function closeContextBlock() {
+  selectedContextBlockRef.value = ''
+  selectedContextBlock.value = null
+  selectedContextBlockLoading.value = false
 }
 
 function syncRuntimeEventFromStream(event: AgentEvent) {
@@ -2013,7 +2247,7 @@ async function switchToMentionAgent(agentId: string) {
   await switchAgentSession(agentId)
 }
 
-async function runComposerAction(action: 'image' | 'clear' | 'new' | 'fork' | 'cot' | 'skills') {
+async function runComposerAction(action: 'image' | 'clear' | 'new' | 'fork' | 'cot' | 'context' | 'skills') {
   closeComposerMenu()
   if (action === 'image') {
     openAttachmentPicker()
@@ -2033,6 +2267,12 @@ async function runComposerAction(action: 'image' | 'clear' | 'new' | 'fork' | 'c
   }
   if (action === 'skills') {
     await toggleSkills()
+    return
+  }
+  if (action === 'context') {
+    settingsStore.updateSettings({
+      autoContextCompaction: !settingsStore.settings.autoContextCompaction,
+    })
     return
   }
   settingsStore.toggleCoT()
@@ -2576,6 +2816,9 @@ async function sendMessage() {
     await api.chat(sendSessionId, userMessage, (event) => {
       console.log('[Iteration Debug] Received event:', event)
       syncRuntimeEventFromStream(event)
+      if (event.event === 'context_compaction' && activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'context') {
+        void loadContextBlocks()
+      }
 
       if (event.event === 'message' && event.content) {
         assistantContent = event.content
@@ -2724,6 +2967,8 @@ async function sendMessage() {
     saveMessages()
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
       await chatStore.loadChats()
+    } else if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'context') {
+      await loadContextBlocks()
     }
     await refreshContextStatus()
   }
@@ -2762,6 +3007,10 @@ async function clearChat() {
     }
   }
   await refreshContextStatus()
+  resetContextBlocks()
+  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'context') {
+    await loadContextBlocks()
+  }
 }
 
 // 婊氬姩鍒板簳閮?
@@ -4420,7 +4669,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  width: 190px;
+  width: 230px;
   padding: 8px;
   border: 1px solid var(--border-color);
   border-radius: 14px;
@@ -4480,13 +4729,16 @@ onUnmounted(() => {
 .composer-toggle-label {
   min-width: 0;
   flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-toggle-switch {
   position: relative;
-  width: 30px;
-  height: 18px;
-  flex: 0 0 30px;
+  width: 34px;
+  height: 20px;
+  flex: 0 0 34px;
   border: 1px solid color-mix(in srgb, var(--text-secondary) 20%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--text-secondary) 25%, transparent);
@@ -4497,8 +4749,8 @@ onUnmounted(() => {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: #ffffff;
   box-shadow: 0 1px 4px rgba(15, 23, 42, 0.28);
@@ -4511,7 +4763,7 @@ onUnmounted(() => {
 }
 
 .composer-toggle-row.active .composer-toggle-switch > span {
-  transform: translateX(12px);
+  transform: translateX(14px);
 }
 
 .context-compaction-status {
@@ -5549,7 +5801,7 @@ onUnmounted(() => {
 .workspace-tabs {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   padding: 10px 12px;
   background: var(--glass-bg);
@@ -5925,6 +6177,212 @@ onUnmounted(() => {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.context-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.context-meta {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.context-meta div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.context-meta strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.context-block-card {
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--glass-bg-strong);
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.05);
+  overflow: hidden;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.context-block-card:hover {
+  transform: translateY(-1px);
+}
+
+.context-block-card.active {
+  border-color: rgba(47, 110, 244, 0.32);
+  box-shadow: inset 3px 0 0 var(--primary-color), 0 10px 24px rgba(47, 110, 244, 0.08);
+}
+
+.context-block-head,
+.context-block-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+}
+
+.context-block-head {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.context-block-head time,
+.context-block-foot span {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.context-block-actions {
+  min-width: 0;
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.context-kind {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-ref {
+  margin: 10px 10px 0;
+  overflow: hidden;
+  color: #245bd2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-preview {
+  max-height: 132px;
+  margin: 8px 10px 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.context-open-original {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(47, 110, 244, 0.22);
+  border-radius: 9px;
+  background: rgba(47, 110, 244, 0.08);
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.context-open-original.primary {
+  background: rgba(47, 110, 244, 0.13);
+}
+
+.context-open-original:hover {
+  border-color: rgba(47, 110, 244, 0.42);
+  background: rgba(47, 110, 244, 0.14);
+}
+
+.context-original-panel {
+  border: 1px solid rgba(47, 110, 244, 0.24);
+  border-radius: 14px;
+  background: var(--glass-bg-strong);
+  box-shadow: 0 14px 32px rgba(47, 110, 244, 0.08);
+  overflow: hidden;
+}
+
+.context-original-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.context-original-head div {
+  min-width: 0;
+}
+
+.context-original-head h4 {
+  margin: 0 0 3px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.context-original-head p {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-truncated {
+  margin: 10px 12px 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #a16207;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.context-original-text {
+  max-height: 340px;
+  margin: 10px 12px 12px;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 10px;
+  background: rgba(17, 24, 39, 0.06);
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }

@@ -352,7 +352,8 @@ class AgentService:
         
         # 创建Agent实例
         llm_client = self._create_llm_client(model, provider, config)
-        tools = self._create_tools(config)
+        tool_config = {**(config or {}), "_context_session_id": agent_id}
+        tools = self._create_tools(tool_config)
         system_prompt = self._get_system_prompt(config)
         
         agent = Agent(
@@ -362,6 +363,8 @@ class AgentService:
             max_steps=config.get("max_steps", 100) if config else 100,
             workspace_dir=str(self.workspace_dir),
         )
+        agent.session_id = agent_id
+        agent.profile_id = "main"
         
         # 注册Agent
         now = datetime.now().isoformat()
@@ -684,6 +687,7 @@ class AgentService:
         from open_agent.tools.file_tools import ReadTool, WriteTool, EditTool
         from open_agent.tools.note_tool import RecordNoteTool, RecallNotesTool
         from open_agent.tools.choice_tool import AskUserChoiceTool
+        from open_agent.tools.context_tool import RetrieveContextTool
         
         tools = []
         
@@ -704,6 +708,8 @@ class AgentService:
         
         # 选择工具
         tools.append(AskUserChoiceTool())
+        context_session_id = str((config or {}).get("_context_session_id") or "agent-session")
+        tools.append(RetrieveContextTool(session_id=context_session_id, profile_id="main"))
 
         # 联网搜索工具
         config_obj = None

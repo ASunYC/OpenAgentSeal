@@ -35,6 +35,7 @@ export interface ChatHistory {
 export interface ContextCompactionStatus {
   session_id: string
   enabled: boolean
+  adaptive_enabled?: boolean
   used_tokens: number
   token_limit: number
   context_window: number
@@ -45,6 +46,24 @@ export interface ContextCompactionStatus {
   compacted: boolean
   compaction_count: number
   updated_at?: string | null
+}
+
+export interface ContextBlockSummary {
+  ref_id: string
+  session_id: string
+  profile_id: string
+  through_message_id: string
+  message_ids: string[]
+  kind: string
+  compressed_text: string
+  token_before: number
+  token_after: number
+  created_at: string
+}
+
+export interface ContextBlockDetail extends ContextBlockSummary {
+  original_text: string
+  truncated: boolean
 }
 
 export interface ChatAttachment {

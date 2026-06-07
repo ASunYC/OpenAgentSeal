@@ -4,6 +4,7 @@ import { settingsApi } from '@/api'
 import type { SystemSettings } from '@/types'
 
 const SETTINGS_VERSION = 3
+const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
 const defaultSettings: SystemSettings = {
   language: 'zh-CN',
@@ -16,7 +17,7 @@ const defaultSettings: SystemSettings = {
   enable_skills: true,
   useCoT: false,
   autoContextCompaction: true,
-  contextCompactionTokenLimit: 60000,
+  contextCompactionTokenLimit: DEFAULT_CONTEXT_WINDOW,
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -29,6 +30,9 @@ export const useSettingsStore = defineStore('settings', () => {
       const saved = localStorage.getItem('open-agent-settings')
       if (saved) {
         const savedSettings = JSON.parse(saved) as Partial<SystemSettings>
+        if (savedSettings.contextCompactionTokenLimit === 60000) {
+          savedSettings.contextCompactionTokenLimit = DEFAULT_CONTEXT_WINDOW
+        }
         settings.value = { ...defaultSettings, ...savedSettings }
       }
 

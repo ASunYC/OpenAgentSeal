@@ -268,6 +268,7 @@ interface LocalModelConfig {
 }
 
 const modelConfigs = reactive<LocalModelConfig[]>([])
+const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
 // 可用的提供商列表
 const availableProviders = [
@@ -345,7 +346,7 @@ function createNewModel() {
     isNew: true,
     models: [],
     selectedModel: '',
-    contextWindow: 60000,
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
     contextWindowSource: 'fallback',
     display_name: '',
     base_url: '',
@@ -425,7 +426,7 @@ async function onProviderChange(config: LocalModelConfig, provider: string) {
       anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307', 'claude-3-5-haiku-20241022'],
       deepseek: ['deepseek-chat', 'deepseek-coder', 'deepseek-reasoner'],
       zhipu: ['glm-4', 'glm-4-flash', 'glm-4-plus', 'glm-3-turbo'],
-      qwen: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-max-longcontext'],
+      qwen: ['qwen3.6-plus', 'qwen-plus', 'qwen-max', 'qwen-max-longcontext', 'qwen-turbo'],
       moonshot: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
       minimax: ['abab6.5-chat', 'abab5.5-chat', 'abab5.5s-chat'],
       volcano: ['doubao-pro-32k', 'doubao-lite-32k'],
@@ -471,13 +472,13 @@ async function resolveContextWindow(config: LocalModelConfig) {
     config.contextWindowSource = result.source
   } catch (error) {
     console.error('Failed to resolve model context window:', error)
-    config.contextWindow = config.contextWindow || 60000
+    config.contextWindow = config.contextWindow || DEFAULT_CONTEXT_WINDOW
     config.contextWindowSource = 'fallback'
   }
 }
 
 function markContextWindowManual(config: LocalModelConfig) {
-  config.contextWindow = Math.max(8000, Number(config.contextWindow) || 60000)
+  config.contextWindow = Math.max(8000, Number(config.contextWindow) || DEFAULT_CONTEXT_WINDOW)
   config.contextWindowSource = 'manual'
 }
 
@@ -564,7 +565,7 @@ async function saveConfig(config: LocalModelConfig) {
       base_url: config.base_url,
       provider_type: config.provider_type || 'openai',
       is_default: config.is_default,
-      context_window: Math.max(8000, Number(config.contextWindow) || 60000),
+      context_window: Math.max(8000, Number(config.contextWindow) || DEFAULT_CONTEXT_WINDOW),
       context_window_source: config.contextWindowSource || 'manual'
     }
     
@@ -611,7 +612,7 @@ onMounted(async () => {
       isNew: false,  // 从后端加载的配置不是新建的
       models: models,
       selectedModel: config.name || '',
-      contextWindow: config.context_window || 60000,
+      contextWindow: config.context_window || DEFAULT_CONTEXT_WINDOW,
       contextWindowSource: config.context_window_source || 'fallback',
       display_name: config.display_name || '',
       base_url: config.base_url,
