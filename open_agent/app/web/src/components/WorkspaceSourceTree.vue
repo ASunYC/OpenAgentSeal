@@ -58,6 +58,7 @@
 
         <div class="source-actions">
           <button
+            v-if="canOpenLocation"
             class="source-action"
             type="button"
             @click.stop="$emit('open-location', source)"
@@ -86,6 +87,7 @@
         :sources="source.children"
         :selected-paths="selectedPaths"
         :expanded-paths="expandedPaths"
+        :can-open-location="canOpenLocation"
         :level="level + 1"
         @toggle-select="$emit('toggle-select', $event)"
         @toggle-expanded="$emit('toggle-expanded', $event)"
@@ -104,8 +106,10 @@ const props = withDefaults(defineProps<{
   sources: WorkspaceSourceNode[]
   selectedPaths: string[]
   expandedPaths: string[]
+  canOpenLocation?: boolean
   level?: number
 }>(), {
+  canOpenLocation: true,
   level: 0,
 })
 

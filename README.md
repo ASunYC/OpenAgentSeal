@@ -73,6 +73,15 @@ Start the Web UI:
 open-agent --web-only --port 9998
 ```
 
+Linux Web-only setup:
+
+```bash
+bash scripts/linux/install.sh
+bash scripts/linux/start-web.sh
+```
+
+See [README_LINUX.md](./README_LINUX.md).
+
 Start the desktop shell:
 
 ```bash

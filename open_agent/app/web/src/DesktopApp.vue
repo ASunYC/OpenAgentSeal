@@ -60,6 +60,7 @@
             </svg>
           </button>
           <button
+            v-if="canUseBrowserPanel"
             class="btn-settings"
             :class="{ active: activeWorkspacePanel === 'browser' }"
             @click="openBrowserHome"
@@ -83,6 +84,7 @@
             </svg>
           </button>
           <button
+            v-if="canUseSandboxPanel"
             class="btn-settings"
             :class="{ active: activeWorkspacePanel === 'sandbox' }"
             @click="openSandboxPanel"
@@ -155,10 +157,21 @@
             <strong>{{ t('拖拽文件或目录到这里', 'Drop files or folders here') }}</strong>
             <span>{{ t('点击选择文件，也可以选择整个目录挂载到资料库', 'Click to pick files, or mount a local folder to the library') }}</span>
             <div class="source-drop-actions" @click.stop>
-              <button @click="chooseWorkspaceFiles">{{ t('选择文件', 'Files') }}</button>
-              <button @click="chooseWorkspaceDirectory">{{ t('选择目录', 'Folder') }}</button>
+              <button v-if="canUseTauriFilePicker" @click="chooseWorkspaceFiles">{{ t('选择文件', 'Files') }}</button>
+              <button v-if="canUseTauriFilePicker" @click="chooseWorkspaceDirectory">{{ t('选择目录', 'Folder') }}</button>
+              <button v-else @click="openServerPathInput">{{ t('添加服务器路径', 'Add server path') }}</button>
               <button @click="openWebSourceInput">{{ t('添加 Web 地址', 'Add web URL') }}</button>
             </div>
+            <form v-if="showServerPathInput" class="source-web-form" @click.stop @submit.prevent="addServerPathSource">
+              <input
+                ref="serverPathInputRef"
+                v-model="serverPathValue"
+                type="text"
+                :placeholder="t('输入服务器上的文件或目录路径后回车', 'Enter a server file or folder path')"
+                @keydown.esc.prevent="showServerPathInput = false"
+              />
+              <button type="submit">{{ t('添加', 'Add') }}</button>
+            </form>
             <form v-if="showWebSourceInput" class="source-web-form" @click.stop @submit.prevent="addWebSource">
               <input
                 ref="webSourceInputRef"
@@ -183,6 +196,7 @@
                 :sources="workspaceSources"
                 :selected-paths="selectedWorkspacePaths"
                 :expanded-paths="expandedWorkspacePaths"
+                :can-open-location="canOpenFileLocation"
                 @toggle-select="toggleWorkspaceSourceSelection"
                 @toggle-expanded="toggleWorkspaceSourceExpanded"
                 @remove-source="removeWorkspaceSource"
@@ -1106,7 +1120,7 @@ import SandboxPanel from '@/components/SandboxPanel.vue'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
-import type { AgentConfig, AgentEvent, Chat, ChatAttachment, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, Message, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
+import type { AgentConfig, AgentEvent, Chat, ChatAttachment, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, Message, RuntimeCapabilities, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
@@ -1121,6 +1135,20 @@ type ToolAccessMode = 'default' | 'full'
 
 const activeWorkspacePanel = ref<WorkspacePanel>('')
 const runtimePanelTab = ref<RuntimePanelTab>('chats')
+const runtimeCapabilities = ref<RuntimeCapabilities>({
+  platform: 'unknown',
+  shell: 'web',
+  features: {
+    browserPanel: true,
+    sandboxPanel: true,
+    openFileLocation: true,
+    tauriFilePicker: false,
+  },
+})
+const canUseBrowserPanel = computed(() => runtimeCapabilities.value.features.browserPanel)
+const canUseSandboxPanel = computed(() => runtimeCapabilities.value.features.sandboxPanel)
+const canOpenFileLocation = computed(() => runtimeCapabilities.value.features.openFileLocation)
+const canUseTauriFilePicker = computed(() => runtimeCapabilities.value.features.tauriFilePicker)
 const isWorkspaceOpen = computed(() => activeWorkspacePanel.value !== '')
 const fullscreenWorkspacePanel = ref<'' | 'browser' | 'sandbox'>('')
 const isWorkspacePanelFullscreen = computed(() => {
@@ -1142,6 +1170,9 @@ const workspaceSourceStateLoaded = ref(false)
 const showWebSourceInput = ref(false)
 const webSourceUrl = ref('')
 const webSourceInputRef = ref<HTMLInputElement | null>(null)
+const showServerPathInput = ref(false)
+const serverPathValue = ref('')
+const serverPathInputRef = ref<HTMLInputElement | null>(null)
 const sourceWorkspaceWidth = ref(426)
 const isResizingSourceWorkspace = ref(false)
 const workspaceWidth = ref(560)
@@ -1739,6 +1770,22 @@ function resetContextBlocks() {
   selectedContextBlockLoading.value = false
 }
 
+async function loadRuntimeCapabilities() {
+  try {
+    runtimeCapabilities.value = await api.getRuntimeCapabilities()
+  } catch (error) {
+    console.warn('Failed to load runtime capabilities, using desktop defaults:', error)
+  }
+
+  if (
+    (!canUseBrowserPanel.value && activeWorkspacePanel.value === 'browser')
+    || (!canUseSandboxPanel.value && activeWorkspacePanel.value === 'sandbox')
+  ) {
+    fullscreenWorkspacePanel.value = ''
+    activeWorkspacePanel.value = ''
+  }
+}
+
 async function openRuntimePanel() {
   if (activeWorkspacePanel.value === 'runtime') {
     closeWorkspacePanel()
@@ -1753,6 +1800,8 @@ async function openRuntimePanel() {
 }
 
 function openSandboxPanel() {
+  if (!canUseSandboxPanel.value) return
+
   if (activeWorkspacePanel.value === 'sandbox') {
     closeWorkspacePanel()
     return
@@ -2434,6 +2483,10 @@ async function addWorkspaceSourcePaths(paths: string[]) {
 }
 
 async function chooseWorkspaceFiles() {
+  if (!canUseTauriFilePicker.value) {
+    openServerPathInput()
+    return
+  }
   try {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const selected = await open({ multiple: true, directory: false, title: t('选择文件', 'Select files') })
@@ -2446,6 +2499,10 @@ async function chooseWorkspaceFiles() {
 }
 
 async function chooseWorkspaceDirectory() {
+  if (!canUseTauriFilePicker.value) {
+    openServerPathInput()
+    return
+  }
   try {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const selected = await open({ multiple: true, directory: true, title: t('选择目录', 'Select folders') })
@@ -2522,8 +2579,26 @@ function clearWorkspaceSources() {
 }
 
 function openWebSourceInput() {
+  showServerPathInput.value = false
   showWebSourceInput.value = true
   void nextTick(() => webSourceInputRef.value?.focus())
+}
+
+function openServerPathInput() {
+  showWebSourceInput.value = false
+  showServerPathInput.value = true
+  void nextTick(() => serverPathInputRef.value?.focus())
+}
+
+async function addServerPathSource() {
+  const path = serverPathValue.value.trim()
+  if (!path) {
+    alert(t('请输入服务器上的文件或目录路径。', 'Please enter a server file or folder path.'))
+    return
+  }
+  await addWorkspaceSourcePaths([path])
+  serverPathValue.value = ''
+  showServerPathInput.value = false
 }
 
 function addWebSource() {
@@ -2614,6 +2689,8 @@ function removeWorkspaceSource(sourceIdOrPath: string) {
 }
 
 async function openWorkspaceSourceLocation(source: WorkspaceSourceNode) {
+  if (!canOpenFileLocation.value) return
+
   const path = source.path || ''
   if (!path) return
 
@@ -3084,6 +3161,8 @@ function titleFromUrl(url: string): string {
 }
 
 function createBrowserTab(rawUrl: string = BROWSER_HOME) {
+  if (!canUseBrowserPanel.value) return
+
   const url = normalizeBrowserUrl(rawUrl)
   const tab: BrowserTab = {
     id: `browser_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -3103,6 +3182,8 @@ function createBrowserTab(rawUrl: string = BROWSER_HOME) {
 }
 
 function openBrowserHome() {
+  if (!canUseBrowserPanel.value) return
+
   if (activeWorkspacePanel.value === 'browser') {
     closeWorkspacePanel()
     return
@@ -3123,6 +3204,8 @@ function openBrowserTab(rawUrl: string) {
 }
 
 function navigateActiveBrowserTab(rawUrl: string, replace = false) {
+  if (!canUseBrowserPanel.value) return
+
   const tab = activeBrowserTab.value
   if (!tab) {
     createBrowserTab(rawUrl)
@@ -3153,6 +3236,8 @@ function goBrowserAddress() {
 }
 
 function switchBrowserTab(tabId: string) {
+  if (!canUseBrowserPanel.value) return
+
   const tab = browserTabs.value.find(item => item.id === tabId)
   if (!tab) return
 
@@ -3296,6 +3381,7 @@ onMounted(async () => {
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', handlePanelViewportResize)
   loadToolAccessMode()
+  await loadRuntimeCapabilities()
   await listenForDesktopNavigation()
   await listenForDesktopFileDrops()
 

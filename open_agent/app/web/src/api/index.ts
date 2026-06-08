@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
+import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
 import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
@@ -903,6 +903,12 @@ export const versionApi = {
   },
 }
 
+export const runtimeCapabilitiesApi = {
+  async get(): Promise<RuntimeCapabilities> {
+    return request('/runtime/capabilities')
+  },
+}
+
 // Dashboard API
 export const dashboardApi = {
   async getStats(): Promise<{
@@ -1042,6 +1048,7 @@ export const api = {
   // Logs / Tasks
   getLogs: logsApi.list,
   getTasks: tasksApi.list,
+  getRuntimeCapabilities: runtimeCapabilitiesApi.get,
 
   // Runtime event replay
   getRuntimeThreads: runtimeApi.listThreads,

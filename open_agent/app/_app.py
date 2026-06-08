@@ -10,6 +10,7 @@ This module provides the main FastAPI application with:
 
 import logging
 import os
+import sys
 import uuid
 import shutil
 import json
@@ -122,6 +123,31 @@ def _setup_app_routes(app: FastAPI):
     async def health_check():
         """Health check endpoint"""
         return {"status": "ok", "ready": True}
+
+    @app.get("/api/runtime/capabilities")
+    async def get_runtime_capabilities():
+        """Return UI/runtime capabilities for the current host platform."""
+        if sys.platform.startswith("win"):
+            platform = "windows"
+        elif sys.platform.startswith("linux"):
+            platform = "linux"
+        elif sys.platform == "darwin":
+            platform = "macos"
+        else:
+            platform = sys.platform or "unknown"
+
+        is_windows = platform == "windows"
+        is_linux = platform == "linux"
+        return {
+            "platform": platform,
+            "shell": "web",
+            "features": {
+                "browserPanel": not is_linux,
+                "sandboxPanel": is_windows,
+                "openFileLocation": not is_linux,
+                "tauriFilePicker": is_windows,
+            },
+        }
 
     @app.get("/api/main-agent")
     async def get_main_agent():

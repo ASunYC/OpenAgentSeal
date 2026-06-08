@@ -66,6 +66,17 @@ export interface ContextBlockDetail extends ContextBlockSummary {
   truncated: boolean
 }
 
+export interface RuntimeCapabilities {
+  platform: string
+  shell: string
+  features: {
+    browserPanel: boolean
+    sandboxPanel: boolean
+    openFileLocation: boolean
+    tauriFilePicker: boolean
+  }
+}
+
 export interface ChatAttachment {
   id: string
   name: string

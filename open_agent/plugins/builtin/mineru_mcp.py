@@ -54,7 +54,7 @@ def get_mineru_mcp_server() -> FastMCP:
     async def mineru_parse_document(
         file_path: str,
         add_to_library: bool = True,
-    ) -> str:
+    ):
         """Parse a local PDF, Office document, or image into structured Markdown."""
         result = await _service().parse_document(
             Path(file_path),
@@ -67,7 +67,7 @@ def get_mineru_mcp_server() -> FastMCP:
         file_path: str,
         target_language: str = "",
         add_to_library: bool = True,
-    ) -> str:
+    ):
         """Parse and translate a local document, producing translated Markdown and PDF."""
         result = await _service().translate_document(
             Path(file_path),
@@ -77,7 +77,7 @@ def get_mineru_mcp_server() -> FastMCP:
         return json.dumps(result.to_dict(), ensure_ascii=False)
 
     @server.tool()
-    async def mineru_configuration_status() -> str:
+    async def mineru_configuration_status():
         """Check whether the MinerU plugin connection and translation model are configured."""
         manager = get_plugin_manager()
         settings = manager.get_plugin_settings(

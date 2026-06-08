@@ -1,0 +1,33 @@
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import open_agent.app._app as app_module
+
+
+def _capabilities_for_platform(monkeypatch, platform: str) -> dict:
+    monkeypatch.setattr(app_module.sys, "platform", platform)
+    app = FastAPI()
+    app_module._setup_app_routes(app)
+    response = TestClient(app).get("/api/runtime/capabilities")
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_runtime_capabilities_hide_desktop_panels_on_linux(monkeypatch):
+    payload = _capabilities_for_platform(monkeypatch, "linux")
+
+    assert payload["platform"] == "linux"
+    assert payload["features"]["browserPanel"] is False
+    assert payload["features"]["sandboxPanel"] is False
+    assert payload["features"]["openFileLocation"] is False
+    assert payload["features"]["tauriFilePicker"] is False
+
+
+def test_runtime_capabilities_keep_desktop_panels_on_windows(monkeypatch):
+    payload = _capabilities_for_platform(monkeypatch, "win32")
+
+    assert payload["platform"] == "windows"
+    assert payload["features"]["browserPanel"] is True
+    assert payload["features"]["sandboxPanel"] is True
+    assert payload["features"]["openFileLocation"] is True
+    assert payload["features"]["tauriFilePicker"] is True
