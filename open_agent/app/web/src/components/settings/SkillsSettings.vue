@@ -3,7 +3,20 @@
     <div class="content-header">
       <h3>{{ t('技能管理', 'Skills Management') }}</h3>
       <p>{{ t('管理智能体最终可用的技能能力', 'Manage skills available to the agent') }}</p>
-      <span class="count-pill">{{ t('技能', 'Skills') }} {{ skills.length }}</span>
+      <span class="count-pill">{{ t('技能', 'Skills') }} {{ filteredSkills.length }}/{{ skills.length }}</span>
+    </div>
+
+    <div class="settings-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/>
+        <path d="m21 21-4.3-4.3"/>
+      </svg>
+      <input
+        v-model="searchQuery"
+        type="search"
+        :placeholder="t('搜索技能名称、来源、描述或路径', 'Search skills by name, source, description, or path')"
+      />
+      <button v-if="searchQuery" type="button" @click="searchQuery = ''">{{ t('清除', 'Clear') }}</button>
     </div>
 
     <div v-if="loading" class="loading-state">
@@ -19,7 +32,7 @@
     </div>
 
     <div v-else class="skills-grid">
-      <div v-for="skill in skills" :key="skill.path || skill.name" class="skill-card">
+      <div v-for="skill in filteredSkills" :key="skill.path || skill.name" class="skill-card">
         <div class="skill-header">
           <div class="skill-icon">{{ skill.icon || 'S' }}</div>
           <div class="skill-info">
@@ -34,12 +47,16 @@
           </button>
         </div>
       </div>
+
+      <div v-if="filteredSkills.length === 0" class="empty-state wide">
+        <span>{{ t('没有匹配的技能', 'No matching skills') }}</span>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { skillsApi, type SkillConfig } from '@/api'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -48,6 +65,7 @@ const skills = ref<SkillConfig[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const savingPath = ref<string | null>(null)
+const searchQuery = ref('')
 
 function t(zh: string, en: string): string {
   return settingsStore.t(zh, en)
@@ -62,6 +80,25 @@ function sourceLabel(skill: SkillConfig) {
   }
   return t('内置技能', 'Built-in')
 }
+
+const filteredSkills = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return skills.value
+  return skills.value.filter((skill) => [
+    skill.name,
+    skill.description,
+    skill.path,
+    skill.source,
+    skill.source_label,
+    skill.plugin_id,
+    sourceLabel(skill),
+    skill.enabled ? 'enabled 启用' : 'disabled 禁用',
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(query))
+})
 
 async function loadSkills() {
   loading.value = true
@@ -140,6 +177,42 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.settings-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--main-bg);
+}
+
+.settings-search svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.settings-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.settings-search button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 12px;
+}
+
 .loading-state,
 .error-state,
 .empty-state {
@@ -152,6 +225,10 @@ onMounted(() => {
   background: var(--main-bg);
   color: var(--text-muted);
   font-size: 14px;
+}
+
+.empty-state.wide {
+  grid-column: 1 / -1;
 }
 
 .error-state {
