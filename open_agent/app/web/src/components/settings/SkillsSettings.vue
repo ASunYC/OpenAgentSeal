@@ -42,8 +42,18 @@
           </div>
         </div>
         <div class="skill-actions">
-          <button class="btn-toggle" :class="{ active: skill.enabled }" :disabled="savingPath === skill.path" @click="toggleSkill(skill)">
-            {{ skill.enabled ? t('启用', 'Enabled') : t('禁用', 'Disabled') }}
+          <button
+            class="skill-switch"
+            :class="{ active: skill.enabled }"
+            :disabled="savingPath === skill.path || !skill.path"
+            :aria-pressed="skill.enabled"
+            :title="skill.enabled ? t('点击禁用此技能', 'Click to disable this skill') : t('点击启用此技能', 'Click to enable this skill')"
+            @click="toggleSkill(skill)"
+          >
+            <span class="switch-track" aria-hidden="true">
+              <span class="switch-thumb"></span>
+            </span>
+            <span>{{ skill.enabled ? t('已启用', 'Enabled') : t('已禁用', 'Disabled') }}</span>
           </button>
         </div>
       </div>
@@ -92,7 +102,7 @@ const filteredSkills = computed(() => {
     skill.source_label,
     skill.plugin_id,
     sourceLabel(skill),
-    skill.enabled ? 'enabled 启用' : 'disabled 禁用',
+    skill.enabled ? 'enabled 已启用 启用' : 'disabled 已禁用 禁用',
   ]
     .filter(Boolean)
     .join(' ')
@@ -303,25 +313,62 @@ onMounted(() => {
   justify-content: flex-end;
 }
 
-.btn-toggle {
-  padding: 6px 12px;
+.skill-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 88px;
+  padding: 6px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: 999px;
   background: var(--hover-bg);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
+  line-height: 1;
   transition: all 0.2s ease;
 }
 
-.btn-toggle.active {
+.skill-switch.active {
   border-color: var(--primary-color);
-  background: var(--primary-color);
-  color: #fff;
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--primary-color);
 }
 
-.btn-toggle:disabled {
+.skill-switch:disabled {
   opacity: 0.6;
   cursor: wait;
+}
+
+.switch-track {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(120, 130, 160, 0.28);
+  box-shadow: inset 0 0 0 1px rgba(120, 130, 160, 0.22);
+  transition: all 0.2s ease;
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.24);
+  transition: transform 0.2s ease;
+}
+
+.skill-switch.active .switch-track {
+  background: var(--primary-color);
+  box-shadow: inset 0 0 0 1px var(--primary-color);
+}
+
+.skill-switch.active .switch-thumb {
+  transform: translateX(12px);
 }
 </style>

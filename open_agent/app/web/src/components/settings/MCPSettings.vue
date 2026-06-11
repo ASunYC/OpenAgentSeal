@@ -73,6 +73,10 @@
             <span>{{ t('环境变量', 'Env') }}</span>
             <textarea v-model="server.envText" rows="2" placeholder="KEY=value" :disabled="server.readonly"></textarea>
           </label>
+          <label class="wide">
+            <span>{{ t('工作目录', 'Working directory') }}</span>
+            <input v-model="server.cwdText" type="text" placeholder="~/code" :disabled="server.readonly" />
+          </label>
         </div>
 
         <div class="mcp-actions">
@@ -112,6 +116,7 @@ import { useSettingsStore } from '@/stores/settings'
 interface EditableMCPServer extends MCPServerConfig {
   argsText: string
   envText: string
+  cwdText: string
 }
 
 const settingsStore = useSettingsStore()
@@ -189,6 +194,7 @@ function toEditable(server: MCPServerConfig): EditableMCPServer {
     readonly: server.readonly ?? server.source === 'plugin',
     argsText: (server.args ?? []).join('\n'),
     envText: toEnvText(server.env),
+    cwdText: server.cwd || '',
   }
 }
 
@@ -205,6 +211,7 @@ function toPayload(server: EditableMCPServer): MCPServerConfig {
       .map((arg) => arg.trim())
       .filter(Boolean),
     env: parseEnv(server.envText),
+    cwd: server.cwdText.trim(),
     disabled: server.disabled ?? false,
   }
 }

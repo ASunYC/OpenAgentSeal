@@ -32,6 +32,15 @@ if (-not (Test-Path $Python)) {
     $Python = "python"
 }
 
+$WinptyDir = & $Python -c "import pathlib, winpty; print(pathlib.Path(winpty.__file__).parent)"
+$WinptyAgentExe = Join-Path $WinptyDir "winpty-agent.exe"
+$WinptyOpenConsoleExe = Join-Path $WinptyDir "OpenConsole.exe"
+foreach ($WinptyRuntime in @($WinptyAgentExe, $WinptyOpenConsoleExe)) {
+    if (-not (Test-Path $WinptyRuntime)) {
+        throw "pywinpty runtime file is missing: $WinptyRuntime"
+    }
+}
+
 Write-Host "[1/4] Building Vue Web UI..."
 npm --prefix $WebDir run build
 
@@ -40,12 +49,13 @@ Write-Host "[2/4] Building Python backend sidecar..."
     --noconfirm `
     --clean `
     --onefile `
-    --noconsole `
     --name $SidecarName `
     --paths $Root `
     --distpath $BinariesDir `
     --workpath $PyinstallerWorkDir `
     --specpath $PyinstallerWorkDir `
+    --add-binary "$WinptyAgentExe;winpty" `
+    --add-binary "$WinptyOpenConsoleExe;winpty" `
     --add-data "$Root\open_agent\app\static;open_agent\app\static" `
     --add-data "$Root\open_agent\config;open_agent\config" `
     --add-data "$Root\open_agent\skills;open_agent\skills" `

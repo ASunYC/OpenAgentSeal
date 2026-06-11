@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 PtyProcess = None  # type: ignore
+PtyBackend = None  # type: ignore
 _pty_import_error = ""
 
 
@@ -48,6 +49,20 @@ def _get_pty_process_class():
         return PtyProcess
     except Exception as exc:  # pragma: no cover - depends on Windows optional dependency
         _pty_import_error = f"{first_error}; retry with user site failed: {type(exc).__name__}: {exc}"
+        return None
+
+
+def _get_pty_backend():
+    """Prefer WinPTY for npm/Claude TUI compatibility in the packaged desktop app."""
+    global PtyBackend
+    if PtyBackend is not None:
+        return PtyBackend
+    try:
+        from winpty import Backend  # type: ignore
+
+        PtyBackend = Backend.WinPTY
+        return PtyBackend
+    except Exception:
         return None
 
 
@@ -165,18 +180,28 @@ _sessions: dict[str, SandboxSession] = {}
 
 
 async def _read_session_output(session: SandboxSession) -> None:
-    while session.is_alive() and not session.closed:
+    empty_reads_after_exit = 0
+    while not session.closed:
+        alive = session.is_alive()
+        if not alive and empty_reads_after_exit >= 3:
+            break
         try:
             output = await asyncio.to_thread(session.read)
         except EOFError:
             break
         except Exception as exc:
+            error_text = f"\r\n[Sandbox read error] {type(exc).__name__}: {exc}\r\n"
+            session.append_output(error_text)
+            await session.publish({"type": "output", "data": error_text})
             await session.publish({"type": "error", "message": str(exc)})
             break
         if output:
             session.append_output(output)
             await session.publish({"type": "output", "data": output})
+            empty_reads_after_exit = 0
         else:
+            if not alive:
+                empty_reads_after_exit += 1
             await asyncio.sleep(0.02)
 
     await session.mark_exited()
@@ -194,6 +219,12 @@ def _is_windows() -> bool:
     return platform.system().lower() == "windows"
 
 
+def _subprocess_no_window_kwargs() -> dict[str, int]:
+    if not _is_windows():
+        return {}
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+
+
 def _command_available(command: str) -> bool:
     if shutil.which(command):
         return True
@@ -205,6 +236,7 @@ def _command_available(command: str) -> bool:
                 "powershell.exe",
                 "-NoLogo",
                 "-NoProfile",
+                "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
@@ -214,10 +246,68 @@ def _command_available(command: str) -> bool:
             stderr=subprocess.DEVNULL,
             timeout=4,
             check=False,
+            **_subprocess_no_window_kwargs(),
         )
         return result.returncode == 0
     except Exception:
         return False
+
+
+def _cmd_runnable_command(command: str) -> str:
+    resolved = shutil.which(command)
+    if resolved and Path(resolved).suffix.lower() in {".cmd", ".exe", ".bat", ".com"}:
+        return resolved
+    if not _is_windows():
+        return resolved or command
+
+    candidates: list[str] = []
+    for suffix in (".cmd", ".exe", ".bat", ".com"):
+        candidate = shutil.which(f"{command}{suffix}")
+        if candidate:
+            candidates.append(candidate)
+
+    if not candidates:
+        try:
+            result = subprocess.run(
+                ["where.exe", command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=4,
+                check=False,
+                **_subprocess_no_window_kwargs(),
+            )
+            candidates.extend(line.strip() for line in result.stdout.splitlines() if line.strip())
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        if Path(candidate).suffix.lower() in {".cmd", ".exe", ".bat", ".com"}:
+            return candidate
+    return resolved or command
+
+
+def _windows_cmd_shell_command(args: list[str]) -> str:
+    command_line = subprocess.list2cmdline(args)
+    return f"cmd.exe /d /c call {command_line}"
+
+
+def _ensure_hidden_console_for_pty() -> None:
+    if not _is_windows():
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        hwnd = kernel32.GetConsoleWindow()
+        if not hwnd:
+            kernel32.AllocConsole()
+            hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
 
 
 def _workspace_cwd() -> str:
@@ -232,6 +322,37 @@ def _workspace_cwd() -> str:
     except Exception:
         pass
     return str(Path.cwd().resolve())
+
+
+def _agent_switch_capture_dir() -> Path:
+    candidates: list[Path] = []
+    explicit_dir = os.environ.get("OPEN_AGENT_SANDBOX_AGENT_SWITCH_DIR")
+    if explicit_dir:
+        candidates.append(Path(explicit_dir))
+
+    try:
+        from open_agent.utils.path_utils import get_data_dir
+
+        candidates.append(get_data_dir() / "sandbox" / "agent-switch")
+    except Exception:
+        pass
+
+    local_app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "OpenAgentSeal" / "sandbox" / "agent-switch")
+    candidates.append(Path(_workspace_cwd()) / ".agent-switch" / "sessions")
+
+    for capture_dir in candidates:
+        try:
+            capture_dir.mkdir(parents=True, exist_ok=True)
+            probe = capture_dir / ".write-test"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return capture_dir
+        except Exception:
+            continue
+
+    raise HTTPException(status_code=500, detail="No writable agent-switch capture directory is available")
 
 
 def _provider_status(provider: str, agent_switch_available: bool) -> dict[str, Any]:
@@ -264,14 +385,24 @@ def _start_session(provider: str, rows: int, cols: int) -> SandboxSession:
         raise HTTPException(status_code=500, detail="pywinpty is not installed; install pywinpty to enable sandbox terminals")
 
     cwd = _workspace_cwd()
+    capture_dir = _agent_switch_capture_dir()
+    agent_switch_command = _cmd_runnable_command("agent-switch")
+    command_args = [agent_switch_command, provider, "--dir", str(capture_dir)]
     command = f"agent-switch {provider}"
-    shell_command = f"cmd.exe /d /s /c {command}"
+    shell_command = _windows_cmd_shell_command(command_args)
     try:
+        _ensure_hidden_console_for_pty()
+        spawn_kwargs = {
+            "cwd": cwd,
+            "dimensions": (rows, cols),
+            "env": {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+        }
+        backend = _get_pty_backend()
+        if backend is not None:
+            spawn_kwargs["backend"] = backend
         process = pty_process.spawn(
             shell_command,
-            cwd=cwd,
-            dimensions=(rows, cols),
-            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            **spawn_kwargs,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to start sandbox terminal: {exc}") from exc

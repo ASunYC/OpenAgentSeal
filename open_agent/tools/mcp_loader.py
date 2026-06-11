@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import os
+import shutil
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -146,6 +148,7 @@ class MCPServerConnection:
         command: str | None = None,
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
+        cwd: str | Path | None = None,
         # URL-based params
         url: str | None = None,
         headers: dict[str, str] | None = None,
@@ -160,6 +163,7 @@ class MCPServerConnection:
         self.command = command
         self.args = args or []
         self.env = env or {}
+        self.cwd = cwd
         # URL-based
         self.url = url
         self.headers = headers or {}
@@ -269,7 +273,12 @@ class MCPServerConnection:
 
     async def _connect_stdio(self):
         """Connect via STDIO transport."""
-        server_params = StdioServerParameters(command=self.command, args=self.args, env=self.env if self.env else None)
+        server_params = StdioServerParameters(
+            command=self.command,
+            args=self.args,
+            env=self.env if self.env else None,
+            cwd=self.cwd,
+        )
         return await self.exit_stack.enter_async_context(stdio_client(server_params))
 
     async def _connect_sse(self):
@@ -331,6 +340,27 @@ def _determine_connection_type(server_config: dict) -> ConnectionType:
     if server_config.get("url"):
         return "streamable_http"
     return "stdio"
+
+
+def _expand_mcp_value(value: Any) -> Any:
+    """Expand environment variables and ~ in MCP string values."""
+    if isinstance(value, str):
+        return os.path.expanduser(os.path.expandvars(value))
+    if isinstance(value, list):
+        return [_expand_mcp_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_mcp_value(item) for key, item in value.items()}
+    return value
+
+
+def _stdio_command_exists(command: str) -> bool:
+    """Return whether a stdio command can be executed."""
+    if not command:
+        return False
+    expanded = _expand_mcp_value(command)
+    if any(sep in expanded for sep in ("/", "\\")) or Path(expanded).is_absolute():
+        return Path(expanded).exists()
+    return shutil.which(expanded) is not None
 
 
 def _resolve_mcp_config_path(config_path: str) -> Path | None:
@@ -430,11 +460,14 @@ async def load_mcp_tools_from_servers_async(mcp_servers: dict) -> list[Tool]:
             continue
 
         conn_type = _determine_connection_type(server_config)
-        url = server_config.get("url")
-        command = server_config.get("command")
+        url = _expand_mcp_value(server_config.get("url"))
+        command = _expand_mcp_value(server_config.get("command"))
 
         if conn_type == "stdio" and not command:
             print(f"No command specified for STDIO server: {server_name}")
+            continue
+        if conn_type == "stdio" and not _stdio_command_exists(command):
+            logger.warning("Skipping MCP server '%s': command not found: %s", server_name, command)
             continue
         if conn_type in ("sse", "http", "streamable_http") and not url:
             print(f"No url specified for {conn_type.upper()} server: {server_name}")
@@ -444,10 +477,11 @@ async def load_mcp_tools_from_servers_async(mcp_servers: dict) -> list[Tool]:
             name=server_name,
             connection_type=conn_type,
             command=command,
-            args=server_config.get("args", []),
-            env=server_config.get("env", {}),
+            args=_expand_mcp_value(server_config.get("args", [])),
+            env=_expand_mcp_value(server_config.get("env", {})),
+            cwd=_expand_mcp_value(server_config.get("cwd")),
             url=url,
-            headers=server_config.get("headers", {}),
+            headers=_expand_mcp_value(server_config.get("headers", {})),
             connect_timeout=server_config.get("connect_timeout"),
             execute_timeout=server_config.get("execute_timeout"),
             sse_read_timeout=server_config.get("sse_read_timeout"),

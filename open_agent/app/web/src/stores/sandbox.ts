@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 export type SandboxProvider = 'claude' | 'codex' | 'codewhale' | 'deepseek' | 'kimi' | 'opencode'
+export type SandboxLayoutMode = 'tabs' | 'grid'
 
 export interface SandboxTabState {
   localId: string
@@ -14,6 +15,7 @@ export interface SandboxTabState {
 export const useSandboxStore = defineStore('sandbox', () => {
   const tabs = ref<SandboxTabState[]>([])
   const activeTabId = ref('')
+  const layoutMode = ref<SandboxLayoutMode>('tabs')
 
   function addTab(provider: SandboxProvider): SandboxTabState {
     const tab: SandboxTabState = {
@@ -50,12 +52,18 @@ export const useSandboxStore = defineStore('sandbox', () => {
     }
   }
 
+  function setLayoutMode(mode: SandboxLayoutMode): void {
+    layoutMode.value = mode
+  }
+
   return {
     tabs,
     activeTabId,
+    layoutMode,
     addTab,
     updateTab,
     removeTab,
     activateTab,
+    setLayoutMode,
   }
 })

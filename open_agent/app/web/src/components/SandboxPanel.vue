@@ -22,6 +22,25 @@
       <button class="sandbox-refresh" type="button" :disabled="statusLoading" @click="loadCliStatus">
         {{ statusLoading ? t('检测中...', 'Checking...') : t('刷新', 'Refresh') }}
       </button>
+      <button
+        class="sandbox-layout-toggle"
+        type="button"
+        :class="{ active: layoutMode === 'grid' }"
+        :title="layoutMode === 'grid' ? t('切换为页签布局', 'Switch to tabs layout') : t('切换为网格布局', 'Switch to grid layout')"
+        @click="toggleLayoutMode"
+      >
+        <svg v-if="layoutMode === 'grid'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="5" width="18" height="14" rx="2"/>
+          <path d="M7 9h10"/>
+        </svg>
+        <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="7" rx="1.5"/>
+          <rect x="14" y="3" width="7" height="7" rx="1.5"/>
+          <rect x="3" y="14" width="7" height="7" rx="1.5"/>
+          <rect x="14" y="14" width="7" height="7" rx="1.5"/>
+        </svg>
+        <span>{{ layoutMode === 'grid' ? t('页签', 'Tabs') : t('网格', 'Grid') }}</span>
+      </button>
     </div>
 
     <div v-if="statusError" class="sandbox-state error">{{ statusError }}</div>
@@ -35,8 +54,8 @@
       {{ t('未找到 agent-switch 命令。请使用工程内置 agent-switch-skill 安装后重试。', 'agent-switch was not found. Install it from the bundled agent-switch-skill and try again.') }}
     </div>
 
-    <div v-if="tabs.length" class="sandbox-terminal-shell">
-      <div class="sandbox-tabs">
+    <div v-if="tabs.length" class="sandbox-terminal-shell" :class="`layout-${layoutMode}`">
+      <div v-if="layoutMode === 'tabs'" class="sandbox-tabs">
         <button
           v-for="tab in tabs"
           :key="tab.localId"
@@ -51,14 +70,39 @@
         </button>
       </div>
 
-      <div class="sandbox-terminal-stack">
-        <div
-          v-for="tab in tabs"
-          :key="tab.localId"
-          :ref="el => setTerminalRef(tab.localId, el)"
-          class="sandbox-terminal"
-          :class="{ active: tab.localId === activeTabId }"
-        ></div>
+      <div
+        class="sandbox-terminal-stack"
+        :class="[
+          `layout-${layoutMode}`,
+          `count-${Math.min(tabs.length, 9)}`,
+        ]"
+      >
+        <template v-for="tab in tabs" :key="tab.localId">
+          <article
+            v-if="layoutMode === 'grid'"
+            class="sandbox-grid-card"
+            :class="{ active: tab.localId === activeTabId, exited: tab.exited }"
+            @click="activateTab(tab.localId)"
+          >
+            <header class="sandbox-grid-card-header">
+              <div>
+                <strong>{{ providerLabel(tab.provider) }}</strong>
+                <small>{{ tab.exited ? t('已退出', 'Exited') : tab.sessionId ? t('运行中', 'Running') : t('启动中', 'Starting') }}</small>
+              </div>
+              <button type="button" class="sandbox-grid-close" @click.stop="closeTab(tab.localId)">x</button>
+            </header>
+            <div
+              :ref="el => setTerminalRef(tab.localId, el)"
+              class="sandbox-terminal active"
+            ></div>
+          </article>
+          <div
+            v-else
+            :ref="el => setTerminalRef(tab.localId, el)"
+            class="sandbox-terminal"
+            :class="{ active: tab.localId === activeTabId }"
+          ></div>
+        </template>
       </div>
     </div>
 
@@ -95,13 +139,14 @@ interface SandboxTerminalRuntime {
 
 const settingsStore = useSettingsStore()
 const sandboxStore = useSandboxStore()
-const { tabs, activeTabId } = storeToRefs(sandboxStore)
+const { tabs, activeTabId, layoutMode } = storeToRefs(sandboxStore)
 const statusLoading = ref(false)
 const statusError = ref('')
 const cliStatus = ref<SandboxCliStatus | null>(null)
 const terminalElements = new Map<string, HTMLElement>()
 const terminalRuntimes = new Map<string, SandboxTerminalRuntime>()
 let resizeObserver: ResizeObserver | null = null
+let resizeFrame = 0
 
 const fallbackProviders: SandboxProviderStatus[] = [
   'claude',
@@ -158,12 +203,28 @@ function isProviderRunning(provider: string): boolean {
 
 function setTerminalRef(localId: string, element: unknown) {
   if (element instanceof HTMLElement) {
-    terminalElements.set(localId, element)
-    resizeObserver?.observe(element)
+    const previous = terminalElements.get(localId)
+    if (previous !== element) {
+      if (previous) resizeObserver?.unobserve(previous)
+      terminalElements.set(localId, element)
+      resizeObserver?.observe(element)
+    }
+    mountExistingTerminal(localId, element)
   } else {
     const previous = terminalElements.get(localId)
     if (previous) resizeObserver?.unobserve(previous)
     terminalElements.delete(localId)
+  }
+}
+
+function mountExistingTerminal(localId: string, element: HTMLElement) {
+  const runtime = terminalRuntimes.get(localId)
+  const terminalElement = runtime?.terminal?.element
+  if (!terminalElement || terminalElement.parentElement === element) return
+  element.replaceChildren(terminalElement)
+  const tab = tabs.value.find(item => item.localId === localId)
+  if (tab) {
+    void nextTick(() => fitTerminal(tab))
   }
 }
 
@@ -284,6 +345,9 @@ function connectSession(tab: SandboxTabState) {
           terminal.writeln('\x1b[90m[process exited]\x1b[0m')
         }
       } else if (message.type === 'error') {
+        if (String(message.message || '').includes('Sandbox session not found')) {
+          sandboxStore.updateTab(tab.localId, { sessionId: '', exited: true, initializing: false })
+        }
         terminal.writeln(`\x1b[31m${message.message || 'Sandbox error'}\x1b[0m`)
       }
     } catch {
@@ -321,11 +385,16 @@ function sendResize(tab: SandboxTabState) {
   }))
 }
 
+async function toggleLayoutMode() {
+  sandboxStore.setLayoutMode(layoutMode.value === 'grid' ? 'tabs' : 'grid')
+  await nextTick()
+  scheduleRefitVisibleTerminals()
+}
+
 async function activateTab(localId: string) {
   sandboxStore.activateTab(localId)
   await nextTick()
-  const tab = tabs.value.find(item => item.localId === localId)
-  if (tab) fitTerminal(tab)
+  scheduleRefitVisibleTerminals()
 }
 
 async function closeTab(localId: string) {
@@ -348,18 +417,32 @@ async function closeTab(localId: string) {
   sandboxStore.removeTab(localId)
   terminalElements.delete(localId)
   await nextTick()
-  const active = tabs.value.find(item => item.localId === activeTabId.value)
-  if (active) fitTerminal(active)
+  scheduleRefitVisibleTerminals()
 }
 
-function refitActiveTerminal() {
+function visibleTabs(): SandboxTabState[] {
+  if (layoutMode.value === 'grid') return tabs.value
   const active = tabs.value.find(tab => tab.localId === activeTabId.value)
-  if (active) fitTerminal(active)
+  return active ? [active] : []
+}
+
+function refitVisibleTerminals() {
+  for (const tab of visibleTabs()) {
+    fitTerminal(tab)
+  }
+}
+
+function scheduleRefitVisibleTerminals() {
+  if (resizeFrame) return
+  resizeFrame = window.requestAnimationFrame(() => {
+    resizeFrame = 0
+    refitVisibleTerminals()
+  })
 }
 
 onMounted(() => {
   void loadCliStatus()
-  resizeObserver = new ResizeObserver(() => refitActiveTerminal())
+  resizeObserver = new ResizeObserver(() => scheduleRefitVisibleTerminals())
   nextTick(() => {
     for (const element of terminalElements.values()) {
       resizeObserver?.observe(element)
@@ -368,11 +451,15 @@ onMounted(() => {
       void attachTerminal(tab)
     }
   })
-  window.addEventListener('resize', refitActiveTerminal)
+  window.addEventListener('resize', scheduleRefitVisibleTerminals)
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', refitActiveTerminal)
+  window.removeEventListener('resize', scheduleRefitVisibleTerminals)
+  if (resizeFrame) {
+    window.cancelAnimationFrame(resizeFrame)
+    resizeFrame = 0
+  }
   resizeObserver?.disconnect()
   for (const [localId, runtime] of terminalRuntimes) {
     runtime.socket?.close()
@@ -402,7 +489,8 @@ onUnmounted(() => {
 }
 
 .sandbox-cli-button,
-.sandbox-refresh {
+.sandbox-refresh,
+.sandbox-layout-toggle {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -418,15 +506,32 @@ onUnmounted(() => {
 }
 
 .sandbox-cli-button:hover:not(:disabled),
-.sandbox-refresh:hover:not(:disabled) {
+.sandbox-refresh:hover:not(:disabled),
+.sandbox-layout-toggle:hover:not(:disabled) {
   border-color: var(--primary-color);
   color: var(--primary-color);
 }
 
 .sandbox-cli-button:disabled,
-.sandbox-refresh:disabled {
+.sandbox-refresh:disabled,
+.sandbox-layout-toggle:disabled {
   opacity: 0.58;
   cursor: default;
+}
+
+.sandbox-layout-toggle {
+  margin-left: auto;
+}
+
+.sandbox-layout-toggle.active {
+  border-color: color-mix(in srgb, var(--primary-color) 62%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 9%, var(--main-bg));
+  color: var(--primary-color);
+}
+
+.sandbox-layout-toggle svg {
+  width: 15px;
+  height: 15px;
 }
 
 .sandbox-status-dot {
@@ -501,6 +606,10 @@ onUnmounted(() => {
   background: #0b1020;
 }
 
+.sandbox-terminal-shell.layout-grid {
+  background: color-mix(in srgb, #0b1020 88%, var(--main-bg));
+}
+
 .sandbox-tabs {
   display: flex;
   gap: 6px;
@@ -547,6 +656,29 @@ onUnmounted(() => {
   flex: 1;
 }
 
+.sandbox-terminal-stack.layout-grid {
+  position: static;
+  display: grid;
+  grid-template-columns: repeat(var(--sandbox-grid-columns, 1), minmax(220px, 1fr));
+  gap: 10px;
+  overflow: auto;
+  padding: 10px;
+}
+
+.sandbox-terminal-stack.layout-grid.count-2,
+.sandbox-terminal-stack.layout-grid.count-3,
+.sandbox-terminal-stack.layout-grid.count-4 {
+  --sandbox-grid-columns: 2;
+}
+
+.sandbox-terminal-stack.layout-grid.count-5,
+.sandbox-terminal-stack.layout-grid.count-6,
+.sandbox-terminal-stack.layout-grid.count-7,
+.sandbox-terminal-stack.layout-grid.count-8,
+.sandbox-terminal-stack.layout-grid.count-9 {
+  --sandbox-grid-columns: 3;
+}
+
 .sandbox-terminal {
   position: absolute;
   inset: 0;
@@ -556,6 +688,79 @@ onUnmounted(() => {
 
 .sandbox-terminal.active {
   display: block;
+}
+
+.sandbox-grid-card {
+  display: flex;
+  min-width: 0;
+  min-height: 240px;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: #0b1020;
+  cursor: text;
+}
+
+.sandbox-grid-card.active {
+  border-color: #7aa2ff;
+  box-shadow: 0 0 0 1px rgba(122, 162, 255, 0.28);
+}
+
+.sandbox-grid-card.exited {
+  opacity: 0.72;
+}
+
+.sandbox-grid-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d9e2f2;
+}
+
+.sandbox-grid-card-header div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.sandbox-grid-card-header strong {
+  font-size: 12px;
+}
+
+.sandbox-grid-card-header small {
+  color: #91a0b8;
+  font-size: 10px;
+}
+
+.sandbox-grid-close {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #91a0b8;
+  cursor: pointer;
+}
+
+.sandbox-grid-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.sandbox-grid-card .sandbox-terminal {
+  position: relative;
+  inset: auto;
+  display: block;
+  min-height: 0;
+  flex: 1;
+  padding: 8px;
 }
 
 .sandbox-empty {

@@ -1059,26 +1059,64 @@ def _setup_app_routes(app: FastAPI):
         from open_agent.config import Config, get_user_app_dir
         from open_agent.utils.path_utils import get_external_config_dir, is_frozen
 
+        def load_seed_config() -> dict:
+            seed_paths = []
+            if is_frozen():
+                external_config_dir = get_external_config_dir()
+                if external_config_dir:
+                    seed_paths.append(external_config_dir / "mcp.json")
+            seed_paths.extend([
+                Path.cwd() / "open_agent" / "config" / "mcp.json",
+                Config.get_package_dir() / "config" / "mcp.json",
+            ])
+            for seed_path in seed_paths:
+                if seed_path.exists():
+                    try:
+                        return json.loads(seed_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        logger.warning("Failed to read default MCP config: %s", seed_path, exc_info=True)
+            return {"mcpServers": {}}
+
+        def merge_missing_default_servers() -> None:
+            try:
+                user_config = json.loads(user_config_path.read_text(encoding="utf-8"))
+            except Exception:
+                user_config = {"mcpServers": {}}
+            if not isinstance(user_config, dict):
+                user_config = {"mcpServers": {}}
+            user_servers = user_config.setdefault("mcpServers", {})
+            if not isinstance(user_servers, dict):
+                user_servers = {}
+                user_config["mcpServers"] = user_servers
+
+            seed_servers = load_seed_config().get("mcpServers", {})
+            if not isinstance(seed_servers, dict):
+                return
+            changed = False
+            for name, config in seed_servers.items():
+                if name not in user_servers:
+                    user_servers[name] = config
+                    changed = True
+            if changed:
+                user_config_path.write_text(
+                    json.dumps(user_config, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
         user_config_dir = get_user_app_dir() / "config"
         user_config_dir.mkdir(parents=True, exist_ok=True)
         user_config_path = user_config_dir / "mcp.json"
         if user_config_path.exists():
+            merge_missing_default_servers()
             return user_config_path
 
-        seed_paths = []
-        if is_frozen():
-            external_config_dir = get_external_config_dir()
-            if external_config_dir:
-                seed_paths.append(external_config_dir / "mcp.json")
-        seed_paths.extend([
-            Path.cwd() / "open_agent" / "config" / "mcp.json",
-            Config.get_package_dir() / "config" / "mcp.json",
-        ])
-
-        for seed_path in seed_paths:
-            if seed_path.exists() and seed_path.resolve() != user_config_path.resolve():
-                user_config_path.write_text(seed_path.read_text(encoding="utf-8"), encoding="utf-8")
-                return user_config_path
+        seed_config = load_seed_config()
+        if seed_config.get("mcpServers"):
+            user_config_path.write_text(
+                json.dumps(seed_config, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return user_config_path
 
         user_config_path.write_text(json.dumps({"mcpServers": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
         return user_config_path
@@ -1114,6 +1152,7 @@ def _setup_app_routes(app: FastAPI):
                     "url": config.get("url", ""),
                     "args": config.get("args", []),
                     "env": config.get("env", {}),
+                    "cwd": config.get("cwd", ""),
                     "disabled": bool(config.get("disabled", False)),
                     "source": source,
                     "plugin_id": plugin_id,
@@ -1172,6 +1211,7 @@ def _setup_app_routes(app: FastAPI):
                 url = str(server.get("url", "")).strip()
                 args = server.get("args", [])
                 env = server.get("env", {})
+                cwd = str(server.get("cwd", "")).strip()
 
                 if command:
                     config["command"] = command
@@ -1185,6 +1225,10 @@ def _setup_app_routes(app: FastAPI):
                     config["args"] = [str(arg) for arg in args]
                 if isinstance(env, dict):
                     config["env"] = {str(key): str(value) for key, value in env.items()}
+                if cwd:
+                    config["cwd"] = cwd
+                else:
+                    config.pop("cwd", None)
 
                 mcp_servers[name] = config
 

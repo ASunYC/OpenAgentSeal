@@ -103,12 +103,14 @@ class TestMCPServerConnectionInit:
             command="npx",
             args=["-y", "test-server"],
             env={"API_KEY": "test"},
+            cwd="~/code",
         )
         assert conn.name == "test-stdio"
         assert conn.connection_type == "stdio"
         assert conn.command == "npx"
         assert conn.args == ["-y", "test-server"]
         assert conn.env == {"API_KEY": "test"}
+        assert conn.cwd == "~/code"
         assert conn.url is None
 
     def test_url_connection_init(self):
@@ -420,9 +422,15 @@ async def test_git_mcp_loading(mcp_config):
 
 
 @pytest.mark.asyncio
-async def test_git_mcp_tool_availability():
-    """Test Git MCP tool availability."""
-    print("\n=== Testing Git MCP Tool Availability ===")
+async def test_configured_mcp_tool_availability(mcp_config):
+    """Test availability for the default MCP servers configured in mcp.json."""
+    print("\n=== Testing Configured MCP Tool Availability ===")
+
+    configured_servers = set(mcp_config.get("mcpServers", {}))
+    assert configured_servers == {"drawio", "pencil"}, (
+        "The default MCP config should include drawio and pencil. "
+        f"Configured servers: {sorted(configured_servers)}"
+    )
 
     try:
         tools = await load_mcp_tools_async("open_agent/config/mcp.json")
@@ -431,15 +439,18 @@ async def test_git_mcp_tool_availability():
             pytest.skip("No MCP tools loaded")
             return
 
-        # Find search tool
-        search_tool = None
-        for tool in tools:
-            if "search" in tool.name.lower():
-                search_tool = tool
-                break
-
-        assert search_tool is not None, "Should contain search-related tools"
-        print(f"✅ Found search tool: {search_tool.name}")
+        loaded_tool_names = {tool.name for tool in tools}
+        expected_drawio_tools = {
+            "start_session",
+            "create_new_diagram",
+            "update_diagram",
+            "export_diagram",
+        }
+        assert loaded_tool_names & expected_drawio_tools, (
+            "drawio MCP should expose diagram tools, "
+            f"loaded tools: {sorted(loaded_tool_names)}"
+        )
+        print(f"Found drawio MCP tools: {sorted(loaded_tool_names & expected_drawio_tools)}")
 
     finally:
         await cleanup_mcp_connections()

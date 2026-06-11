@@ -727,6 +727,7 @@ export interface MCPServerConfig {
   url?: string
   args?: string[]
   env?: Record<string, string>
+  cwd?: string
   disabled?: boolean
   source?: 'user' | 'plugin' | string
   plugin_id?: string | null

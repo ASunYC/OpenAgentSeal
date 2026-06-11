@@ -8,6 +8,20 @@
             ],
             "autoApprove": []
         },
+        "pencil": {
+            "description": "Pencil - Visual design MCP server",
+            "type": "stdio",
+            "command": "%USERPROFILE%\\.pencil\\mcp\\visual_studio_code\\out\\mcp-server-windows-x64.exe",
+            "args": [
+                "--app",
+                "visual_studio_code",
+                "--agent",
+                "codexCLI"
+            ],
+            "env": {},
+            "cwd": "~/code",
+            "autoApprove": []
+        },
         "minimax_search": {
             "description": "MiniMax Search - Powerful web search and intelligent browsing ⭐",
             "type": "stdio",
