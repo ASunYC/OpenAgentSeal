@@ -36,6 +36,12 @@ env/
 # Workspace
 workspace/
 *.log
+tmp-*.png
+output/
+
+# Codex runtime logs
+.codex-*.log
+.codex-run/
 
 # OS
 .DS_Store

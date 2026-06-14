@@ -37,8 +37,8 @@ class LLMClient:
         self,
         api_key: str,
         provider: LLMProvider = LLMProvider.ANTHROPIC,
-        api_base: str = "https://api.minimaxi.com",
-        model: str = "MiniMax-M2.5",
+        api_base: str = "",
+        model: str = "",
         retry_config: RetryConfig | None = None,
     ):
         """Initialize LLM client with specified provider.
@@ -46,9 +46,10 @@ class LLMClient:
         Args:
             api_key: API key for authentication
             provider: LLM provider (anthropic or openai)
-            api_base: Base URL for the API (default: https://api.minimaxi.com)
-                     For MiniMax API, suffix is auto-appended based on provider.
-                     For third-party APIs (e.g., https://api.siliconflow.cn/v1), used as-is.
+            api_base: Base URL for the API. If empty, uses the provider's default endpoint.
+                     For MiniMax API domains (api.minimax.io / api.minimaxi.com),
+                     the appropriate suffix (/anthropic or /v1) is auto-appended
+                     based on the selected provider.
             model: Model name to use
             retry_config: Optional retry configuration
         """
