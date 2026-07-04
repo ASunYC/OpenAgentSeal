@@ -103,6 +103,12 @@ open-agent
 open-agent
 ```
 
+显式使用 CLI 启动命令：
+
+```bash
+open-agent-cli
+```
+
 指定工作目录：
 
 ```bash

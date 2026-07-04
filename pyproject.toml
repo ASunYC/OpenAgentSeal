@@ -32,6 +32,7 @@ dependencies = [
 
 [project.scripts]
 open-agent = "open_agent.cli:main"
+open-agent-cli = "open_agent.cli:main"
 open-agent-acp = "open_agent.acp.server:main"
 
 [project.optional-dependencies]

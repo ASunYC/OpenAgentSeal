@@ -67,6 +67,12 @@ uv sync
 open-agent
 ```
 
+Start the CLI explicitly:
+
+```bash
+open-agent-cli
+```
+
 Start the Web UI:
 
 ```bash

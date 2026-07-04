@@ -947,10 +947,11 @@ def parse_args() -> argparse.Namespace:
         epilog="""
 Examples:
   open-agent                              # Use current directory as workspace
+  open-agent-cli                          # Explicit CLI-only command
   open-agent --workspace /path/to/dir     # Use specific workspace directory
   open-agent log                          # Show log directory and recent files
   open-agent log agent_run_xxx.log        # Read a specific log file
-  open-agent --cli-only                   # Run CLI only (no Web UI)
+  open-agent --cli-only                   # Run CLI only (same runtime as open-agent-cli)
         """,
     )
     parser.add_argument(

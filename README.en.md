@@ -132,6 +132,9 @@ models:
 # Interactive mode (default)
 open-agent
 
+# Explicit CLI-only command
+open-agent-cli
+
 # Specify workspace directory
 open-agent --workspace /path/to/workspace
 
