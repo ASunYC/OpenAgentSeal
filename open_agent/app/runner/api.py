@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from open_agent.app.runner.models import ChatSpec, ChatHistory, AgentRequest, AgentEvent, Message
+from open_agent.app.runner.models import AgentRequest, AgentEvent, Message
 from open_agent.app.runner.manager import get_chat_manager
 from open_agent.app.runner.runner import get_runner
 from open_agent.app.runner.file_parser import MAX_FILE_BYTES
@@ -614,7 +614,7 @@ async def list_profile_runtime_events(
 def _workspace_source_from_path(path: Path) -> dict:
     is_dir = path.is_dir()
     stat = path.stat()
-    children = _workspace_children(path) if is_dir else []
+    children = _workspace_children_single_depth(path) if is_dir else []
     return {
         "id": f"src_{uuid.uuid4().hex[:12]}",
         "name": path.name or str(path),
@@ -624,59 +624,61 @@ def _workspace_source_from_path(path: Path) -> dict:
         "size": None if is_dir else stat.st_size,
         "modified_at": stat.st_mtime,
         "children": children,
-        "children_count": _workspace_node_count(children),
+        "children_count": len(children),
     }
 
 
-def _workspace_children(path: Path, limit: int = 200) -> list[dict]:
-    remaining = {"count": limit}
-    return _workspace_children_nested(path, path, remaining)
+def _workspace_children_single_depth(dir_path: Path) -> list[dict]:
+    """List immediate children of a directory (single depth, no recursion).
 
-
-def _workspace_children_nested(path: Path, root: Path, remaining: dict) -> list[dict]:
+    Returns children with a `has_children` hint for directories so the
+    frontend can show expand arrows without eagerly loading nested content.
+    """
     children = []
     try:
-        entries = sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+        entries = sorted(
+            dir_path.iterdir(),
+            key=lambda item: (not item.is_dir(), item.name.lower()),
+        )
     except OSError:
         return children
 
     for child in entries:
-        if remaining["count"] <= 0:
-            break
         try:
-            remaining["count"] -= 1
             if child.is_dir():
-                nested = _workspace_children_nested(child, root, remaining)
-                child_payload = {
+                # Check if dir has any children (for expand arrow hint)
+                has_children = False
+                try:
+                    has_children = any(child.iterdir())
+                except OSError:
+                    pass
+                children.append({
                     "name": child.name,
                     "path": str(child),
                     "type": "directory",
                     "mime_type": None,
                     "size": None,
                     "modified_at": child.stat().st_mtime,
-                    "relative_path": str(child.relative_to(root)),
-                    "children": nested,
-                    "children_count": _workspace_node_count(nested),
-                }
+                    "has_children": has_children,
+                    "children": None,  # Not yet loaded — frontend will request on expand
+                    "children_count": None,
+                })
             else:
                 stat = child.stat()
-                child_payload = {
+                children.append({
                     "name": child.name,
                     "path": str(child),
                     "type": "file",
                     "mime_type": mimetypes.guess_type(child.name)[0] or "application/octet-stream",
                     "size": stat.st_size,
                     "modified_at": stat.st_mtime,
-                    "relative_path": str(child.relative_to(root)),
-                }
-            children.append(child_payload)
+                    "has_children": False,
+                    "children": None,
+                    "children_count": None,
+                })
         except OSError:
             continue
     return children
-
-
-def _workspace_node_count(nodes: list[dict]) -> int:
-    return sum(1 + _workspace_node_count(node.get("children") or []) for node in nodes)
 
 
 @router.post("/chats/fork")

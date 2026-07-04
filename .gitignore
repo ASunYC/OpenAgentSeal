@@ -42,6 +42,10 @@ output/
 # Codex runtime logs
 .codex-*.log
 .codex-run/
+.codegraph/
+
+# Workspace cache (binary doc extraction)
+.workspace/cache/
 
 # OS
 .DS_Store

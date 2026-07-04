@@ -6,6 +6,9 @@ from typing import Any
 import tiktoken
 
 from .base import Tool, ToolResult
+from ..utils.safe_join import safe_join, PathTraversalError
+from ..utils.doc_extract import is_binary_doc
+from ..utils.doc_cache import DocContentCache
 
 
 def truncate_text_by_tokens(
@@ -70,6 +73,7 @@ class ReadTool(Tool):
             workspace_dir: Base directory for resolving relative paths
         """
         self.workspace_dir = Path(workspace_dir).absolute()
+        self._cache = DocContentCache(self.workspace_dir)
 
     @property
     def name(self) -> str:
@@ -108,10 +112,7 @@ class ReadTool(Tool):
     async def execute(self, path: str, offset: int | None = None, limit: int | None = None) -> ToolResult:
         """Execute read file."""
         try:
-            file_path = Path(path)
-            # Resolve relative paths relative to workspace_dir
-            if not file_path.is_absolute():
-                file_path = self.workspace_dir / file_path
+            file_path = safe_join(self.workspace_dir, path)
 
             if not file_path.exists():
                 return ToolResult(
@@ -120,9 +121,15 @@ class ReadTool(Tool):
                     error=f"File not found: {path}",
                 )
 
-            # Read file content with line numbers
-            with open(file_path, encoding="utf-8") as f:
-                lines = f.readlines()
+            # Handle binary documents (PDF, DOCX, XLSX) with caching
+            if is_binary_doc(file_path):
+                content = self._cache.get_or_extract(file_path)
+                lines = content.split("\n")
+            else:
+                # Read file content with line numbers
+                with open(file_path, encoding="utf-8") as f:
+                    lines = f.readlines()
+                lines = [line.rstrip("\n") for line in lines]
 
             # Apply offset and limit
             start = (offset - 1) if offset else 0
@@ -137,9 +144,7 @@ class ReadTool(Tool):
             # Format with line numbers (1-indexed)
             numbered_lines = []
             for i, line in enumerate(selected_lines, start=start + 1):
-                # Remove trailing newline for formatting
-                line_content = line.rstrip("\n")
-                numbered_lines.append(f"{i:6d}|{line_content}")
+                numbered_lines.append(f"{i:6d}|{line}")
 
             content = "\n".join(numbered_lines)
 
@@ -148,6 +153,8 @@ class ReadTool(Tool):
             content = truncate_text_by_tokens(content, max_tokens)
 
             return ToolResult(success=True, content=content)
+        except PathTraversalError as e:
+            return ToolResult(success=False, content="", error=str(e))
         except Exception as e:
             return ToolResult(success=False, content="", error=str(e))
 
@@ -195,16 +202,15 @@ class WriteTool(Tool):
     async def execute(self, path: str, content: str) -> ToolResult:
         """Execute write file."""
         try:
-            file_path = Path(path)
-            # Resolve relative paths relative to workspace_dir
-            if not file_path.is_absolute():
-                file_path = self.workspace_dir / file_path
+            file_path = safe_join(self.workspace_dir, path)
 
             # Create parent directories if they don't exist
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
             file_path.write_text(content, encoding="utf-8")
             return ToolResult(success=True, content=f"Successfully wrote to {file_path}")
+        except PathTraversalError as e:
+            return ToolResult(success=False, content="", error=str(e))
         except Exception as e:
             return ToolResult(success=False, content="", error=str(e))
 
@@ -256,10 +262,7 @@ class EditTool(Tool):
     async def execute(self, path: str, old_str: str, new_str: str) -> ToolResult:
         """Execute edit file."""
         try:
-            file_path = Path(path)
-            # Resolve relative paths relative to workspace_dir
-            if not file_path.is_absolute():
-                file_path = self.workspace_dir / file_path
+            file_path = safe_join(self.workspace_dir, path)
 
             if not file_path.exists():
                 return ToolResult(
@@ -281,5 +284,7 @@ class EditTool(Tool):
             file_path.write_text(new_content, encoding="utf-8")
 
             return ToolResult(success=True, content=f"Successfully edited {file_path}")
+        except PathTraversalError as e:
+            return ToolResult(success=False, content="", error=str(e))
         except Exception as e:
             return ToolResult(success=False, content="", error=str(e))

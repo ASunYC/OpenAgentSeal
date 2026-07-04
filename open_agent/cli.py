@@ -242,6 +242,7 @@ def select_model():
 from open_agent.tools.base import Tool
 from open_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from open_agent.tools.file_tools import EditTool, ReadTool, WriteTool
+from open_agent.tools.search_tools import GlobTool, GrepTool, ListDirTool
 from open_agent.tools.mcp_loader import (
     cleanup_mcp_connections,
     load_mcp_tools_async,
@@ -1183,6 +1184,19 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
         )
         print(
             f"{Colors.GREEN}✅ Loaded file operation tools (workspace: {workspace_dir}){Colors.RESET}"
+        )
+
+    # Search tools - glob, grep, list_dir for workspace file operations
+    if config.tools.enable_file_tools:
+        tools.extend(
+            [
+                GlobTool(workspace_dir=str(workspace_dir)),
+                GrepTool(workspace_dir=str(workspace_dir)),
+                ListDirTool(workspace_dir=str(workspace_dir)),
+            ]
+        )
+        print(
+            f"{Colors.GREEN}✅ Loaded search tools (glob, grep, list_dir){Colors.RESET}"
         )
 
     # Memory tools - tree-structured memory storage with SQLite backend

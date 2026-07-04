@@ -111,7 +111,9 @@ class ToolRegistry:
 
 def infer_tool_metadata(tool: Tool) -> ToolMetadata:
     name = tool.name
-    if name in {"read_file", "list_files", "search_files", "grep"}:
+    if name in {"read_file", "list_files", "search_files", "grep", "list_dir"}:
+        return ToolMetadata(name=name, capabilities=frozenset({ToolCapability.READ}), risk=ToolRisk.LOW)
+    if name == "glob":
         return ToolMetadata(name=name, capabilities=frozenset({ToolCapability.READ}), risk=ToolRisk.LOW)
     if name in {"write_file", "edit_file"}:
         return ToolMetadata(

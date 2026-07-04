@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState } from '@/types'
+import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
 import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
@@ -995,6 +995,112 @@ export const fileApi = {
   }
 }
 
+// ── Workspace Resource Manager API ──
+
+export const workspaceApi = {
+  // Workspace CRUD
+  async listWorkspaces(): Promise<{ workspaces: Workspace[] }> {
+    return request(`/workspace/`)
+  },
+
+  async createWorkspace(name: string, path?: string): Promise<{ workspace: Workspace }> {
+    return request(`/workspace/`, {
+      method: 'POST',
+      body: JSON.stringify({ name, path }),
+    })
+  },
+
+  async updateWorkspace(id: string, updates: { name?: string; path?: string }): Promise<{ workspace: Workspace }> {
+    return request(`/workspace/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    })
+  },
+
+  async deleteWorkspace(id: string): Promise<{ status: string }> {
+    return request(`/workspace/${id}`, { method: 'DELETE' })
+  },
+
+  async setCurrentWorkspace(id: string): Promise<{ status: string }> {
+    return request(`/workspace/${id}/set-current`, { method: 'PUT' })
+  },
+
+  // File operations
+  async listFiles(wsId: string, path?: string): Promise<{ path: string; ws_path: string; files: FileEntry[] }> {
+    const params = path ? `?path=${encodeURIComponent(path)}` : ''
+    return request(`/workspace/${wsId}/files${params}`)
+  },
+
+  async readFile(wsId: string, path: string, offset?: number, limit?: number): Promise<{ ok: boolean; path: string; content: string; size: number }> {
+    const params = new URLSearchParams({ path })
+    if (offset !== undefined) params.set('offset', String(offset))
+    if (limit !== undefined) params.set('limit', String(limit))
+    return request(`/workspace/${wsId}/read?${params}`)
+  },
+
+  async writeFile(wsId: string, path: string, content: string): Promise<{ ok: boolean; path: string; size: number }> {
+    return request(`/workspace/${wsId}/write`, {
+      method: 'POST',
+      body: JSON.stringify({ path, content }),
+    })
+  },
+
+  async deleteFile(wsId: string, path: string): Promise<{ ok: boolean; path: string }> {
+    return request(`/workspace/${wsId}/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    })
+  },
+
+  async mkdir(wsId: string, path: string): Promise<{ ok: boolean; path: string }> {
+    return request(`/workspace/${wsId}/mkdir`, {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    })
+  },
+
+  async rename(wsId: string, path: string, newName: string): Promise<{ ok: boolean; old_path: string; new_path: string }> {
+    return request(`/workspace/${wsId}/rename`, {
+      method: 'POST',
+      body: JSON.stringify({ path, name: newName }),
+    })
+  },
+
+  async upload(wsId: string, file: File, destPath?: string): Promise<{ ok: boolean; path: string; size: number }> {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (destPath) formData.append('dest_path', destPath)
+    const res = await fetch(`${API_BASE}/workspace/${wsId}/upload`, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!res.ok) throw new Error(`Upload failed: ${res.statusText}`)
+    return res.json()
+  },
+
+  // Search
+  async search(wsId: string, pattern: string, path?: string): Promise<{ query: string; results: WorkspaceSearchResult[] }> {
+    return request(`/workspace/${wsId}/search`, {
+      method: 'POST',
+      body: JSON.stringify({ pattern, path }),
+    })
+  },
+
+  async glob(wsId: string, pattern: string): Promise<{ pattern: string; files: string[] }> {
+    return request(`/workspace/${wsId}/glob`, {
+      method: 'POST',
+      body: JSON.stringify({ pattern }),
+    })
+  },
+
+  async searchAll(pattern: string): Promise<{ query: string; results: any[] }> {
+    return request(`/workspace/search-all`, {
+      method: 'POST',
+      body: JSON.stringify({ pattern }),
+    })
+  },
+}
+
 // Export unified api object for stores
 export const api = {
   // Chat
@@ -1079,4 +1185,21 @@ export const api = {
   createWorkspaceSources: fileApi.createWorkspaceSources,
   getWorkspaceSourcesState: fileApi.getWorkspaceSourcesState,
   saveWorkspaceSourcesState: fileApi.saveWorkspaceSourcesState,
+
+  // Workspace Resource Manager
+  listWorkspaces: workspaceApi.listWorkspaces,
+  createWorkspace: workspaceApi.createWorkspace,
+  updateWorkspace: workspaceApi.updateWorkspace,
+  deleteWorkspace: workspaceApi.deleteWorkspace,
+  setCurrentWorkspace: workspaceApi.setCurrentWorkspace,
+  listWorkspaceFiles: workspaceApi.listFiles,
+  readWorkspaceFile: workspaceApi.readFile,
+  writeWorkspaceFile: workspaceApi.writeFile,
+  deleteWorkspaceFile: workspaceApi.deleteFile,
+  createWorkspaceFolder: workspaceApi.mkdir,
+  renameWorkspaceItem: workspaceApi.rename,
+  uploadWorkspaceFile: workspaceApi.upload,
+  searchWorkspace: workspaceApi.search,
+  globWorkspace: workspaceApi.glob,
+  searchAllWorkspaces: workspaceApi.searchAll,
 }

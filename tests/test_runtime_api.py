@@ -54,6 +54,5 @@ class TestRuntimeApi(unittest.TestCase):
         self.assertEqual(len(events_response.json()["events"]), 1)
         self.assertEqual(events_response.json()["events"][0]["event_type"], "complete")
 
-
 if __name__ == "__main__":
     unittest.main()

@@ -273,18 +273,34 @@ class AgentRunner:
     def _is_workspace_listing_request(self, text: str, request: AgentRequest) -> bool:
         sources = request.meta.get("workspace_sources") or []
         selected_paths = request.meta.get("selected_workspace_paths") or []
-        if not isinstance(sources, list) or not sources or selected_paths:
+        if not isinstance(sources, list):
+            sources = []
+        if not isinstance(selected_paths, list):
+            selected_paths = []
+        if not sources and not selected_paths:
             return False
 
         normalized = (text or "").lower()
-        library_terms = ("资料库", "资料", "来源", "文件", "目录", "library", "workspace")
-        list_terms = ("有什么", "有哪些", "列出", "查看", "内容", "清单", "list", "ls", "show")
+        library_terms = ("资料库", "资料", "来源", "文件", "目录", "文件夹", "选中", "勾选", "library", "workspace", "selected")
+        list_terms = ("有什么", "有哪些", "列出", "查看", "内容", "清单", "包含", "list", "ls", "show")
+        if selected_paths:
+            selected_terms = ("选", "勾", "文件", "目录", "文件夹", "selected")
+            selected_list_terms = ("哪些", "有什么", "列", "清单", "list", "show")
+            if any(term in normalized for term in selected_terms) and any(
+                term in normalized for term in selected_list_terms
+            ):
+                return True
         return any(term in normalized for term in library_terms) and any(
             term in normalized for term in list_terms
         )
 
     def _workspace_listing_answer(self, request: AgentRequest, limit: int = 100) -> str:
         sources = request.meta.get("workspace_sources") or []
+        selected_paths = request.meta.get("selected_workspace_paths") or []
+        selected = [str(path) for path in selected_paths if path] if isinstance(selected_paths, list) else []
+        if selected:
+            return self._selected_workspace_listing_answer(selected, limit=limit)
+
         entries: List[Dict[str, Any]] = []
 
         def visit(node: Any, root_name: str, depth: int = 0) -> None:
@@ -339,6 +355,52 @@ class AgentRunner:
         if total > limit:
             lines.append("")
             lines.append(f"还有 {total - limit} 项未展开显示。你可以让我按目录、文件类型或关键词继续筛选。")
+        return "\n".join(lines)
+
+    def _selected_workspace_listing_answer(self, selected_paths: List[str], limit: int = 100) -> str:
+        lines = [
+            f"你当前勾选了 {len(selected_paths)} 个路径：",
+            "",
+        ]
+        shown = 0
+
+        for raw_path in sorted(selected_paths):
+            path = Path(raw_path)
+            if not path.exists():
+                lines.append(f"- [不可用] {raw_path}（路径不存在）")
+                continue
+
+            if path.is_file():
+                lines.append(f"- [文件] {path.name}")
+                lines.append(f"  路径：{path}")
+                shown += 1
+                continue
+
+            if not path.is_dir():
+                lines.append(f"- [不可用] {path}（不是文件或目录）")
+                continue
+
+            files = []
+            for child in path.rglob("*"):
+                if child.is_file():
+                    files.append(child)
+                if len(files) >= limit:
+                    break
+
+            lines.append(f"- [目录] {path.name}（包含 {len(files)} 个文件，最多显示 {limit} 个）")
+            lines.append(f"  路径：{path}")
+            for child in files[:limit]:
+                try:
+                    rel = child.relative_to(path)
+                except ValueError:
+                    rel = child
+                lines.append(f"  - {rel}")
+                shown += 1
+            if len(files) >= limit:
+                lines.append("  - ...（文件较多，已截断）")
+
+        if shown == 0:
+            lines.append("没有找到可列出的文件。")
         return "\n".join(lines)
 
     def _attachment_to_image_block(self, attachment: Any) -> Optional[Dict[str, Any]]:

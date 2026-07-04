@@ -51,7 +51,7 @@
             class="btn-settings"
             :class="{ active: isSourceWorkspaceOpen }"
             @click="toggleSourceWorkspace"
-            :title="t('资料库', 'Library')"
+            :title="t('工作区', 'Workspace')"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
@@ -124,8 +124,8 @@
                 <path d="M9.5 13.5h5"/>
               </svg>
               <div class="workspace-panel-copy">
-                <h3>{{ t('资料库', 'Library') }}</h3>
-                <p>{{ t('添加文件、目录作为当前任务资料来源', 'Add files and folders as task reference sources') }}</p>
+                <h3>{{ t('工作区', 'Workspace') }}</h3>
+                <p>{{ t('添加文件、目录作为当前任务工作区来源', 'Add files and folders as task workspace sources') }}</p>
               </div>
             </div>
             <div class="workspace-panel-actions">
@@ -138,41 +138,16 @@
             </div>
           </header>
 
-          <section
-            class="source-drop-zone"
-            :class="{ 'drag-over': isSourceDragging }"
-            @dragenter.prevent="onSourceDragEnter"
-            @dragover.prevent="onSourceDragOver"
-            @dragleave.prevent="onSourceDragLeave"
-            @drop.prevent="onSourceDrop"
-            @click="chooseWorkspaceFiles"
-          >
-            <div class="source-drop-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 5v10"/>
-                <path d="M8 9l4-4 4 4"/>
-                <path d="M4 17v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1"/>
-              </svg>
-            </div>
-            <strong>{{ t('拖拽文件或目录到这里', 'Drop files or folders here') }}</strong>
-            <span>{{ t('点击选择文件，也可以选择整个目录挂载到资料库', 'Click to pick files, or mount a local folder to the library') }}</span>
-            <div class="source-drop-actions" @click.stop>
-              <button v-if="canUseTauriFilePicker" @click="chooseWorkspaceFiles">{{ t('选择文件', 'Files') }}</button>
-              <button v-if="canUseTauriFilePicker" @click="chooseWorkspaceDirectory">{{ t('选择目录', 'Folder') }}</button>
-              <button v-else @click="openServerPathInput">{{ t('添加服务器路径', 'Add server path') }}</button>
-              <button @click="openWebSourceInput">{{ t('添加 Web 地址', 'Add web URL') }}</button>
-            </div>
-            <form v-if="showServerPathInput" class="source-web-form" @click.stop @submit.prevent="addServerPathSource">
-              <input
-                ref="serverPathInputRef"
-                v-model="serverPathValue"
-                type="text"
-                :placeholder="t('输入服务器上的文件或目录路径后回车', 'Enter a server file or folder path')"
-                @keydown.esc.prevent="showServerPathInput = false"
-              />
-              <button type="submit">{{ t('添加', 'Add') }}</button>
-            </form>
-            <form v-if="showWebSourceInput" class="source-web-form" @click.stop @submit.prevent="addWebSource">
+          <section class="source-list">
+            <WorkspaceManager
+              @choose-files="chooseWorkspaceFiles"
+              @choose-directory="chooseWorkspaceDirectory"
+              @add-web-url="openWebSourceInput"
+              @add-server-path="openServerPathInput"
+              @refresh="loadWorkspaceSourceState"
+            />
+            <!-- Web URL form -->
+            <form v-if="showWebSourceInput" class="source-web-form-inline" @submit.prevent="addWebSource">
               <input
                 ref="webSourceInputRef"
                 v-model="webSourceUrl"
@@ -181,28 +156,20 @@
                 @keydown.esc.prevent="showWebSourceInput = false"
               />
               <button type="submit">{{ t('添加', 'Add') }}</button>
+              <button type="button" @click="showWebSourceInput = false">×</button>
             </form>
-          </section>
-
-          <section class="source-list">
-            <div class="source-list-head">
-              <span>{{ t('来源', 'Sources') }}</span>
-              <button v-if="workspaceSources.length" @click="clearWorkspaceSources">{{ t('清空', 'Clear') }}</button>
-            </div>
-            <div class="source-list-scroll">
-              <div v-if="!workspaceSources.length" class="source-empty">{{ t('还没有添加来源', 'No sources added yet') }}</div>
-              <WorkspaceSourceTree
-                v-else
-                :sources="workspaceSources"
-                :selected-paths="selectedWorkspacePaths"
-                :expanded-paths="expandedWorkspacePaths"
-                :can-open-location="canOpenFileLocation"
-                @toggle-select="toggleWorkspaceSourceSelection"
-                @toggle-expanded="toggleWorkspaceSourceExpanded"
-                @remove-source="removeWorkspaceSource"
-                @open-location="openWorkspaceSourceLocation"
+            <!-- Server path form -->
+            <form v-if="showServerPathInput" class="source-web-form-inline" @submit.prevent="addServerPathSource">
+              <input
+                ref="serverPathInputRef"
+                v-model="serverPathValue"
+                type="text"
+                :placeholder="t('输入服务器上的文件或目录路径后回车', 'Enter a server file or folder path')"
+                @keydown.esc.prevent="showServerPathInput = false"
               />
-            </div>
+              <button type="submit">{{ t('添加', 'Add') }}</button>
+              <button type="button" @click="showServerPathInput = false">×</button>
+            </form>
           </section>
         </aside>
 
@@ -211,8 +178,8 @@
           class="source-resizer"
           :class="{ active: isResizingSourceWorkspace }"
           type="button"
-          :title="t('拖动调整资料库宽度，双击重置', 'Drag to resize library, double-click to reset')"
-          :aria-label="t('调整资料库宽度', 'Resize library')"
+          :title="t('拖动调整工作区宽度，双击重置', 'Drag to resize workspace, double-click to reset')"
+          :aria-label="t('调整工作区宽度', 'Resize workspace')"
           @pointerdown="startSourceWorkspaceResize"
           @dblclick="resetSourceWorkspaceWidth"
         >
@@ -1115,8 +1082,9 @@ import { useChatStore } from '@/stores/chat'
 import { api } from '@/api'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
-import WorkspaceSourceTree from '@/components/WorkspaceSourceTree.vue'
+import WorkspaceManager from '@/views/WorkspaceManager.vue'
 import SandboxPanel from '@/components/SandboxPanel.vue'
+import { useWorkspaceManager } from '@/composables/useWorkspaceManager'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
@@ -1126,6 +1094,7 @@ import { typewriterReveal } from '@/utils/typewriter'
 const agentStore = useAgentStore()
 const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
+const managedWorkspace = useWorkspaceManager()
 const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
 // 褰撳墠瑙嗗浘
@@ -1147,7 +1116,6 @@ const runtimeCapabilities = ref<RuntimeCapabilities>({
 })
 const canUseBrowserPanel = computed(() => runtimeCapabilities.value.features.browserPanel)
 const canUseSandboxPanel = computed(() => runtimeCapabilities.value.features.sandboxPanel)
-const canOpenFileLocation = computed(() => runtimeCapabilities.value.features.openFileLocation)
 const canUseTauriFilePicker = computed(() => runtimeCapabilities.value.features.tauriFilePicker)
 const isWorkspaceOpen = computed(() => activeWorkspacePanel.value !== '')
 const fullscreenWorkspacePanel = ref<'' | 'browser' | 'sandbox'>('')
@@ -1162,7 +1130,6 @@ const isSourceWorkspaceOpen = ref(false)
 const isChatConstrained = computed(() => isWorkspaceOpen.value || isSourceWorkspaceOpen.value)
 const sourceWorkspaceRef = ref<HTMLElement | null>(null)
 const sourceDragDepth = ref(0)
-const isSourceDragging = computed(() => sourceDragDepth.value > 0)
 const workspaceSources = ref<WorkspaceSource[]>([])
 const selectedWorkspacePaths = ref<string[]>([])
 const expandedWorkspacePaths = ref<string[]>([])
@@ -2478,7 +2445,7 @@ async function addWorkspaceSourcePaths(paths: string[]) {
     }
   } catch (error) {
     console.error('Failed to add workspace sources:', error)
-    alert(t('添加资料库来源失败，请重试。', 'Failed to add library sources. Please try again.'))
+    alert(t('添加工作区来源失败，请重试。', 'Failed to add workspace sources. Please try again.'))
   }
 }
 
@@ -2507,25 +2474,22 @@ async function chooseWorkspaceDirectory() {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const selected = await open({ multiple: true, directory: true, title: t('选择目录', 'Select folders') })
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
-    await addWorkspaceSourcePaths(paths.map(String))
+
+    // 为每个选择的目录创建一个工作区
+    for (const path of paths) {
+      const dirName = path.split(/[\\/]/).filter(Boolean).pop() || path
+      try {
+        await api.createWorkspace(dirName, path)
+        // 刷新工作区列表
+        await loadWorkspaceSourceState()
+      } catch (error) {
+        console.error(`Failed to create workspace for ${path}:`, error)
+      }
+    }
   } catch (error) {
     console.error('Tauri directory dialog is not available:', error)
     alert(t('当前环境不支持目录选择窗口。', 'Folder picker is not available in this environment.'))
   }
-}
-
-function collectWorkspaceSourcePaths(source: WorkspaceSourceNode): string[] {
-  const childPaths = (source.children || []).flatMap(collectWorkspaceSourcePaths)
-  return [source.path, ...childPaths]
-}
-
-function findWorkspaceSourceNode(path: string, sources: WorkspaceSourceNode[] = workspaceSources.value): WorkspaceSourceNode | null {
-  for (const source of sources) {
-    if (source.path === path) return source
-    const match = findWorkspaceSourceNode(path, source.children || [])
-    if (match) return match
-  }
-  return null
 }
 
 function normalizeWorkspaceSourceSelection(paths: Iterable<string>): string[] {
@@ -2571,11 +2535,46 @@ function compactSelectedWorkspacePaths(): string[] {
   return compacted
 }
 
-function clearWorkspaceSources() {
-  workspaceSources.value = []
-  selectedWorkspacePaths.value = []
-  expandedWorkspacePaths.value = []
-  saveWorkspaceSourceState()
+function mergedWorkspacePayload(): WorkspaceSource[] {
+  const sources = [...workspaceSources.value]
+  const existing = new Set(sources.map(source => source.path))
+  const managedSelectedPaths = Array.from(managedWorkspace.selectedPaths.value)
+
+  for (const ws of managedWorkspace.workspaces.value) {
+    const hasSelectedPath = managedSelectedPaths.some(path => isPathWithinRoot(path, ws.path))
+    if (!hasSelectedPath || existing.has(ws.path)) continue
+    sources.push({
+      id: `managed_${ws.id}`,
+      name: ws.name,
+      path: ws.path,
+      type: 'directory',
+      mime_type: null,
+      size: null,
+      modified_at: ws.updated ? Date.parse(ws.updated) / 1000 : Date.now() / 1000,
+      children: [],
+      children_count: undefined,
+    })
+    existing.add(ws.path)
+  }
+
+  return sources
+}
+
+function mergedSelectedWorkspacePaths(): string[] {
+  return Array.from(new Set([
+    ...compactSelectedWorkspacePaths(),
+    ...Array.from(managedWorkspace.selectedPaths.value),
+  ]))
+}
+
+function isPathWithinRoot(path: string, root: string): boolean {
+  const normalizedPathValue = normalizePathForCompare(path)
+  const normalizedRoot = normalizePathForCompare(root)
+  return normalizedPathValue === normalizedRoot || normalizedPathValue.startsWith(`${normalizedRoot}/`)
+}
+
+function normalizePathForCompare(path: string): string {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 }
 
 function openWebSourceInput() {
@@ -2649,104 +2648,6 @@ function webSourceName(url: string): string {
     return parsed.hostname || url
   } catch {
     return url
-  }
-}
-
-function toggleWorkspaceSourceSelection(path: string) {
-  const source = findWorkspaceSourceNode(path)
-  const paths = source ? collectWorkspaceSourcePaths(source) : [path]
-  const selected = new Set(selectedWorkspacePaths.value)
-  const isFullySelected = paths.every(item => selected.has(item))
-
-  if (isFullySelected) {
-    paths.forEach(item => selected.delete(item))
-  } else {
-    paths.forEach(item => selected.add(item))
-  }
-
-  selectedWorkspacePaths.value = normalizeWorkspaceSourceSelection(selected)
-  saveWorkspaceSourceState()
-}
-
-function toggleWorkspaceSourceExpanded(path: string) {
-  const expanded = new Set(expandedWorkspacePaths.value)
-  if (expanded.has(path)) {
-    expanded.delete(path)
-  } else {
-    expanded.add(path)
-  }
-  expandedWorkspacePaths.value = Array.from(expanded)
-  saveWorkspaceSourceState()
-}
-
-function removeWorkspaceSource(sourceIdOrPath: string) {
-  const removed = workspaceSources.value.find(source => source.id === sourceIdOrPath || source.path === sourceIdOrPath)
-  const removedPaths = new Set(removed ? collectWorkspaceSourcePaths(removed) : [sourceIdOrPath])
-  workspaceSources.value = workspaceSources.value.filter(source => source.id !== sourceIdOrPath && source.path !== sourceIdOrPath)
-  selectedWorkspacePaths.value = selectedWorkspacePaths.value.filter(path => !removedPaths.has(path))
-  expandedWorkspacePaths.value = expandedWorkspacePaths.value.filter(path => !removedPaths.has(path))
-  saveWorkspaceSourceState()
-}
-
-async function openWorkspaceSourceLocation(source: WorkspaceSourceNode) {
-  if (!canOpenFileLocation.value) return
-
-  const path = source.path || ''
-  if (!path) return
-
-  const target = source.type === 'file' ? parentDirectory(path) : path
-  try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('open_path', { target })
-  } catch (error) {
-    console.warn('Failed to open library source location:', error)
-    alert(t('当前环境无法打开该位置。', 'This environment cannot open this location.'))
-  }
-}
-
-function parentDirectory(path: string): string {
-  const normalized = path.replace(/\\/g, '/')
-  const index = normalized.lastIndexOf('/')
-  if (index <= 0) return path
-  const parent = path.slice(0, index)
-  return parent || path
-}
-
-function onSourceDragEnter(event: DragEvent) {
-  if (!hasDraggedFiles(event)) return
-  sourceDragDepth.value += 1
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
-}
-
-function onSourceDragOver(event: DragEvent) {
-  if (!hasDraggedFiles(event)) return
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
-}
-
-function onSourceDragLeave(event: DragEvent) {
-  if (!hasDraggedFiles(event)) return
-  sourceDragDepth.value = Math.max(0, sourceDragDepth.value - 1)
-}
-
-async function onSourceDrop(event: DragEvent) {
-  sourceDragDepth.value = 0
-  const files = Array.from(event.dataTransfer?.files || [])
-  if (!files.length) return
-  const sources: WorkspaceSource[] = files.map(file => ({
-    id: `src_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    name: file.name,
-    path: file.name,
-    type: 'file',
-    mime_type: file.type || 'application/octet-stream',
-    size: file.size,
-    children: [],
-    children_count: 0,
-  }))
-  const existing = new Set(workspaceSources.value.map(source => `${source.name}:${source.size || 0}`))
-  const incoming = sources.filter(source => !existing.has(`${source.name}:${source.size || 0}`))
-  workspaceSources.value.push(...incoming)
-  if (incoming.length) {
-    saveWorkspaceSourceState()
   }
 }
 
@@ -2844,8 +2745,8 @@ async function sendMessage() {
   }
   
   const userMessage = route.message
-  const workspacePayload = workspaceSources.value
-  const selectedWorkspacePayload = compactSelectedWorkspacePaths()
+  const workspacePayload = mergedWorkspacePayload()
+  const selectedWorkspacePayload = mergedSelectedWorkspacePaths()
   inputMessage.value = ''
   pendingAttachments.value = []
   mentionTarget.value = null
@@ -2994,6 +2895,8 @@ async function sendMessage() {
       // 鐩戝惉閿欒浜嬩欢
       if (event.event === 'error' && event.error) {
         console.error('Agent error:', event.error)
+        assistantContent = `${t('调用失败：', 'Request failed: ')}${event.error}`
+        assistantMessage.content = assistantContent
         assistantMessage.isLoading = false
         if (settingsStore.settings.useCoT && assistantMessage.thinking) {
           assistantMessage.thinking.steps.push({
@@ -5280,6 +5183,58 @@ onUnmounted(() => {
   color: white;
   font-size: 12px;
   cursor: pointer;
+}
+
+.source-web-form-inline {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-color);
+  background: var(--glass-bg);
+}
+
+.source-web-form-inline input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.source-web-form-inline input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.source-web-form-inline button[type="submit"] {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--primary-color);
+  border-radius: 8px;
+  background: var(--primary-color);
+  color: white;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.source-web-form-inline button[type="button"] {
+  height: 30px;
+  width: 30px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .source-list {

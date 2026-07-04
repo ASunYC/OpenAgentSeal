@@ -116,6 +116,34 @@ export interface WorkspaceSourceState {
   expanded_paths: string[]
 }
 
+// ── Workspace Resource Manager types ──
+
+export interface Workspace {
+  id: string
+  name: string
+  path: string
+  created: string
+  updated?: string
+  is_current?: boolean  // 是否为当前工作区
+  children?: FileEntry[] // 文件列表（懒加载）
+  children_count?: number
+}
+
+export interface FileEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number | null
+  modified_at: number
+  mime_type: string | null
+}
+
+export interface WorkspaceSearchResult {
+  file: string
+  line: number
+  content: string
+}
+
 export interface ForkChatResponse {
   chat: Chat
   source_session_id: string

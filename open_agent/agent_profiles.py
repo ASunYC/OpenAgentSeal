@@ -41,6 +41,7 @@ class AgentProfileConfig:
     permission_mode: str = "default"
     allow_delegation: bool = False
     enabled: bool = True
+    workspace_dir: str = ""  # 工作目录（与资料库当前工作区同步）
     created_at: str = ""
     updated_at: str = ""
 

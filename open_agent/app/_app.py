@@ -88,6 +88,7 @@ def create_app() -> FastAPI:
 
     # Include chat router
     from open_agent.app.runner import chat_router
+    from open_agent.app.runner.workspace_api import router as workspace_router
     from open_agent.app.mobile import router as mobile_router
     from open_agent.app.mobile import is_remote_api_request_allowed
     from open_agent.app.sandbox import router as sandbox_router
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     app.include_router(chat_router)
+    app.include_router(workspace_router)
     app.include_router(mobile_router)
     app.include_router(sandbox_router)
     app.mount("/api/plugins/mineru-mcp", _get_mineru_mcp_app())

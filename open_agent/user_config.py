@@ -65,7 +65,7 @@ class ModelProvider(Enum):
             cls.DEEPSEEK: "https://api.deepseek.com",
             cls.QWEN: "https://dashscope.aliyuncs.com/api/v1",
             cls.ZHIPU: "https://open.bigmodel.cn/api/paas/v4",
-            cls.VOLCANO: "https://ark.cn-beijing.volces.com/api/coding/v3",
+            cls.VOLCANO: "https://ark.cn-beijing.volces.com/api/v3",
             cls.MINIMAX: "https://api.minimaxi.com/anthropic",
             cls.SILICONFLOW: "https://api.siliconflow.cn/v1",
             cls.MOONSHOT: "https://api.moonshot.cn/v1",
