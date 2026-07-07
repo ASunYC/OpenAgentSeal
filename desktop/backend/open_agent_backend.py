@@ -37,21 +37,22 @@ def main() -> None:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    workspace = os.environ.get("OPEN_AGENT_DESKTOP_WORKSPACE")
-    if not workspace:
-        workspace = str(Path.home() / "OpenAgentSeal")
+    if len(sys.argv) <= 1:
+        workspace = os.environ.get("OPEN_AGENT_DESKTOP_WORKSPACE")
+        if not workspace:
+            workspace = str(Path.home() / "OpenAgentSeal")
 
-    sys.argv = [
-        "open-agent-backend",
-        "--web-only",
-        "--no-browser",
-        "--host",
-        os.environ.get("OPEN_AGENT_DESKTOP_HOST", "127.0.0.1"),
-        "--port",
-        os.environ.get("OPEN_AGENT_DESKTOP_PORT", "9998"),
-        "--workspace",
-        workspace,
-    ]
+        sys.argv = [
+            "open-agent-backend",
+            "--web-only",
+            "--no-browser",
+            "--host",
+            os.environ.get("OPEN_AGENT_DESKTOP_HOST", "127.0.0.1"),
+            "--port",
+            os.environ.get("OPEN_AGENT_DESKTOP_PORT", "9998"),
+            "--workspace",
+            workspace,
+        ]
 
     from open_agent.cli import main as cli_main
 

@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::{
     env,
@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tauri::{
@@ -77,6 +77,10 @@ impl BackendProcess {
             let _ = backend.wait();
             Err("Python backend did not become ready within 20 seconds".to_string())
         }
+    }
+
+    fn open_cli_terminal(&self) -> Result<(), String> {
+        open_cli_terminal(&self.command)
     }
 }
 
@@ -186,7 +190,12 @@ fn find_sidecar(app: &tauri::App) -> Option<PathBuf> {
     }
 
     if let Ok(root) = repo_root() {
-        candidates.push(root.join("desktop").join("src-tauri").join("binaries").join(SIDECAR_NAME));
+        candidates.push(
+            root.join("desktop")
+                .join("src-tauri")
+                .join("binaries")
+                .join(SIDECAR_NAME),
+        );
     }
 
     candidates.into_iter().find(|path| path.exists())
@@ -316,6 +325,14 @@ fn connect_backend() -> Result<TcpStream, String> {
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        match backend_url().parse() {
+            Ok(url) => {
+                if let Err(error) = window.navigate(url) {
+                    append_desktop_log(&format!("Failed to navigate main window: {error}"));
+                }
+            }
+            Err(error) => append_desktop_log(&format!("Invalid backend URL: {error}")),
+        }
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -347,7 +364,8 @@ fn is_allowed_main_navigation(url: &tauri::Url) -> bool {
 fn open_backend_log_file() -> Result<(), String> {
     let path = backend_log_path()?;
     if !path.exists() {
-        let _ = File::create(&path).map_err(|error| format!("Failed to create log file: {error}"))?;
+        let _ =
+            File::create(&path).map_err(|error| format!("Failed to create log file: {error}"))?;
     }
     open_target(path.to_string_lossy().as_ref())
 }
@@ -385,6 +403,254 @@ fn open_target(target: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("Failed to open {target}: {error}"))
+}
+
+#[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
+fn quote_shell_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "windows")]
+fn quote_cmd_script_arg(value: &str) -> Result<String, String> {
+    if value.contains(['\0', '\r', '\n']) {
+        return Err("CLI command contains a control character".to_string());
+    }
+    if value.contains('"') {
+        return Err("CLI command contains an unsupported double quote".to_string());
+    }
+    if value.contains('%') {
+        return Err("CLI command contains an unsupported percent sign".to_string());
+    }
+
+    Ok(format!("\"{value}\""))
+}
+
+#[cfg(target_os = "windows")]
+fn cmd_script_set_value(value: &str) -> Result<String, String> {
+    if value.contains(['\0', '\r', '\n', '"', '%']) {
+        return Err("CLI command contains a value that cannot be used in a cmd script".to_string());
+    }
+    Ok(value.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn write_cli_cmd_script(program: &Path, args: &[String], cwd: &Path) -> Result<PathBuf, String> {
+    let mut command_line = vec![quote_cmd_script_arg(&program.to_string_lossy())?];
+    command_line.extend(
+        args.iter()
+            .map(|arg| quote_cmd_script_arg(arg))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+
+    let cwd = quote_cmd_script_arg(&cwd.to_string_lossy())?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Failed to generate CLI script name: {error}"))?
+        .as_millis();
+    let script_path = env::temp_dir().join(format!(
+        "open-agent-seal-cli-{}-{timestamp}.cmd",
+        std::process::id()
+    ));
+    let runtime_temp = cmd_script_set_value(
+        &env::temp_dir()
+            .join(format!(
+                "open-agent-seal-cli-runtime-{}-{timestamp}",
+                std::process::id()
+            ))
+            .to_string_lossy(),
+    )?;
+
+    let script = format!(
+        "@echo off\r\n\
+         setlocal DisableDelayedExpansion\r\n\
+         chcp 65001 >NUL\r\n\
+         set \"PYTHONUTF8=1\"\r\n\
+         set \"PYTHONIOENCODING=utf-8\"\r\n\
+         set \"TERM=\"\r\n\
+         set \"OPEN_AGENT_CLI_TEMP={runtime_temp}\"\r\n\
+         if not exist \"%OPEN_AGENT_CLI_TEMP%\" mkdir \"%OPEN_AGENT_CLI_TEMP%\"\r\n\
+         set \"TEMP=%OPEN_AGENT_CLI_TEMP%\"\r\n\
+         set \"TMP=%OPEN_AGENT_CLI_TEMP%\"\r\n\
+         cd /d {cwd}\r\n\
+         if errorlevel 1 (\r\n\
+         \techo Failed to change directory to {cwd}\r\n\
+         \tgoto :end\r\n\
+         )\r\n\
+         {}\r\n\
+         set \"OPEN_AGENT_CLI_EXIT=%ERRORLEVEL%\"\r\n\
+         echo.\r\n\
+         echo OpenAgentSeal CLI exited with code %OPEN_AGENT_CLI_EXIT%.\r\n\
+         :end\r\n\
+         endlocal\r\n",
+        command_line.join(" ")
+    );
+
+    std::fs::write(&script_path, script)
+        .map_err(|error| format!("Failed to write CLI launch script: {error}"))?;
+    append_desktop_log(&format!(
+        "Wrote CLI script: {}",
+        script_path.to_string_lossy()
+    ));
+    Ok(script_path)
+}
+
+#[cfg(target_os = "windows")]
+fn write_cli_launcher_script(cli_script_path: &Path) -> Result<PathBuf, String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Failed to generate CLI launcher name: {error}"))?
+        .as_millis();
+    let launcher_path = env::temp_dir().join(format!(
+        "open-agent-seal-cli-launcher-{}-{timestamp}.cmd",
+        std::process::id()
+    ));
+    let cli_script = quote_cmd_script_arg(&cli_script_path.to_string_lossy())?;
+    let launcher = format!(
+        "@echo off\r\n\
+         start \"\" cmd.exe /D /V:OFF /K {cli_script}\r\n"
+    );
+
+    std::fs::write(&launcher_path, launcher)
+        .map_err(|error| format!("Failed to write CLI launcher script: {error}"))?;
+    append_desktop_log(&format!(
+        "Wrote CLI launcher script: {}",
+        launcher_path.to_string_lossy()
+    ));
+    Ok(launcher_path)
+}
+
+fn source_python_cli_parts(workspace: &Path) -> Option<(PathBuf, Vec<String>, PathBuf)> {
+    let root = repo_root().ok()?;
+    if !root.join("open_agent").join("__main__.py").exists() {
+        return None;
+    }
+
+    let executable = python_executable(&root);
+    if env::var("OPEN_AGENT_DESKTOP_PYTHON").is_err() && !executable.exists() {
+        return None;
+    }
+
+    Some((
+        executable,
+        vec![
+            "-m".to_string(),
+            "open_agent".to_string(),
+            "--cli-only".to_string(),
+            "--config".to_string(),
+            "--workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+        ],
+        root,
+    ))
+}
+
+fn cli_command_parts(command_config: &BackendCommand) -> (PathBuf, Vec<String>, PathBuf) {
+    match command_config {
+        BackendCommand::Sidecar { path, workspace } => {
+            if let Some(command_parts) = source_python_cli_parts(workspace) {
+                return command_parts;
+            }
+
+            let cwd = path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            (
+                path.clone(),
+                vec![
+                    "--cli-only".to_string(),
+                    "--config".to_string(),
+                    "--workspace".to_string(),
+                    workspace.to_string_lossy().into_owned(),
+                ],
+                cwd,
+            )
+        }
+        BackendCommand::Python { executable, root } => (
+            executable.clone(),
+            vec![
+                "-m".to_string(),
+                "open_agent".to_string(),
+                "--cli-only".to_string(),
+                "--config".to_string(),
+                "--workspace".to_string(),
+                root.to_string_lossy().into_owned(),
+            ],
+            root.clone(),
+        ),
+    }
+}
+
+fn open_cli_terminal(command_config: &BackendCommand) -> Result<(), String> {
+    let (program, args, cwd) = cli_command_parts(command_config);
+
+    #[cfg(target_os = "windows")]
+    {
+        let script_path = write_cli_cmd_script(&program, &args, &cwd)?;
+        let launcher_path = write_cli_launcher_script(&script_path)?;
+        append_desktop_log(&format!(
+            "Opening CLI terminal via launcher: {}",
+            launcher_path.to_string_lossy()
+        ));
+
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/D")
+            .arg("/C")
+            .arg(&launcher_path)
+            .current_dir(&cwd)
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
+            .env_remove("TERM");
+
+        cmd.spawn()
+            .map(|_| {
+                append_desktop_log("CLI launcher process spawned");
+            })
+            .map_err(|error| format!("Failed to open CLI terminal: {error}"))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let program = program.to_string_lossy().into_owned();
+        let cwd = cwd.to_string_lossy().into_owned();
+        let mut command_line = vec![quote_shell_arg(&program)];
+        command_line.extend(args.iter().map(|arg| quote_shell_arg(arg)));
+        let script = format!(
+            "tell application \"Terminal\" to do script \"cd {} && {}\"",
+            quote_shell_arg(&cwd),
+            command_line.join(" ")
+        );
+
+        return Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("Failed to open CLI terminal: {error}"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut terminal_args = vec!["--".to_string(), program.to_string_lossy().into_owned()];
+        terminal_args.extend(args);
+
+        for terminal in ["gnome-terminal", "konsole", "xterm"] {
+            let mut command = Command::new(terminal);
+            if terminal == "xterm" || terminal == "konsole" {
+                command.arg("-e");
+                command.arg(&terminal_args[1]);
+                command.args(&terminal_args[2..]);
+            } else {
+                command.args(&terminal_args);
+            }
+            command.current_dir(&cwd);
+            if command.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+
+        Err("No supported terminal emulator found for CLI launch".to_string())
+    }
 }
 
 fn fallback_tray_icon() -> Image<'static> {
@@ -476,11 +742,14 @@ fn main() {
             let browser = MenuItemBuilder::with_id("browser", "Open in Browser").build(app)?;
 
             let backend_header = MenuItemBuilder::new("Backend").enabled(false).build(app)?;
+            let cli = MenuItemBuilder::with_id("cli", "Open CLI").build(app)?;
             let restart = MenuItemBuilder::with_id("restart", "Restart Backend").build(app)?;
             let logs = MenuItemBuilder::with_id("logs", "Open Backend Log").build(app)?;
 
             let account_header = MenuItemBuilder::new("Account").enabled(false).build(app)?;
-            let user = MenuItemBuilder::new(current_user_label()).enabled(false).build(app)?;
+            let user = MenuItemBuilder::new(current_user_label())
+                .enabled(false)
+                .build(app)?;
 
             let info_header = MenuItemBuilder::new("Info").enabled(false).build(app)?;
             let version = MenuItemBuilder::new(format!("Version  v{}", env!("CARGO_PKG_VERSION")))
@@ -494,7 +763,7 @@ fn main() {
                 .items(&[&open, &browser])
                 .separator()
                 .item(&backend_header)
-                .items(&[&restart, &logs])
+                .items(&[&cli, &restart, &logs])
                 .separator()
                 .item(&account_header)
                 .item(&user)
@@ -520,6 +789,13 @@ fn main() {
                         let state = app.state::<BackendProcess>();
                         if let Err(error) = state.restart() {
                             append_desktop_log(&format!("Failed to restart backend: {error}"));
+                        }
+                    }
+                    "cli" => {
+                        append_desktop_log("Open CLI requested");
+                        let state = app.state::<BackendProcess>();
+                        if let Err(error) = state.open_cli_terminal() {
+                            append_desktop_log(&format!("Failed to open CLI terminal: {error}"));
                         }
                     }
                     "logs" => {
