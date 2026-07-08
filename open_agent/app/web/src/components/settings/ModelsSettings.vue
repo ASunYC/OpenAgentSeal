@@ -136,6 +136,7 @@
             <input 
               type="text"
               v-model="config.selectedModel"
+              @input="clearDiagnostic(config)"
               @change="resolveContextWindow(config)"
               :placeholder="t('输入或选择模型', 'Enter or select model')"
               class="model-name-input"
@@ -213,7 +214,42 @@
           </div>
         </div>
         
+        <div
+          v-if="config.diagnostic || config.diagnosticError"
+          class="diagnostic-panel"
+          :class="config.diagnostic ? `diagnostic-${config.diagnostic.status}` : 'diagnostic-error'"
+        >
+          <div class="diagnostic-header">
+            <span>{{ t('诊断结果', 'Diagnostics') }}</span>
+            <strong>{{ diagnosticStatusLabel(config) }}</strong>
+          </div>
+          <p v-if="config.diagnosticError" class="diagnostic-message">{{ config.diagnosticError }}</p>
+          <template v-else-if="config.diagnostic">
+            <p class="diagnostic-message">
+              {{ config.diagnostic.route.provider }} / {{ config.diagnostic.route.api_protocol }}
+              <span v-if="config.diagnostic.route.api_base"> · {{ config.diagnostic.route.api_base }}</span>
+            </p>
+            <ul class="diagnostic-checks">
+              <li
+                v-for="(check, key) in config.diagnostic.checks"
+                :key="key"
+                :class="`check-${check.status}`"
+              >
+                <span class="check-name">{{ diagnosticCheckLabel(String(key)) }}</span>
+                <span>{{ check.message }}</span>
+              </li>
+            </ul>
+          </template>
+        </div>
+
         <div class="card-footer">
+          <button
+            class="btn-diagnose"
+            @click="diagnoseConfig(config)"
+            :disabled="config.diagnosing || !config.provider"
+          >
+            {{ config.diagnosing ? t('诊断中...', 'Checking...') : t('诊断', 'Diagnose') }}
+          </button>
           <button class="btn-save" @click="saveConfig(config)" :disabled="config.saving || (config.isNew && !config.provider)">
             {{ config.saving ? t('保存中...', 'Saving...') : t('保存', 'Save') }}
           </button>
@@ -238,7 +274,7 @@ import { reactive, onMounted } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useAgentStore } from '@/stores/agent'
 import { api } from '@/api'
-import type { ModelConfig } from '@/types'
+import type { ModelConfig, ProviderDiagnostic, ProviderInfo } from '@/types'
 
 const settingsStore = useSettingsStore()
 const agentStore = useAgentStore()
@@ -264,27 +300,57 @@ interface LocalModelConfig {
   saving: boolean
   editing: boolean
   loadingModels: boolean
+  diagnosing: boolean
+  diagnostic?: ProviderDiagnostic
+  diagnosticError?: string
   newModel: string
+}
+
+interface ProviderOption {
+  value: string
+  label: string
+  defaultBaseUrl: string
+  defaultModels: string[]
+  apiProtocol: string
 }
 
 const modelConfigs = reactive<LocalModelConfig[]>([])
 const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
-// 可用的提供商列表
-const availableProviders = [
-  { value: 'openai', label: '🌐 OpenAI (GPT)' },
-  { value: 'anthropic', label: '💜 Anthropic (Claude)' },
-  { value: 'deepseek', label: '🐋 DeepSeek' },
-  { value: 'zhipu', label: '🔮 智谱 AI (GLM)' },
-  { value: 'qwen', label: '🌟 通义千问 (Qwen)' },
-  { value: 'moonshot', label: '🌙 Moonshot (Kimi)' },
-  { value: 'minimax', label: '🎯 MiniMax' },
-  { value: 'volcano', label: '🔥 火山引擎' },
-  { value: 'siliconflow', label: '💎 SiliconFlow' },
-  { value: 'baichuan', label: '🏔️ 百川智能' },
-  { value: 'ollama', label: '🦙 Ollama (本地)' },
-  { value: 'custom', label: '⚙️ 自定义提供商' }
+const fallbackProviders: ProviderOption[] = [
+  { value: 'openai', label: 'OpenAI (GPT)', defaultBaseUrl: 'https://api.openai.com/v1', defaultModels: ['gpt-4o', 'gpt-4o-mini'], apiProtocol: 'openai' },
+  { value: 'anthropic', label: 'Anthropic (Claude)', defaultBaseUrl: 'https://api.anthropic.com', defaultModels: ['claude-3-5-sonnet-20241022'], apiProtocol: 'anthropic' },
+  { value: 'volcano', label: 'Volcano', defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/coding/v3', defaultModels: ['glm-5-2-260617'], apiProtocol: 'openai' },
+  { value: 'custom', label: 'Custom', defaultBaseUrl: '', defaultModels: [], apiProtocol: 'openai' },
 ]
+const availableProviders = reactive<ProviderOption[]>([])
+
+function providerOptionFromApi(provider: ProviderInfo): ProviderOption {
+  return {
+    value: provider.id,
+    label: provider.display_name || provider.name || provider.id,
+    defaultBaseUrl: provider.default_base_url || '',
+    defaultModels: provider.default_models || [],
+    apiProtocol: provider.api_protocol || provider.provider_type || 'openai',
+  }
+}
+
+async function loadProviderProfiles() {
+  try {
+    const providers = await api.getProviders()
+    const options = providers.map(providerOptionFromApi)
+    availableProviders.splice(
+      0,
+      availableProviders.length,
+      ...(options.length > 0 ? options : fallbackProviders),
+    )
+  } catch (error) {
+    console.error('Failed to load providers:', error)
+    if (availableProviders.length === 0) {
+      availableProviders.splice(0, availableProviders.length, ...fallbackProviders)
+    }
+  }
+}
 
 // 检查提供商是否已存在
 function isProviderExists(provider: string): boolean {
@@ -355,6 +421,7 @@ function createNewModel() {
     saving: false,
     editing: true,
     loadingModels: false,
+    diagnosing: false,
     newModel: ''
   })
 }
@@ -402,39 +469,11 @@ async function onProviderChange(config: LocalModelConfig, provider: string) {
   if (providerInfo) {
     config.provider = provider
     config.provider_display_name = providerInfo.label
-    config.provider_type = provider === 'anthropic' ? 'anthropic' : 'openai'
-    
-    // 设置默认 Base URL
-    const defaultUrls: Record<string, string> = {
-      openai: 'https://api.openai.com/v1',
-      anthropic: 'https://api.anthropic.com',
-      deepseek: 'https://api.deepseek.com',
-      zhipu: 'https://open.bigmodel.cn/api/paas/v4',
-      qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-      moonshot: 'https://api.moonshot.cn/v1',
-      minimax: 'https://api.minimax.chat/v1',
-      volcano: 'https://ark.cn-beijing.volces.com/api/v3',
-      siliconflow: 'https://api.siliconflow.cn/v1',
-      baichuan: 'https://api.baichuan-ai.com/v1',
-      ollama: 'http://localhost:11434/v1'
-    }
-    config.base_url = defaultUrls[provider] || ''
-    
-    // 设置默认模型列表
-    const defaultModels: Record<string, string[]> = {
-      openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo', 'o1', 'o1-mini'],
-      anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307', 'claude-3-5-haiku-20241022'],
-      deepseek: ['deepseek-chat', 'deepseek-coder', 'deepseek-reasoner'],
-      zhipu: ['glm-4', 'glm-4-flash', 'glm-4-plus', 'glm-3-turbo'],
-      qwen: ['qwen3.6-plus', 'qwen-plus', 'qwen-max', 'qwen-max-longcontext', 'qwen-turbo'],
-      moonshot: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
-      minimax: ['abab6.5-chat', 'abab5.5-chat', 'abab5.5s-chat'],
-      volcano: ['doubao-pro-32k', 'doubao-lite-32k'],
-      siliconflow: ['Qwen/Qwen2.5-72B-Instruct', 'deepseek-ai/DeepSeek-V2.5'],
-      baichuan: ['Baichuan4', 'Baichuan3-Turbo', 'Baichuan3-Turbo-128k'],
-      ollama: ['llama3', 'llama3.1', 'mistral', 'codellama', 'qwen2']
-    }
-    config.models = defaultModels[provider] || []
+    config.provider_type = providerInfo.apiProtocol || (provider === 'anthropic' ? 'anthropic' : 'openai')
+    clearDiagnostic(config)
+
+    config.base_url = providerInfo.defaultBaseUrl
+    config.models = [...providerInfo.defaultModels]
     if (config.models.length > 0) {
       config.selectedModel = config.models[0]
     }
@@ -460,6 +499,7 @@ async function onProviderChange(config: LocalModelConfig, provider: string) {
 
 async function selectModel(config: LocalModelConfig, model: string) {
   config.selectedModel = model
+  clearDiagnostic(config)
   await resolveContextWindow(config)
 }
 
@@ -511,10 +551,12 @@ function updateApiKey(config: LocalModelConfig, key: string) {
   config.apiKey = key
   // 标记为用户输入的新 API Key（非后端返回的掩码）
   config.isUserInput = true
+  clearDiagnostic(config)
 }
 
 function updateBaseUrl(config: LocalModelConfig, url: string) {
   config.base_url = url
+  clearDiagnostic(config)
 }
 
 async function refreshModels(config: LocalModelConfig) {
@@ -543,6 +585,106 @@ function addCustomModel(config: LocalModelConfig) {
     // 自动选中新添加的模型
     config.selectedModel = model
     config.newModel = ''
+    clearDiagnostic(config)
+  }
+}
+
+function clearDiagnostic(config: LocalModelConfig) {
+  config.diagnostic = undefined
+  config.diagnosticError = ''
+}
+
+function diagnosticApiKey(config: LocalModelConfig): string {
+  if (config.apiKey && (config.isNew || config.isUserInput)) {
+    return config.apiKey
+  }
+  return config.has_api_key ? '__configured__' : ''
+}
+
+async function diagnoseConfig(config: LocalModelConfig) {
+  if (!config.provider) return
+  config.diagnosing = true
+  config.diagnosticError = ''
+  try {
+    const result = config.isNew || config.editing
+      ? await api.diagnoseProvider(config.provider, {
+          name: config.selectedModel,
+          api_key: diagnosticApiKey(config),
+          base_url: config.base_url,
+          provider_type: config.provider_type || 'openai',
+        })
+      : await api.diagnoseModelConfig(config.id)
+
+    if (result.success && result.diagnostic) {
+      config.diagnostic = result.diagnostic
+    } else {
+      config.diagnostic = undefined
+      config.diagnosticError = result.error || t('诊断失败', 'Diagnostics failed')
+    }
+  } catch (error) {
+    config.diagnostic = undefined
+    config.diagnosticError = error instanceof Error ? error.message : t('诊断失败', 'Diagnostics failed')
+  } finally {
+    config.diagnosing = false
+  }
+}
+
+function diagnosticStatusLabel(config: LocalModelConfig): string {
+  if (config.diagnosticError) return t('失败', 'Failed')
+  const status = config.diagnostic?.status
+  if (status === 'ok') return t('正常', 'OK')
+  if (status === 'warning') return t('需确认', 'Warning')
+  if (status === 'error') return t('有问题', 'Error')
+  return status || ''
+}
+
+function diagnosticCheckLabel(key: string): string {
+  const labels: Record<string, [string, string]> = {
+    provider: ['提供商', 'Provider'],
+    protocol: ['协议', 'Protocol'],
+    api_base: ['API 地址', 'API Base'],
+    api_key: ['API Key', 'API Key'],
+    model: ['模型', 'Model'],
+  }
+  const label = labels[key]
+  return label ? t(label[0], label[1]) : key
+}
+
+function defaultProviderOptions(): ProviderOption[] {
+  const byId = new Map(availableProviders.map(provider => [provider.value, provider]))
+  const preferred = ['openai', 'anthropic']
+    .map(provider => byId.get(provider))
+    .filter((provider): provider is ProviderOption => Boolean(provider))
+
+  if (preferred.length > 0) return preferred
+  return availableProviders.length > 0 ? availableProviders.slice(0, 2) : fallbackProviders.slice(0, 2)
+}
+
+function createDefaultLocalConfig(provider: ProviderOption, index: number): LocalModelConfig {
+  const selectedModel = provider.defaultModels[0] || ''
+  return {
+    id: `default_${provider.value}`,
+    provider: provider.value,
+    provider_display_name: provider.label,
+    apiKey: '',
+    apiKeyLength: 0,
+    has_api_key: false,
+    isUserInput: false,
+    isNew: false,
+    models: [...provider.defaultModels],
+    selectedModel,
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    contextWindowSource: 'fallback',
+    display_name: selectedModel ? `${provider.label} (${selectedModel})` : provider.label,
+    base_url: provider.defaultBaseUrl,
+    provider_type: provider.apiProtocol || 'openai',
+    is_default: index === 0,
+    showKey: false,
+    saving: false,
+    editing: false,
+    loadingModels: false,
+    diagnosing: false,
+    newModel: ''
   }
 }
 
@@ -593,6 +735,7 @@ async function saveConfig(config: LocalModelConfig) {
 }
 
 onMounted(async () => {
+  await loadProviderProfiles()
   await agentStore.loadModelConfigs()
   
   // 转换store中的配置到本地响应式对象
@@ -622,54 +765,14 @@ onMounted(async () => {
       saving: false,
       editing: false,
       loadingModels: false,
+      diagnosing: false,
       newModel: ''
     })
   })
   
   // 如果没有配置，添加默认提供商
   if (modelConfigs.length === 0) {
-    modelConfigs.push(
-      {
-        id: 'default_openai',
-        provider: 'openai',
-        provider_display_name: '🌐 OpenAI (GPT)',
-        apiKey: '',
-        apiKeyLength: 0,
-        has_api_key: false,
-        isUserInput: false,
-        isNew: false,
-        models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo', 'o1', 'o1-mini'],
-        selectedModel: 'gpt-4o',
-        contextWindow: 128000,
-        contextWindowSource: 'catalog',
-        display_name: '',
-        showKey: false,
-        saving: false,
-        editing: false,
-        loadingModels: false,
-        newModel: ''
-      },
-      {
-        id: 'default_anthropic',
-        provider: 'anthropic',
-        provider_display_name: '💜 Anthropic (Claude)',
-        apiKey: '',
-        apiKeyLength: 0,
-        has_api_key: false,
-        isUserInput: false,
-        isNew: false,
-        models: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307', 'claude-3-5-haiku-20241022'],
-        selectedModel: 'claude-3-5-sonnet-20241022',
-        contextWindow: 200000,
-        contextWindowSource: 'catalog',
-        display_name: '',
-        showKey: false,
-        saving: false,
-        editing: false,
-        loadingModels: false,
-        newModel: ''
-      }
-    )
+    modelConfigs.push(...defaultProviderOptions().map(createDefaultLocalConfig))
   }
 })
 </script>
@@ -966,29 +1069,125 @@ onMounted(async () => {
 }
 
 .card-footer {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.45fr) minmax(120px, 0.55fr);
+  gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--border-color);
 }
 
+.btn-diagnose,
 .btn-save {
   width: 100%;
   padding: 8px;
-  background: var(--primary-color);
-  border: none;
   border-radius: 8px;
-  color: white;
   font-size: 13px;
   cursor: pointer;
   transition: opacity 0.2s;
 }
 
+.btn-diagnose {
+  background: var(--hover-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.btn-save {
+  background: var(--primary-color);
+  border: none;
+  color: white;
+}
+
+.btn-diagnose:hover:not(:disabled),
 .btn-save:hover:not(:disabled) {
   opacity: 0.9;
 }
 
+.btn-diagnose:disabled,
 .btn-save:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.diagnostic-panel {
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--hover-bg);
+}
+
+.diagnostic-ok {
+  border-color: rgba(5, 150, 105, 0.35);
+  background: rgba(5, 150, 105, 0.06);
+}
+
+.diagnostic-warning {
+  border-color: rgba(217, 119, 6, 0.35);
+  background: rgba(217, 119, 6, 0.06);
+}
+
+.diagnostic-error {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.diagnostic-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.diagnostic-header strong {
+  flex: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.diagnostic-message {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.diagnostic-checks li {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.check-name {
+  color: var(--text-muted);
+}
+
+.check-ok {
+  color: #059669;
+}
+
+.check-warning {
+  color: #d97706;
+}
+
+.check-error {
+  color: #dc2626;
 }
 
 .add-card {

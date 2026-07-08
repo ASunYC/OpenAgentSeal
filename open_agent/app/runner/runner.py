@@ -591,6 +591,7 @@ class AgentRunner:
         compaction_state: dict[str, Any] | None = None,
         auto_compaction_enabled: bool = False,
         fallback_recent_only: bool = False,
+        runtime_events: list[dict[str, Any]] | None = None,
     ) -> None:
         chat_manager = chat_manager or self.chat_manager
         system_content = getattr(agent, "system_prompt", "")
@@ -633,7 +634,67 @@ class AgentRunner:
                     continue
                 restored.append(AgentMessage(role=stored.role, content=content))
 
+        restored.extend(
+            self._recover_agent_messages_from_runtime_events(
+                runtime_events or [],
+                restored,
+            )
+        )
         agent.messages = restored or [AgentMessage(role="system", content=system_content or "")]
+
+    def _recover_agent_messages_from_runtime_events(
+        self,
+        runtime_events: list[dict[str, Any]],
+        restored_messages: list[AgentMessage],
+    ) -> list[AgentMessage]:
+        if not runtime_events:
+            return []
+
+        existing_assistant_texts = {
+            str(message.content)
+            for message in restored_messages
+            if getattr(message, "role", "") == "assistant" and message.content
+        }
+        chunks: list[str] = []
+        final_content = ""
+        for event in runtime_events:
+            event_type = str(event.get("event_type") or "").strip()
+            payload = event.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            content = payload.get("content")
+            if event_type == "complete" and content:
+                final_content = str(content)
+            elif event_type in {"message", "assistant", "content_delta"} and content:
+                chunks.append(str(content))
+            elif event_type == "error" and payload.get("error"):
+                final_content = f"Error: {payload.get('error')}"
+
+        recovered_content = final_content or "".join(chunks)
+        if not recovered_content.strip() or recovered_content in existing_assistant_texts:
+            return []
+        return [AgentMessage(role="assistant", content=recovered_content)]
+
+    def _latest_runtime_events_for_session(
+        self,
+        control_plane: Any,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        runtime_thread = control_plane.get_runtime_thread_by_session(session_id)
+        if runtime_thread is None:
+            return []
+        runtime_turns = control_plane.list_runtime_turns(
+            runtime_thread["thread_id"],
+            limit=1,
+        )
+        if not runtime_turns:
+            return []
+        latest_turn_id = runtime_turns[0]["turn_id"]
+        return [
+            event
+            for event in control_plane.list_runtime_events(runtime_thread["thread_id"])
+            if event.get("turn_id") == latest_turn_id
+        ]
     
     async def process_message(
         self,
@@ -742,6 +803,15 @@ class AgentRunner:
         agent.session_id = session_id
         agent.profile_id = profile_id
         agent.tool_access_mode = tool_access_mode
+        from open_agent.control_plane import get_control_plane
+
+        agent_home = profile_manager.get_agent_home(manager_profile_id)
+        control_plane = get_control_plane(agent_home)
+        runtime_thread = control_plane.get_runtime_thread_by_session(session_id)
+        recovery_runtime_events = self._latest_runtime_events_for_session(
+            control_plane,
+            session_id,
+        )
         from open_agent.user_config import (
             DEFAULT_CONTEXT_WINDOW,
             model_auto_compact_token_limit,
@@ -823,6 +893,7 @@ class AgentRunner:
             compaction_state=compaction_state,
             auto_compaction_enabled=True,
             fallback_recent_only=compaction_failed,
+            runtime_events=recovery_runtime_events,
         )
         search_context = await self._prefetch_web_search_context(user_content)
         agent_user_content = self._append_context_to_agent_content(agent_user_content, search_context)
@@ -841,11 +912,6 @@ class AgentRunner:
         # Add message to agent
         agent.add_user_message(agent_user_content)
 
-        from open_agent.control_plane import get_control_plane
-
-        agent_home = profile_manager.get_agent_home(manager_profile_id)
-        control_plane = get_control_plane(agent_home)
-        runtime_thread = control_plane.get_runtime_thread_by_session(session_id)
         if runtime_thread is None:
             runtime_thread = control_plane.create_runtime_thread(
                 session_id=session_id,
@@ -1040,7 +1106,7 @@ class AgentRunner:
         try:
             from open_agent.agent import Agent
             from open_agent.llm import LLMClient
-            from open_agent.schema import LLMProvider
+            from open_agent.provider_registry import get_provider_registry
             from open_agent.tools.bash_tool import BashTool, BashOutputTool, BashKillTool
             from open_agent.tools.file_tools import ReadTool, WriteTool, EditTool
             from open_agent.tools.note_tool import RecordNoteTool, RecallNotesTool
@@ -1071,27 +1137,19 @@ class AgentRunner:
             
             # Create LLM client
             if model_config:
-                # Determine provider type based on provider_type field first, then fallback to base_url detection
-                provider_type_str = model_config.provider_type.lower() if model_config.provider_type else ""
-                base_url_lower = (model_config.base_url or "").lower()
-                
-                # Use ANTHROPIC provider for:
-                # - provider_type is "anthropic"
-                # - base_url contains "anthropic"
-                if provider_type_str == "anthropic" or "anthropic" in base_url_lower:
-                    provider_type = LLMProvider.ANTHROPIC
-                    logger.info(f"Using ANTHROPIC provider (detected from provider_type={provider_type_str} or base_url={base_url_lower})")
-                else:
-                    provider_type = LLMProvider.OPENAI
-                    logger.info(f"Using OPENAI provider (provider_type={provider_type_str})")
-                
+                route = get_provider_registry().resolve_model_config(model_config)
                 llm_client = LLMClient(
                     api_key=model_config.api_key,
-                    provider=provider_type,
-                    api_base=model_config.base_url or "",
-                    model=model_config.name,
+                    provider=route.llm_provider,
+                    api_base=route.api_base,
+                    model=route.model,
                 )
-                logger.info(f"LLM client created: provider={provider_type}, model={model_config.name}, api_base={model_config.base_url}")
+                logger.info(
+                    "LLM client created: provider=%s, model=%s, api_base=%s",
+                    route.llm_provider,
+                    route.model,
+                    route.api_base,
+                )
             else:
                 # No model configured, return None
                 logger.warning("No model configured for agent")
@@ -1108,7 +1166,7 @@ class AgentRunner:
                 RecordNoteTool(memory_dir=str(memory_dir)),
                 RecallNotesTool(memory_dir=str(memory_dir)),
                 AskUserChoiceTool(),
-                RetrieveContextTool(session_id=session_id, profile_id=profile_id),
+                RetrieveContextTool(),
             ]
             try:
                 from open_agent.tools.agent_control_tool import create_agent_control_tools

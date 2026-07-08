@@ -11,8 +11,8 @@ from open_agent.tools.base import Tool, ToolResult
 class RetrieveContextTool(Tool):
     """Retrieve original text for a CCR context reference."""
 
-    def __init__(self, session_id: str, profile_id: str | None = None):
-        self.session_id = session_id
+    def __init__(self, session_id: str | None = None, profile_id: str | None = None):
+        self.session_id = session_id or ""
         self.profile_id = profile_id or "main"
 
     @property
@@ -58,7 +58,13 @@ class RetrieveContextTool(Tool):
         if not ref_id.startswith("ctx://"):
             return ToolResult(success=False, error="ref_id must start with ctx://")
 
-        block = get_context_block_store().get_block(ref_id, session_id=self.session_id)
+        context_session_id = self.session_id or (
+            self.context.session_id if self.context else ""
+        )
+        if not context_session_id:
+            return ToolResult(success=False, error="retrieve_context requires a session_id")
+
+        block = get_context_block_store().get_block(ref_id, session_id=context_session_id)
         if not block:
             return ToolResult(
                 success=False,

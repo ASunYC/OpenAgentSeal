@@ -82,6 +82,10 @@ impl BackendProcess {
     fn open_cli_terminal(&self) -> Result<(), String> {
         open_cli_terminal(&self.command)
     }
+
+    fn open_cli_command_script(&self) -> Result<(), String> {
+        open_cli_command_script(&self.command)
+    }
 }
 
 enum BackendCommand {
@@ -433,6 +437,46 @@ fn cmd_script_set_value(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+fn quote_display_arg(value: &str) -> String {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '&' | '|' | '<' | '>' | '^'))
+    {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn quote_display_path(path: &Path) -> String {
+    format!("\"{}\"", path.to_string_lossy().replace('"', "\\\""))
+}
+
+fn format_cli_command_line(program: &Path, args: &[String], cwd: &Path) -> String {
+    let mut command = vec![quote_display_path(program)];
+    command.extend(args.iter().map(|arg| quote_display_arg(arg)));
+
+    if cfg!(target_os = "windows") {
+        format!(
+            "cd /d {} && {}",
+            quote_display_path(cwd),
+            command.join(" ")
+        )
+    } else {
+        format!(
+            "cd {} && {}",
+            quote_display_path(cwd),
+            command.join(" ")
+        )
+    }
+}
+
+fn cli_command_line(command_config: &BackendCommand) -> String {
+    let (program, args, cwd) = cli_command_parts(command_config);
+    format_cli_command_line(&program, &args, &cwd)
+}
+
 #[cfg(target_os = "windows")]
 fn write_cli_cmd_script(program: &Path, args: &[String], cwd: &Path) -> Result<PathBuf, String> {
     let mut command_line = vec![quote_cmd_script_arg(&program.to_string_lossy())?];
@@ -517,6 +561,41 @@ fn write_cli_launcher_script(cli_script_path: &Path) -> Result<PathBuf, String> 
         launcher_path.to_string_lossy()
     ));
     Ok(launcher_path)
+}
+
+fn write_cli_command_info(command_config: &BackendCommand) -> Result<PathBuf, String> {
+    let (program, args, cwd) = cli_command_parts(command_config);
+
+    #[cfg(target_os = "windows")]
+    {
+        return write_cli_cmd_script(&program, &args, &cwd);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("Failed to generate CLI command file name: {error}"))?
+            .as_millis();
+        let script_path = env::temp_dir().join(format!(
+            "open-agent-seal-cli-{}-{timestamp}.sh",
+            std::process::id()
+        ));
+        let command_line = format_cli_command_line(&program, &args, &cwd);
+        std::fs::write(&script_path, format!("#!/usr/bin/env sh\n{command_line}\n"))
+            .map_err(|error| format!("Failed to write CLI command file: {error}"))?;
+        Ok(script_path)
+    }
+}
+
+fn open_cli_command_script(command_config: &BackendCommand) -> Result<(), String> {
+    let path = write_cli_command_info(command_config)?;
+    append_desktop_log(&format!("CLI command: {}", cli_command_line(command_config)));
+    append_desktop_log(&format!(
+        "Opening CLI command script: {}",
+        path.to_string_lossy()
+    ));
+    open_target(&path.to_string_lossy())
 }
 
 fn source_python_cli_parts(workspace: &Path) -> Option<(PathBuf, Vec<String>, PathBuf)> {
@@ -743,6 +822,8 @@ fn main() {
 
             let backend_header = MenuItemBuilder::new("Backend").enabled(false).build(app)?;
             let cli = MenuItemBuilder::with_id("cli", "Open CLI").build(app)?;
+            let cli_script =
+                MenuItemBuilder::with_id("cli_script", "Open CLI Script").build(app)?;
             let restart = MenuItemBuilder::with_id("restart", "Restart Backend").build(app)?;
             let logs = MenuItemBuilder::with_id("logs", "Open Backend Log").build(app)?;
 
@@ -763,7 +844,7 @@ fn main() {
                 .items(&[&open, &browser])
                 .separator()
                 .item(&backend_header)
-                .items(&[&cli, &restart, &logs])
+                .items(&[&cli, &cli_script, &restart, &logs])
                 .separator()
                 .item(&account_header)
                 .item(&user)
@@ -796,6 +877,15 @@ fn main() {
                         let state = app.state::<BackendProcess>();
                         if let Err(error) = state.open_cli_terminal() {
                             append_desktop_log(&format!("Failed to open CLI terminal: {error}"));
+                        }
+                    }
+                    "cli_script" => {
+                        append_desktop_log("Open CLI command script requested");
+                        let state = app.state::<BackendProcess>();
+                        if let Err(error) = state.open_cli_command_script() {
+                            append_desktop_log(&format!(
+                                "Failed to open CLI command script: {error}"
+                            ));
                         }
                     }
                     "logs" => {
@@ -836,4 +926,40 @@ fn main() {
         .invoke_handler(tauri::generate_handler![backend_url, open_path])
         .run(tauri::generate_context!())
         .expect("error while running OpenAgentSeal desktop shell");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_cli_command_line_includes_cwd_program_and_args() {
+        let command = format_cli_command_line(
+            Path::new("C:\\Program Files\\Python\\python.exe"),
+            &[
+                "-m".to_string(),
+                "open_agent".to_string(),
+                "--cli-only".to_string(),
+            ],
+            Path::new("D:\\git-workspace\\AI\\Agent\\OpenAgentSeal"),
+        );
+
+        assert!(command.contains("cd /d \"D:\\git-workspace\\AI\\Agent\\OpenAgentSeal\""));
+        assert!(command.contains("\"C:\\Program Files\\Python\\python.exe\""));
+        assert!(command.contains("-m open_agent --cli-only"));
+    }
+
+    #[test]
+    fn cli_command_line_keeps_full_command_out_of_menu_labels() {
+        let command_config = BackendCommand::Python {
+            executable: PathBuf::from("C:\\Program Files\\Python\\python.exe"),
+            root: PathBuf::from("D:\\git-workspace\\AI\\Agent\\OpenAgentSeal"),
+        };
+
+        let command = cli_command_line(&command_config);
+
+        assert!(command.contains("--cli-only"));
+        assert!(command.contains("--workspace"));
+        assert!(command.contains("D:\\git-workspace\\AI\\Agent\\OpenAgentSeal"));
+    }
 }

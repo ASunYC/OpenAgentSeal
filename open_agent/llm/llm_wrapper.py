@@ -53,11 +53,6 @@ class LLMClient:
             model: Model name to use
             retry_config: Optional retry configuration
         """
-        # [DEBUG] 打印 LLMClient 初始化参数
-        api_key_masked = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "(too short or empty)"
-        print(f"[DEBUG] LLMClient.__init__: provider={provider}, api_base={api_base}, model={model}")
-        print(f"[DEBUG] LLMClient.__init__: api_key={api_key_masked}")
-        
         self.provider = provider
         self.api_key = api_key
         self.model = model

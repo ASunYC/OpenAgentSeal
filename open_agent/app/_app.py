@@ -412,50 +412,16 @@ def _setup_app_routes(app: FastAPI):
                 get_user_config,
                 resolve_model_context_window,
             )
+            from open_agent.provider_registry import get_provider_registry
 
             manager = get_user_config()
+            provider_registry = get_provider_registry()
             manager.reload()  # 每次请求都重新加载配置
             models = manager.get_all_models()
 
-            # 预设的提供商可用模型列表
             provider_models_map = {
-                ModelProvider.OPENAI: [
-                    "gpt-4o",
-                    "gpt-4o-mini",
-                    "gpt-4-turbo",
-                    "gpt-3.5-turbo",
-                    "o1",
-                    "o1-mini",
-                    "o1-preview",
-                ],
-                ModelProvider.ANTHROPIC: [
-                    "claude-3-5-sonnet-20241022",
-                    "claude-3-opus-20240229",
-                    "claude-3-haiku-20240307",
-                    "claude-3-5-haiku-20241022",
-                ],
-                ModelProvider.DEEPSEEK: [
-                    "deepseek-chat",
-                    "deepseek-coder",
-                    "deepseek-reasoner",
-                ],
-                ModelProvider.ZHIPU: [
-                    "glm-4",
-                    "glm-4-flash",
-                    "glm-3-turbo",
-                    "glm-4-plus",
-                ],
-                ModelProvider.MOONSHOT: [
-                    "moonshot-v1-8k",
-                    "moonshot-v1-32k",
-                    "moonshot-v1-128k",
-                ],
-                ModelProvider.MINIMAX: [
-                    "abab6.5s-chat",
-                    "abab6.5-chat",
-                    "abab5.5-chat",
-                    "abab5.5s-chat",
-                ],
+                provider: provider_registry.get_default_models(provider.value)
+                for provider in ModelProvider
             }
 
             # 如果用户没有配置任何模型，返回默认模板
@@ -666,26 +632,40 @@ def _setup_app_routes(app: FastAPI):
             logger.error(f"Failed to set default model: {e}")
             return {"success": False, "error": str(e)}
 
+    @app.get("/api/model-configs/{model_id}/diagnostics")
+    async def diagnose_model_config(model_id: str):
+        """Diagnose a saved model configuration without calling the provider."""
+        try:
+            from open_agent.provider_registry import get_provider_registry
+            from open_agent.user_config import get_user_config
+
+            manager = get_user_config()
+            manager.reload()
+            model = manager.get_model(model_id)
+            if not model:
+                return {
+                    "success": False,
+                    "error": f"Model config not found: {model_id}",
+                }
+
+            return {
+                "success": True,
+                "diagnostic": get_provider_registry().diagnose_model_config(model),
+            }
+        except Exception as e:
+            logger.error(f"Failed to diagnose model config: {e}")
+            return {"success": False, "error": str(e)}
+
     @app.get("/api/providers")
     async def get_providers():
         """Get all available model providers"""
         try:
-            from open_agent.user_config import ModelProvider
+            from open_agent.provider_registry import get_provider_registry
 
-            providers = []
-            for provider in ModelProvider:
-                providers.append(
-                    {
-                        "id": provider.value,
-                        "name": provider.value,
-                        "display_name": ModelProvider.get_display_name(provider),
-                        "default_base_url": ModelProvider.get_default_base_url(
-                            provider
-                        ),
-                        "default_models": ModelProvider.get_default_models(provider),
-                    }
-                )
-            return providers
+            return [
+                profile.to_api_dict()
+                for profile in get_provider_registry().list_profiles()
+            ]
         except Exception as e:
             logger.error(f"Failed to get providers: {e}")
             return []
@@ -694,99 +674,48 @@ def _setup_app_routes(app: FastAPI):
     async def get_provider_models(provider: str):
         """Get available models for a specific provider"""
         try:
-            from open_agent.user_config import ModelProvider
+            from open_agent.provider_registry import get_provider_registry
 
-            # 尝试匹配提供商枚举
-            try:
-                provider_enum = ModelProvider(provider.lower())
-            except ValueError:
-                # 自定义提供商，返回空列表
+            profile = get_provider_registry().get_profile(provider)
+            if not profile:
                 return {"models": [], "provider": provider, "display_name": provider}
 
-            # 获取预设模型列表
-            default_models = ModelProvider.get_default_models(provider_enum)
-
-            # 扩展的模型列表（包含更多模型）
-            extended_models_map = {
-                ModelProvider.OPENAI: [
-                    "gpt-4o",
-                    "gpt-4o-mini",
-                    "gpt-4-turbo",
-                    "gpt-4",
-                    "gpt-3.5-turbo",
-                    "o1",
-                    "o1-mini",
-                    "o1-preview",
-                    "gpt-4-turbo-preview",
-                ],
-                ModelProvider.ANTHROPIC: [
-                    "claude-3-5-sonnet-20241022",
-                    "claude-3-5-haiku-20241022",
-                    "claude-3-opus-20240229",
-                    "claude-3-sonnet-20240229",
-                    "claude-3-haiku-20240307",
-                    "claude-2.1",
-                    "claude-2.0",
-                ],
-                ModelProvider.DEEPSEEK: [
-                    "deepseek-chat",
-                    "deepseek-coder",
-                    "deepseek-reasoner",
-                ],
-                ModelProvider.QWEN: [
-                    "qwen-turbo",
-                    "qwen-plus",
-                    "qwen-max",
-                    "qwen-max-longcontext",
-                    "qwen2.5-72b-instruct",
-                    "qwen2.5-32b-instruct",
-                ],
-                ModelProvider.ZHIPU: [
-                    "glm-4",
-                    "glm-4-plus",
-                    "glm-4-flash",
-                    "glm-3-turbo",
-                ],
-                ModelProvider.VOLCANO: [
-                    "doubao-pro-32k",
-                    "doubao-pro-128k",
-                    "doubao-lite-32k",
-                ],
-                ModelProvider.MINIMAX: [
-                    "abab6.5s-chat",
-                    "abab6.5-chat",
-                    "abab5.5-chat",
-                    "abab5.5s-chat",
-                ],
-                ModelProvider.SILICONFLOW: [
-                    "Qwen/Qwen2.5-72B-Instruct",
-                    "Qwen/Qwen2.5-32B-Instruct",
-                    "deepseek-ai/DeepSeek-V3",
-                    "deepseek-ai/DeepSeek-R1",
-                ],
-                ModelProvider.MOONSHOT: [
-                    "moonshot-v1-8k",
-                    "moonshot-v1-32k",
-                    "moonshot-v1-128k",
-                ],
-                ModelProvider.BAICHUAN: [
-                    "Baichuan4",
-                    "Baichuan3-Turbo",
-                    "Baichuan2-Turbo",
-                ],
-                ModelProvider.CUSTOM: [],
-            }
-
-            models = extended_models_map.get(provider_enum, default_models)
-
             return {
-                "models": models,
-                "provider": provider_enum.value,
-                "display_name": ModelProvider.get_display_name(provider_enum),
+                "models": list(profile.default_models),
+                "provider": profile.id,
+                "display_name": profile.display_name,
             }
         except Exception as e:
             logger.error(f"Failed to get provider models: {e}")
             return {"models": [], "error": str(e)}
+
+    @app.post("/api/providers/{provider}/diagnostics")
+    async def diagnose_provider_preview(
+        provider: str,
+        data: dict,
+    ):
+        """Diagnose provider/model settings before saving them."""
+        try:
+            from open_agent.provider_registry import get_provider_registry
+            from open_agent.user_config import ModelConfig
+
+            model = str(data.get("model") or data.get("name") or "")
+            preview = ModelConfig(
+                id=f"preview_{provider}",
+                name=model,
+                display_name=model or provider,
+                provider=provider,
+                api_key=str(data.get("api_key") or ""),
+                base_url=str(data.get("base_url") or ""),
+                provider_type=str(data.get("provider_type") or ""),
+            )
+            return {
+                "success": True,
+                "diagnostic": get_provider_registry().diagnose_model_config(preview),
+            }
+        except Exception as e:
+            logger.error(f"Failed to diagnose provider preview: {e}")
+            return {"success": False, "error": str(e)}
 
     @app.get("/api/settings")
     async def get_settings():

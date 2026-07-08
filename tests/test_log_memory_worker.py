@@ -3,14 +3,12 @@
 """Tests for LogMemoryWorker."""
 
 import pytest
-import time
-import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from open_agent.log_memory_worker import (
     LogMemoryWorker,
     LogEntry,
-    StepLogBatch as SessionLogBatch,
+    SessionLogBatch,
     get_log_memory_worker,
     shutdown_log_memory_worker,
 )
@@ -44,23 +42,42 @@ class TestLogEntry:
         assert entry1.content_hash != entry2.content_hash
 
 
-class TestStepLogBatch:
-    """Tests for StepLogBatch dataclass."""
+class TestSessionLogBatch:
+    """Tests for SessionLogBatch dataclass."""
 
     def test_batch_creation(self):
-        """Test creating a step log batch."""
-        batch = StepLogBatch(step=1)
-        assert batch.step == 1
+        """Test creating a session log batch."""
+        batch = SessionLogBatch()
         assert batch.entries == []
         assert batch.compressed is False
+        assert batch.total_steps == 0
 
     def test_add_entry(self):
         """Test adding entries to batch."""
-        batch = StepLogBatch(step=1)
-        entry = batch.add_entry("Test content")
+        batch = SessionLogBatch()
+        entry = batch.add_entry(1, "Test content")
         assert len(batch.entries) == 1
         assert batch.entries[0].content == "Test content"
         assert batch.entries[0].step == 1
+
+    def test_add_entry_preserves_metadata(self):
+        """Test adding entries preserves provenance metadata."""
+        batch = SessionLogBatch()
+        entry = batch.add_entry(
+            2,
+            "Tool Call: read_file\nResult: example" * 3,
+            entry_type="tool_call",
+            metadata={
+                "session_id": "session-1",
+                "profile_id": "main",
+                "tool": "read_file",
+                "success": True,
+            },
+        )
+
+        assert entry.metadata["session_id"] == "session-1"
+        assert entry.metadata["profile_id"] == "main"
+        assert entry.metadata["tool"] == "read_file"
 
 
 class TestLogMemoryWorker:
@@ -102,8 +119,6 @@ class TestLogMemoryWorker:
         """Test submitting step start."""
         worker.submit_step_start(1, 100)
         assert worker._queue.qsize() == 1
-        assert worker._current_batch is not None
-        assert worker._current_batch.step == 1
 
     def test_submit_step_end(self, worker):
         """Test submitting step end."""
@@ -113,7 +128,7 @@ class TestLogMemoryWorker:
     def test_deduplication(self, worker, mock_memory_manager):
         """Test that duplicate content is deduplicated."""
         # Process item directly
-        worker._current_batch = StepLogBatch(step=1)
+        worker._session_batch = SessionLogBatch()
 
         # Add first entry
         item1 = {"type": "log_entry", "content": "Unique content" * 10}
@@ -126,7 +141,7 @@ class TestLogMemoryWorker:
         # First entry should be added, second should be deduplicated
         assert worker._stats["total_entries"] == 2
         assert worker._stats["deduplicated"] == 1
-        assert len(worker._current_batch.entries) == 1
+        assert len(worker._session_batch.entries) == 1
 
     def test_lru_cache_eviction(self, worker):
         """Test that LRU cache evicts old entries when full."""
@@ -141,24 +156,48 @@ class TestLogMemoryWorker:
     def test_compress_and_store(self, worker, mock_memory_manager):
         """Test compressing and storing a batch."""
         # Create a batch with entries
-        batch = StepLogBatch(step=1)
-        batch.add_entry("Content A" * 20)
-        batch.add_entry("Content B" * 20)
-        worker._current_batch = batch
+        batch = SessionLogBatch()
+        batch.add_entry(1, "Content A" * 20)
+        batch.add_entry(1, "Content B" * 20)
+        worker._session_batch = batch
 
         # Compress and store
-        worker._compress_and_store()
+        worker._compress_and_store_session()
 
         # Verify memory manager was called
         mock_memory_manager.record.assert_called_once()
         assert batch.compressed is True
 
+    def test_compress_and_store_includes_entry_metadata(self, worker, mock_memory_manager):
+        """Test compressed memory keeps session and profile provenance."""
+        batch = SessionLogBatch()
+        batch.add_entry(
+            3,
+            "Tool Call: read_file\nResult: loaded source file" * 3,
+            entry_type="tool_call",
+            metadata={
+                "session_id": "session-42",
+                "profile_id": "main",
+                "tool": "read_file",
+                "success": True,
+            },
+        )
+        worker._session_batch = batch
+
+        worker._compress_and_store_session()
+
+        metadata = mock_memory_manager.record.call_args.kwargs["metadata"]
+        assert metadata["session_id"] == "session-42"
+        assert metadata["profile_id"] == "main"
+        assert metadata["provenance"]["source"] == "log_memory_worker"
+        assert metadata["entries"][0]["metadata"]["tool"] == "read_file"
+
     def test_compress_empty_batch_skipped(self, worker, mock_memory_manager):
         """Test that empty batches are skipped."""
-        batch = StepLogBatch(step=1)
-        worker._current_batch = batch
+        batch = SessionLogBatch()
+        worker._session_batch = batch
 
-        worker._compress_and_store()
+        worker._compress_and_store_session()
 
         # Should not call record for empty batch
         mock_memory_manager.record.assert_not_called()
@@ -177,7 +216,7 @@ class TestLogMemoryWorker:
 
         # Stop worker
         worker.stop(timeout=2.0)
-        assert not worker._thread.is_alive()
+        assert worker._thread is None
 
     def test_get_stats(self, worker):
         """Test getting worker statistics."""
@@ -185,7 +224,7 @@ class TestLogMemoryWorker:
         assert "total_entries" in stats
         assert "deduplicated" in stats
         assert "stored" in stats
-        assert "steps_processed" in stats
+        assert "sessions_processed" in stats
         assert "queue_size" in stats
         assert "is_running" in stats
 

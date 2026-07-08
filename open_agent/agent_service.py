@@ -334,9 +334,6 @@ class AgentService:
             AgentInfo
         """
         from open_agent.agent import Agent
-        from open_agent.config import Config
-        from open_agent import LLMClient
-        from open_agent.schema import LLMProvider
         from open_agent.user_config import ModelConfigManager
         
         agent_id = f"agent_{uuid.uuid4().hex[:8]}"
@@ -351,9 +348,8 @@ class AgentService:
             provider = model_config.provider
         
         # 创建Agent实例
-        llm_client = self._create_llm_client(model, provider, config)
-        tool_config = {**(config or {}), "_context_session_id": agent_id}
-        tools = self._create_tools(tool_config)
+        llm_client = self._create_llm_client(model, config)
+        tools = self._create_tools(config)
         system_prompt = self._get_system_prompt(config)
         
         agent = Agent(
@@ -624,23 +620,19 @@ class AgentService:
     def _create_llm_client(
         self,
         model: str,
-        provider: str,
         config: Dict[str, Any] = None,
     ):
         """创建LLM客户端"""
         from open_agent import LLMClient
+        from open_agent.provider_registry import get_provider_registry
         from open_agent.schema import LLMProvider
         from open_agent.user_config import ModelConfigManager
-        from open_agent.retry import RetryConfig
         
         manager = ModelConfigManager()
         model_config = manager.get_default_model()
         
         if not model and model_config:
             model = model_config.name
-        if not provider and model_config:
-            provider = model_config.provider
-        
         api_key = ""
         api_base = ""
         
@@ -652,23 +644,12 @@ class AgentService:
             api_key = config.get("api_key", api_key)
             api_base = config.get("api_base", api_base)
         
-        # Determine provider type based on provider_type field first, then fallback to base_url detection
-        provider_type_str = model_config.provider_type.lower() if model_config and model_config.provider_type else ""
-        base_url_lower = (api_base or "").lower()
-        
-        # Use ANTHROPIC provider for:
-        # - provider_type is "anthropic"
-        # - base_url contains "anthropic"
-        if provider_type_str == "anthropic" or "anthropic" in base_url_lower:
-            provider_type = LLMProvider.ANTHROPIC
-        else:
-            provider_type = LLMProvider.OPENAI
-        
-        # [DEBUG] 打印 LLM 配置信息
-        provider_name = provider if provider else (model_config.provider if model_config else "unknown")
-        api_key_masked = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else "(too short or empty)"
-        print(f"[DEBUG] _create_llm_client: provider={provider_name}, provider_type={provider_type}, base_url={api_base}, model={model}")
-        print(f"[DEBUG] _create_llm_client: api_key={api_key_masked}")
+        route = get_provider_registry().resolve_model_config(model_config) if model_config else None
+        provider_type = route.llm_provider if route else LLMProvider.OPENAI
+        if route and not (config and "api_base" in config):
+            api_base = route.api_base
+        if route and not model:
+            model = route.model
         
         return LLMClient(
             api_key=api_key,
@@ -708,8 +689,7 @@ class AgentService:
         
         # 选择工具
         tools.append(AskUserChoiceTool())
-        context_session_id = str((config or {}).get("_context_session_id") or "agent-session")
-        tools.append(RetrieveContextTool(session_id=context_session_id, profile_id="main"))
+        tools.append(RetrieveContextTool())
 
         # 联网搜索工具
         config_obj = None

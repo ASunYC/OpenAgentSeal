@@ -20,7 +20,7 @@ def get_user_app_dir() -> Path:
     - Windows: C:\Users\<user>\.open-agent\
     - Linux/macOS: ~/.open-agent/
     
-    This should match the logic in launcher.py and path_utils.py
+    This should match the logic in path_utils.py
     
     Returns:
         Path to user app directory

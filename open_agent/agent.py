@@ -17,7 +17,7 @@ from .llm import LLMClient
 from .logger import AgentLogger
 from .log_memory_worker import get_log_memory_worker, LogMemoryWorker
 from .schema import Message
-from .tools.base import Tool, ToolResult
+from .tools.base import Tool, ToolContext, ToolResult
 from .tools.registry import build_tool_registry
 from .utils import calculate_display_width
 
@@ -123,6 +123,29 @@ class Agent:
         self.api_total_tokens: int = 0
         # Flag to skip token check right after summary (avoid consecutive triggers)
         self._skip_next_token_check: bool = False
+
+    def _build_tool_context(self) -> ToolContext:
+        return ToolContext(
+            session_id=self.session_id or "agent-session",
+            profile_id=self.profile_id or "main",
+            workspace_dir=self.workspace_dir.absolute(),
+        )
+
+    def _bind_tool_context(self, tool: Tool) -> ToolContext:
+        context = self._build_tool_context()
+        tool.bind_context(context)
+        return context
+
+    def _build_log_metadata(self, step: int, **extra: Any) -> dict[str, Any]:
+        metadata = {
+            "session_id": self.session_id or "agent-session",
+            "profile_id": self.profile_id or "main",
+            "workspace_dir": str(self.workspace_dir.absolute()),
+            "step": step,
+            "source": "agent",
+        }
+        metadata.update(extra)
+        return metadata
 
     def enable_log_memory(self, enabled: bool = True):
         """Enable or disable automatic log memory compression.
@@ -544,6 +567,7 @@ Requirements:
                     self._log_memory_worker.submit_log_entry(
                         content=f"Thinking: {response.thinking}",
                         entry_type="thinking",
+                        metadata=self._build_log_metadata(step + 1, kind="thinking"),
                     )
 
             # Print assistant response
@@ -555,6 +579,7 @@ Requirements:
                     self._log_memory_worker.submit_log_entry(
                         content=f"Assistant: {response.content}",
                         entry_type="assistant_response",
+                        metadata=self._build_log_metadata(step + 1, kind="assistant_response"),
                     )
 
             # Check if task is complete (no tool calls)
@@ -620,6 +645,7 @@ Requirements:
                     else:
                         try:
                             tool = self.tools[function_name]
+                            self._bind_tool_context(tool)
                             result = await tool.execute(**arguments)
                         except Exception as e:
                             # Catch all exceptions during tool execution, convert to failed ToolResult
@@ -669,7 +695,13 @@ Requirements:
                     self._log_memory_worker.submit_log_entry(
                         content=tool_log,
                         entry_type="tool_call",
-                        metadata={"tool": function_name, "success": result.success},
+                        metadata=self._build_log_metadata(
+                            step + 1,
+                            kind="tool_call",
+                            tool=function_name,
+                            success=result.success,
+                            tool_call_id=tool_call_id,
+                        ),
                     )
 
                 # Add tool result message

@@ -18,7 +18,6 @@ Tree Structure Design:
 import hashlib
 import queue
 import threading
-import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,6 +34,7 @@ class LogEntry:
     timestamp: str
     content: str
     entry_type: str = "general"
+    metadata: dict[str, Any] = field(default_factory=dict)
     content_hash: str = field(init=False)
 
     def __post_init__(self):
@@ -61,13 +61,20 @@ class SessionLogBatch:
     # Track key topics/decisions
     key_topics: list = field(default_factory=list)
 
-    def add_entry(self, step: int, content: str, entry_type: str = "general") -> LogEntry:
+    def add_entry(
+        self,
+        step: int,
+        content: str,
+        entry_type: str = "general",
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> LogEntry:
         """Add a log entry to the session batch."""
         entry = LogEntry(
             step=step,
             timestamp=datetime.now().isoformat(),
             content=content,
             entry_type=entry_type,
+            metadata=metadata or {},
         )
         self.entries.append(entry)
         
@@ -327,7 +334,7 @@ class LogMemoryWorker:
         step = metadata.get("step", self._session_batch.total_steps)
 
         # Add entry to session batch
-        self._session_batch.add_entry(step, content, entry_type)
+        self._session_batch.add_entry(step, content, entry_type, metadata=metadata)
 
         # Mark hash as seen
         self._mark_seen(content_hash)
@@ -384,12 +391,7 @@ class LogMemoryWorker:
                 category=self.MEMORY_CATEGORY,
                 importance=self.MEMORY_IMPORTANCE,
                 keywords=keywords,
-                metadata={
-                    "session_start": batch.session_start,
-                    "total_steps": batch.total_steps,
-                    "total_entries": len(batch.entries),
-                    "tools_used": list(batch.tools_used),
-                }
+                metadata=self._create_session_metadata(batch),
             )
             self._stats["stored"] += 1
             batch.compressed = True
@@ -397,6 +399,47 @@ class LogMemoryWorker:
 
         except Exception as e:
             print(f"[LogMemoryWorker] Failed to store session memory: {e}")
+
+    def _create_session_metadata(self, batch: SessionLogBatch) -> dict[str, Any]:
+        """Create structured metadata for a compressed session memory."""
+        session_id = self._first_entry_metadata_value(batch, "session_id")
+        profile_id = self._first_entry_metadata_value(batch, "profile_id")
+        provenance = {
+            "source": "log_memory_worker",
+            "session_id": session_id,
+            "confidence": 1.0,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        metadata = {
+            "session_start": batch.session_start,
+            "total_steps": batch.total_steps,
+            "total_entries": len(batch.entries),
+            "tools_used": list(batch.tools_used),
+            "provenance": provenance,
+            "entries": [
+                {
+                    "step": entry.step,
+                    "timestamp": entry.timestamp,
+                    "entry_type": entry.entry_type,
+                    "metadata": entry.metadata,
+                }
+                for entry in batch.entries
+            ],
+        }
+        if session_id:
+            metadata["session_id"] = session_id
+        if profile_id:
+            metadata["profile_id"] = profile_id
+        return metadata
+
+    @staticmethod
+    def _first_entry_metadata_value(batch: SessionLogBatch, key: str) -> Any:
+        for entry in batch.entries:
+            value = entry.metadata.get(key)
+            if value:
+                return value
+        return None
 
     def _create_session_summary(self, batch: SessionLogBatch) -> str:
         """Create a concise session summary from all entries.

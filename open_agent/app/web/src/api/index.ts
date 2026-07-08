@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
+import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, ProviderDiagnosticResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
 import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
@@ -540,6 +540,10 @@ export const modelConfigApi = {
     return request<ApiResponse<void>>(`/model-configs/${configId}/default`, { method: 'POST' })
   },
 
+  async diagnose(configId: string): Promise<ProviderDiagnosticResponse> {
+    return request<ProviderDiagnosticResponse>(`/model-configs/${configId}/diagnostics`)
+  },
+
   async resolveContextWindow(modelName: string, provider = ''): Promise<{
     model_name: string
     provider: string
@@ -566,6 +570,13 @@ export const providerApi = {
    */
   async getModels(provider: string): Promise<ProviderModelsResponse> {
     return request<ProviderModelsResponse>(`/providers/${provider}/models`)
+  },
+
+  async diagnose(provider: string, config: Partial<ModelConfig>): Promise<ProviderDiagnosticResponse> {
+    return request<ProviderDiagnosticResponse>(`/providers/${provider}/diagnostics`, {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
   },
 }
 
@@ -1129,11 +1140,13 @@ export const api = {
   saveModelConfig: modelConfigApi.save,
   deleteModelConfig: modelConfigApi.delete,
   setDefaultModelConfig: modelConfigApi.setDefault,
+  diagnoseModelConfig: modelConfigApi.diagnose,
   resolveModelContextWindow: modelConfigApi.resolveContextWindow,
 
   // Provider
   getProviders: providerApi.list,
   getProviderModels: providerApi.getModels,
+  diagnoseProvider: providerApi.diagnose,
 
   // Command
   getCommands: commandApi.list,

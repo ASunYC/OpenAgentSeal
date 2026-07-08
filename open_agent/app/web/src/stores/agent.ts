@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { AgentConfig, ModelConfig, ModelProvider } from '@/types'
+import type { AgentConfig, ModelConfig } from '@/types'
 import { api } from '@/api'
 
 export const useAgentStore = defineStore('agent', () => {
@@ -13,62 +13,6 @@ export const useAgentStore = defineStore('agent', () => {
   // 大模型配置列表
   const modelConfigs = ref<ModelConfig[]>([])
   
-  // 大模型提供商列表
-  const modelProviders = ref<ModelProvider[]>([
-    {
-      id: 'openai',
-      name: 'OpenAI',
-      models: [
-        { id: 'gpt-4o', name: 'GPT-4o', description: '最新多模态模型' },
-        { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', description: '高性能推理模型' },
-        { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo', description: '快速响应模型' }
-      ]
-    },
-    {
-      id: 'anthropic',
-      name: 'Anthropic',
-      models: [
-        { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', description: '最新Claude模型' },
-        { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', description: '最强推理能力' },
-        { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku', description: '快速响应模型' }
-      ]
-    },
-    {
-      id: 'deepseek',
-      name: 'DeepSeek',
-      models: [
-        { id: 'deepseek-chat', name: 'DeepSeek Chat', description: '对话模型' },
-        { id: 'deepseek-coder', name: 'DeepSeek Coder', description: '代码专用模型' }
-      ]
-    },
-    {
-      id: 'zhipu',
-      name: '智谱AI',
-      models: [
-        { id: 'glm-4', name: 'GLM-4', description: '智谱最新模型' },
-        { id: 'glm-4-flash', name: 'GLM-4-Flash', description: '快速响应模型' }
-      ]
-    },
-    {
-      id: 'moonshot',
-      name: 'Moonshot',
-      models: [
-        { id: 'moonshot-v1-8k', name: 'Moonshot V1 8K', description: '8K上下文' },
-        { id: 'moonshot-v1-32k', name: 'Moonshot V1 32K', description: '32K上下文' },
-        { id: 'moonshot-v1-128k', name: 'Moonshot V1 128K', description: '128K上下文' }
-      ]
-    },
-    {
-      id: 'ollama',
-      name: 'Ollama (本地)',
-      models: [
-        { id: 'llama3', name: 'Llama 3', description: 'Meta开源模型' },
-        { id: 'qwen2', name: 'Qwen 2', description: '通义千问开源版' },
-        { id: 'mistral', name: 'Mistral', description: 'Mistral AI模型' }
-      ]
-    }
-  ])
-
   // 当前选中的智能体
   const currentAgent = computed(() => {
     return agents.value.find(a => a.id === currentAgentId.value)
@@ -195,7 +139,6 @@ export const useAgentStore = defineStore('agent', () => {
     currentAgentId,
     currentAgent,
     modelConfigs,
-    modelProviders,
     loadAgents,
     loadModelConfigs,
     saveAgent,

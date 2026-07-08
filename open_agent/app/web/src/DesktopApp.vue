@@ -293,6 +293,56 @@
                   </span>
                 </button>
               </div>
+              <div v-if="queuedMessages.length" class="queued-message-list">
+                <div v-for="(queued, index) in queuedMessages" :key="queued.id" class="queued-message-item">
+                  <span class="queued-message-order">{{ index + 1 }}</span>
+                  <div class="queued-message-body">
+                    <textarea
+                      v-if="queued.editing"
+                      v-model="queued.draftContent"
+                      class="queued-message-editor"
+                      rows="2"
+                      @keydown.enter.exact.prevent="saveQueuedMessageEdit(queued)"
+                      @keydown.esc.prevent="cancelQueuedMessageEdit(queued)"
+                    ></textarea>
+                    <template v-else>
+                      <p>{{ queued.content || t('[附件]', '[attachment]') }}</p>
+                      <small v-if="queued.attachments.length">{{ queuedAttachmentLabel(queued) }}</small>
+                    </template>
+                  </div>
+                  <div class="queued-message-actions">
+                    <template v-if="queued.editing">
+                      <button type="button" @click="saveQueuedMessageEdit(queued)" :title="t('保存', 'Save')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M20 6 9 17l-5-5"/>
+                        </svg>
+                      </button>
+                      <button type="button" @click="cancelQueuedMessageEdit(queued)" :title="t('取消', 'Cancel')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M18 6 6 18"/>
+                          <path d="m6 6 12 12"/>
+                        </svg>
+                      </button>
+                    </template>
+                    <template v-else>
+                      <button type="button" @click="editQueuedMessage(queued)" :title="t('编辑排队消息', 'Edit queued message')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M12 20h9"/>
+                          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+                        </svg>
+                      </button>
+                      <button type="button" @click="removeQueuedMessage(queued.id)" :title="t('删除排队消息', 'Delete queued message')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <polyline points="3,6 5,6 21,6"/>
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+                          <path d="M10 11v6"/>
+                          <path d="M14 11v6"/>
+                        </svg>
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </div>
               <div v-if="pendingAttachments.length" class="pending-attachments">
                 <div v-for="attachment in pendingAttachments" :key="attachment.id" class="attachment-chip">
                   <img v-if="isImageAttachment(attachment)" :src="attachmentPreview(attachment)" :alt="attachment.name" />
@@ -308,6 +358,22 @@
               </div>
               <div class="composer-toolbar">
                 <div class="composer-left">
+                  <button
+                    v-if="loading && canSendMessage"
+                    type="button"
+                    class="queue-now-button"
+                    @click="queueComposerMessage"
+                    :title="t('加入队列', 'Queue message')"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M4 6h12"/>
+                      <path d="M4 12h10"/>
+                      <path d="M4 18h8"/>
+                      <path d="M18 14v6"/>
+                      <path d="M15 17h6"/>
+                    </svg>
+                    <span>{{ t('排队', 'Queue') }}</span>
+                  </button>
                   <div class="composer-menu-wrap" @click.stop>
                     <button class="composer-plus" @click="toggleComposerMenu" :title="t('更多操作', 'More actions')">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -841,6 +907,56 @@
               </span>
             </button>
           </div>
+          <div v-if="queuedMessages.length" class="queued-message-list">
+            <div v-for="(queued, index) in queuedMessages" :key="queued.id" class="queued-message-item">
+              <span class="queued-message-order">{{ index + 1 }}</span>
+              <div class="queued-message-body">
+                <textarea
+                  v-if="queued.editing"
+                  v-model="queued.draftContent"
+                  class="queued-message-editor"
+                  rows="2"
+                  @keydown.enter.exact.prevent="saveQueuedMessageEdit(queued)"
+                  @keydown.esc.prevent="cancelQueuedMessageEdit(queued)"
+                ></textarea>
+                <template v-else>
+                  <p>{{ queued.content || t('[附件]', '[attachment]') }}</p>
+                  <small v-if="queued.attachments.length">{{ queuedAttachmentLabel(queued) }}</small>
+                </template>
+              </div>
+              <div class="queued-message-actions">
+                <template v-if="queued.editing">
+                  <button type="button" @click="saveQueuedMessageEdit(queued)" :title="t('保存', 'Save')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M20 6 9 17l-5-5"/>
+                    </svg>
+                  </button>
+                  <button type="button" @click="cancelQueuedMessageEdit(queued)" :title="t('取消', 'Cancel')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M18 6 6 18"/>
+                      <path d="m6 6 12 12"/>
+                    </svg>
+                  </button>
+                </template>
+                <template v-else>
+                  <button type="button" @click="editQueuedMessage(queued)" :title="t('编辑排队消息', 'Edit queued message')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M12 20h9"/>
+                      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+                    </svg>
+                  </button>
+                  <button type="button" @click="removeQueuedMessage(queued.id)" :title="t('删除排队消息', 'Delete queued message')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="3,6 5,6 21,6"/>
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+                      <path d="M10 11v6"/>
+                      <path d="M14 11v6"/>
+                    </svg>
+                  </button>
+                </template>
+              </div>
+            </div>
+          </div>
           <div v-if="pendingAttachments.length" class="pending-attachments">
             <div v-for="attachment in pendingAttachments" :key="attachment.id" class="attachment-chip">
               <img v-if="isImageAttachment(attachment)" :src="attachmentPreview(attachment)" :alt="attachment.name" />
@@ -856,6 +972,22 @@
           </div>
           <div class="composer-toolbar">
             <div class="composer-left">
+              <button
+                v-if="loading && canSendMessage"
+                type="button"
+                class="queue-now-button"
+                @click="queueComposerMessage"
+                :title="t('加入队列', 'Queue message')"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M4 6h12"/>
+                  <path d="M4 12h10"/>
+                  <path d="M4 18h8"/>
+                  <path d="M18 14v6"/>
+                  <path d="M15 17h6"/>
+                </svg>
+                <span>{{ t('排队', 'Queue') }}</span>
+              </button>
               <div class="composer-menu-wrap" @click.stop>
                 <button class="composer-plus" @click="toggleComposerMenu" :title="t('更多操作', 'More actions')">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -1358,6 +1490,14 @@ const inputMessage = ref('')
 const attachmentInput = ref<HTMLInputElement | null>(null)
 const pendingAttachments = ref<ChatAttachment[]>([])
 const canSendMessage = computed(() => !!inputMessage.value.trim() || pendingAttachments.value.length > 0)
+interface QueuedComposerMessage {
+  id: string
+  content: string
+  draftContent: string
+  attachments: ChatAttachment[]
+  editing: boolean
+}
+const queuedMessages = ref<QueuedComposerMessage[]>([])
 const composerMenuOpen = ref(false)
 const mentionOpen = ref(false)
 const mentionQuery = ref('')
@@ -1590,6 +1730,7 @@ async function switchAgentSession(agentId: string) {
   localStorage.setItem('selected_agent_id', agentId)
   if (previousAgentId !== agentId) {
     isAgentSwitching.value = true
+    queuedMessages.value = []
   }
 
   messages.value = []
@@ -2685,6 +2826,64 @@ function removeAttachment(id: string) {
   pendingAttachments.value = pendingAttachments.value.filter((attachment) => attachment.id !== id)
 }
 
+function queuedAttachmentLabel(item: QueuedComposerMessage): string {
+  if (item.attachments.length === 0) return ''
+  return t(`含 ${item.attachments.length} 个附件`, `${item.attachments.length} attachment${item.attachments.length > 1 ? 's' : ''}`)
+}
+
+function queueComposerMessage(): boolean {
+  if (!canSendMessage.value || !selectedAgentId.value) return false
+  const content = inputMessage.value.trim()
+  const attachments = [...pendingAttachments.value]
+  if (!content && attachments.length === 0) return false
+
+  queuedMessages.value.push({
+    id: generateId(),
+    content,
+    draftContent: content,
+    attachments,
+    editing: false,
+  })
+  inputMessage.value = ''
+  pendingAttachments.value = []
+  mentionTarget.value = null
+  closeAgentMention()
+  focusActiveComposer()
+  return true
+}
+
+function editQueuedMessage(item: QueuedComposerMessage) {
+  item.draftContent = item.content
+  item.editing = true
+}
+
+function cancelQueuedMessageEdit(item: QueuedComposerMessage) {
+  item.draftContent = item.content
+  item.editing = false
+}
+
+function saveQueuedMessageEdit(item: QueuedComposerMessage) {
+  const nextContent = item.draftContent.trim()
+  if (!nextContent && item.attachments.length === 0) {
+    removeQueuedMessage(item.id)
+    return
+  }
+  item.content = nextContent
+  item.draftContent = nextContent
+  item.editing = false
+}
+
+function removeQueuedMessage(id: string) {
+  queuedMessages.value = queuedMessages.value.filter(item => item.id !== id)
+}
+
+async function sendNextQueuedMessage() {
+  if (loading.value || queuedMessages.value.length === 0 || !selectedAgentId.value) return
+  const next = queuedMessages.value.find(item => !item.editing)
+  if (!next) return
+  await sendMessage(next)
+}
+
 function isImageAttachment(attachment: ChatAttachment) {
   return attachment.mime_type.startsWith('image/')
 }
@@ -2720,17 +2919,26 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 }
 
 // 鍙戦€佹秷鎭?
-async function sendMessage() {
-  if (!canSendMessage.value || loading.value || !selectedAgentId.value) return
+async function sendMessage(queuedMessage?: QueuedComposerMessage) {
+  if (loading.value) {
+    if (!queuedMessage) queueComposerMessage()
+    return
+  }
+  if ((!queuedMessage && !canSendMessage.value) || !selectedAgentId.value) return
 
-  const route = resolveMentionRoute(inputMessage.value)
-  const attachments = [...pendingAttachments.value]
+  const rawContent = queuedMessage ? queuedMessage.content : inputMessage.value
+  const route = resolveMentionRoute(rawContent)
+  const attachments = queuedMessage ? [...queuedMessage.attachments] : [...pendingAttachments.value]
 
   if (route.agentId && !route.message && attachments.length === 0) {
     await switchToMentionAgent(route.agentId)
-    inputMessage.value = ''
-    mentionTarget.value = null
-    closeAgentMention()
+    if (queuedMessage) {
+      removeQueuedMessage(queuedMessage.id)
+    } else {
+      inputMessage.value = ''
+      mentionTarget.value = null
+      closeAgentMention()
+    }
     focusActiveComposer()
     return
   }
@@ -2747,10 +2955,14 @@ async function sendMessage() {
   const userMessage = route.message
   const workspacePayload = mergedWorkspacePayload()
   const selectedWorkspacePayload = mergedSelectedWorkspacePaths()
-  inputMessage.value = ''
-  pendingAttachments.value = []
-  mentionTarget.value = null
-  closeAgentMention()
+  if (queuedMessage) {
+    removeQueuedMessage(queuedMessage.id)
+  } else {
+    inputMessage.value = ''
+    pendingAttachments.value = []
+    mentionTarget.value = null
+    closeAgentMention()
+  }
 
   if (!userMessage && attachments.length === 0) {
     return
@@ -2951,6 +3163,7 @@ async function sendMessage() {
       await loadContextBlocks()
     }
     await refreshContextStatus()
+    await sendNextQueuedMessage()
   }
 }
 
@@ -2978,6 +3191,7 @@ async function confirmClearChat() {
 
 async function clearChat() {
   messages.value = []
+  queuedMessages.value = []
   if (runnerSessionId.value) {
     localStorage.removeItem(`messages_${runnerSessionId.value}`)
     try {
@@ -4465,6 +4679,128 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.queued-message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.queued-message-item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--glass-bg-strong));
+  box-shadow: inset 0 1px 0 var(--glass-border);
+}
+
+.queued-message-order {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-color) 18%, transparent);
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.queued-message-body {
+  min-width: 0;
+}
+
+.queued-message-body p {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queued-message-body small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.queued-message-editor {
+  width: 100%;
+  min-height: 52px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.45;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.queued-message-editor:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.queued-message-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.queued-message-actions button,
+.queue-now-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  background: var(--glass-bg-strong);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
+}
+
+.queued-message-actions button {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.queued-message-actions button svg,
+.queue-now-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.queued-message-actions button:hover,
+.queue-now-button:hover {
+  border-color: color-mix(in srgb, var(--primary-color) 34%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--glass-bg-strong));
+  color: var(--primary-color);
+}
+
+.queued-message-actions button:active,
+.queue-now-button:active {
+  transform: translateY(1px);
+}
+
+.queue-now-button {
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .pending-attachments {

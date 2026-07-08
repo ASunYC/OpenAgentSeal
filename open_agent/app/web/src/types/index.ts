@@ -218,19 +218,6 @@ export interface RuntimeEvent {
   metadata?: Record<string, any>
 }
 
-// 大模型提供商
-export interface ModelProvider {
-  id: string
-  name: string
-  models: Model[]
-}
-
-export interface Model {
-  id: string
-  name: string
-  description?: string
-}
-
 // 大模型配置
 export interface ModelConfig {
   id: string
@@ -256,6 +243,10 @@ export interface ProviderInfo {
   display_name: string
   default_base_url: string
   default_models: string[]
+  api_protocol?: string
+  provider_type?: string
+  aliases?: string[]
+  supports_custom_base_url?: boolean
 }
 
 // 提供商模型响应
@@ -263,6 +254,33 @@ export interface ProviderModelsResponse {
   models: string[]
   provider: string
   display_name: string
+  error?: string
+}
+
+export interface ProviderDiagnosticCheck {
+  status: 'ok' | 'warning' | 'error' | string
+  message: string
+  [key: string]: unknown
+}
+
+export interface ProviderDiagnostic {
+  status: 'ok' | 'warning' | 'error' | string
+  id: string
+  display_name: string
+  route: {
+    provider: string
+    model: string
+    api_base: string
+    api_protocol: string
+    llm_provider: string
+    context_window?: number | null
+  }
+  checks: Record<string, ProviderDiagnosticCheck>
+}
+
+export interface ProviderDiagnosticResponse {
+  success: boolean
+  diagnostic?: ProviderDiagnostic
   error?: string
 }
 
