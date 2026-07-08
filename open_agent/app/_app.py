@@ -656,6 +656,30 @@ def _setup_app_routes(app: FastAPI):
             logger.error(f"Failed to diagnose model config: {e}")
             return {"success": False, "error": str(e)}
 
+    @app.post("/api/model-configs/{model_id}/live-test")
+    async def live_test_model_config(model_id: str):
+        """Run a minimal live request for a saved model configuration."""
+        try:
+            from open_agent.provider_registry import get_provider_registry
+            from open_agent.user_config import get_user_config
+
+            manager = get_user_config()
+            manager.reload()
+            model = manager.get_model(model_id)
+            if not model:
+                return {
+                    "success": False,
+                    "error": f"Model config not found: {model_id}",
+                }
+
+            return {
+                "success": True,
+                "live_test": await get_provider_registry().test_model_config(model),
+            }
+        except Exception as e:
+            logger.error(f"Failed to live test model config: {e}")
+            return {"success": False, "error": str(e)}
+
     @app.get("/api/providers")
     async def get_providers():
         """Get all available model providers"""
@@ -715,6 +739,34 @@ def _setup_app_routes(app: FastAPI):
             }
         except Exception as e:
             logger.error(f"Failed to diagnose provider preview: {e}")
+            return {"success": False, "error": str(e)}
+
+    @app.post("/api/providers/{provider}/live-test")
+    async def live_test_provider_preview(
+        provider: str,
+        data: dict,
+    ):
+        """Run a minimal live request before saving provider/model settings."""
+        try:
+            from open_agent.provider_registry import get_provider_registry
+            from open_agent.user_config import ModelConfig
+
+            model = str(data.get("model") or data.get("name") or "")
+            preview = ModelConfig(
+                id=f"preview_{provider}",
+                name=model,
+                display_name=model or provider,
+                provider=provider,
+                api_key=str(data.get("api_key") or ""),
+                base_url=str(data.get("base_url") or ""),
+                provider_type=str(data.get("provider_type") or ""),
+            )
+            return {
+                "success": True,
+                "live_test": await get_provider_registry().test_model_config(preview),
+            }
+        except Exception as e:
+            logger.error(f"Failed to live test provider preview: {e}")
             return {"success": False, "error": str(e)}
 
     @app.get("/api/settings")
@@ -1173,6 +1225,22 @@ def _setup_app_routes(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to save MCP config: {e}")
             return {"success": False, "error": str(e)}
+
+    @app.post("/api/mcp/check")
+    async def check_mcp_server(data: dict):
+        """Validate and connect-test one MCP server configuration."""
+        try:
+            from open_agent.tools.mcp_loader import check_mcp_server_async
+
+            server = data.get("server", data)
+            if not isinstance(server, dict):
+                raise ValueError("server must be an object")
+            name = str(server.get("name", "")).strip()
+            result = await check_mcp_server_async(name, server)
+            return result
+        except Exception as e:
+            logger.error(f"Failed to check MCP server: {e}")
+            return {"success": False, "status": "error", "error": str(e), "message": str(e)}
 
     @app.post("/api/mcp/plugin-server")
     async def set_plugin_mcp_server(data: dict):

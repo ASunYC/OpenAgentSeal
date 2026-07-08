@@ -284,6 +284,24 @@ export interface ProviderDiagnosticResponse {
   error?: string
 }
 
+export interface ProviderLiveTest {
+  status: 'ok' | 'warning' | 'error' | string
+  id: string
+  display_name: string
+  route: ProviderDiagnostic['route']
+  diagnostic_status: 'ok' | 'warning' | 'error' | string
+  latency_ms?: number | null
+  response_preview?: string
+  finish_reason?: string
+  checks: Record<string, ProviderDiagnosticCheck>
+}
+
+export interface ProviderLiveTestResponse {
+  success: boolean
+  live_test?: ProviderLiveTest
+  error?: string
+}
+
 // 智能体配置
 export interface AgentConfig {
   id: string

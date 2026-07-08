@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,7 +164,7 @@ class MCPServerConnection:
         self.command = command
         self.args = args or []
         self.env = env or {}
-        self.cwd = cwd
+        self.cwd = str(cwd).strip() if cwd else None
         # URL-based
         self.url = url
         self.headers = headers or {}
@@ -195,6 +196,17 @@ class MCPServerConnection:
         connect_timeout = self._get_connect_timeout()
 
         try:
+            if self.connection_type == "stdio" and self.cwd:
+                cwd_path = Path(_expand_mcp_value(str(self.cwd)))
+                if not cwd_path.exists() or not cwd_path.is_dir():
+                    logger.warning(
+                        "Skipping MCP server '%s': configured cwd is not a valid directory: %s",
+                        self.name,
+                        self.cwd,
+                    )
+                    return False
+                self.cwd = str(cwd_path)
+
             self.exit_stack = AsyncExitStack()
 
             # Wrap connection with timeout
@@ -273,11 +285,12 @@ class MCPServerConnection:
 
     async def _connect_stdio(self):
         """Connect via STDIO transport."""
+        command, args = _stdio_spawn_command(self.command, self.args)
         server_params = StdioServerParameters(
-            command=self.command,
-            args=self.args,
+            command=command,
+            args=args,
             env=self.env if self.env else None,
-            cwd=self.cwd,
+            cwd=self.cwd if self.cwd else None,
         )
         return await self.exit_stack.enter_async_context(stdio_client(server_params))
 
@@ -316,6 +329,10 @@ class MCPServerConnection:
         if self.exit_stack:
             try:
                 await self.exit_stack.aclose()
+            except asyncio.CancelledError:
+                # The MCP stdio client may cancel its subprocess wait during
+                # shutdown on Windows. Treat it as a noisy cleanup detail.
+                pass
             except Exception:
                 # anyio cancel scope may raise RuntimeError or ExceptionGroup
                 # when stdio_client's task group is closed from a different
@@ -361,6 +378,130 @@ def _stdio_command_exists(command: str) -> bool:
     if any(sep in expanded for sep in ("/", "\\")) or Path(expanded).is_absolute():
         return Path(expanded).exists()
     return shutil.which(expanded) is not None
+
+
+def _stdio_spawn_command(command: str | None, args: list[str]) -> tuple[str | None, list[str]]:
+    """Return a Windows-safe command/args pair for MCP stdio subprocesses."""
+    if not command:
+        return command, args
+    expanded = _expand_mcp_value(command)
+    resolved = expanded
+    if not (any(sep in expanded for sep in ("/", "\\")) or Path(expanded).is_absolute()):
+        resolved = shutil.which(expanded) or expanded
+
+    if sys.platform == "win32":
+        suffix = Path(resolved).suffix.lower()
+        if suffix in {".cmd", ".bat"}:
+            return os.environ.get("COMSPEC", "cmd.exe"), ["/D", "/S", "/C", resolved, *args]
+
+    return resolved, args
+
+
+async def check_mcp_server_async(name: str, server_config: dict) -> dict[str, Any]:
+    """Test a single MCP server configuration without registering it globally."""
+    server_name = name.strip() or str(server_config.get("name", "")).strip() or "mcp-server"
+    started_at = asyncio.get_running_loop().time()
+
+    def elapsed_ms() -> int:
+        return int((asyncio.get_running_loop().time() - started_at) * 1000)
+
+    if not isinstance(server_config, dict):
+        return {
+            "success": False,
+            "status": "error",
+            "name": server_name,
+            "message": "MCP server config must be an object.",
+            "latency_ms": elapsed_ms(),
+        }
+
+    conn_type = _determine_connection_type(server_config)
+    url = _expand_mcp_value(server_config.get("url"))
+    command = _expand_mcp_value(server_config.get("command"))
+    cwd = _expand_mcp_value(server_config.get("cwd"))
+    cwd = str(cwd).strip() if cwd else None
+
+    if conn_type == "stdio":
+        if not command:
+            return {
+                "success": False,
+                "status": "error",
+                "name": server_name,
+                "type": conn_type,
+                "message": "stdio MCP servers require a command.",
+                "latency_ms": elapsed_ms(),
+            }
+        if not _stdio_command_exists(command):
+            return {
+                "success": False,
+                "status": "error",
+                "name": server_name,
+                "type": conn_type,
+                "message": f"Command not found: {command}",
+                "latency_ms": elapsed_ms(),
+            }
+        if cwd:
+            cwd_path = Path(cwd)
+            if not cwd_path.exists() or not cwd_path.is_dir():
+                return {
+                    "success": False,
+                    "status": "error",
+                    "name": server_name,
+                    "type": conn_type,
+                    "message": f"Working directory is not valid: {cwd}",
+                    "latency_ms": elapsed_ms(),
+                }
+    elif not url:
+        return {
+            "success": False,
+            "status": "error",
+            "name": server_name,
+            "type": conn_type,
+            "message": f"{conn_type} MCP servers require a URL.",
+            "latency_ms": elapsed_ms(),
+        }
+
+    connection = MCPServerConnection(
+        name=server_name,
+        connection_type=conn_type,
+        command=command,
+        args=_expand_mcp_value(server_config.get("args", [])),
+        env=_expand_mcp_value(server_config.get("env", {})),
+        cwd=cwd,
+        url=url,
+        headers=_expand_mcp_value(server_config.get("headers", {})),
+        connect_timeout=server_config.get("connect_timeout"),
+        execute_timeout=server_config.get("execute_timeout"),
+        sse_read_timeout=server_config.get("sse_read_timeout"),
+    )
+
+    try:
+        success = await connection.connect()
+        if not success:
+            return {
+                "success": False,
+                "status": "error",
+                "name": server_name,
+                "type": conn_type,
+                "message": "Failed to connect to MCP server. Check the command, URL, environment variables, and logs.",
+                "latency_ms": elapsed_ms(),
+            }
+
+        tool_names = [tool.name for tool in connection.tools]
+        prompt_names = [prompt.name for prompt in connection.prompts]
+        return {
+            "success": True,
+            "status": "ok",
+            "name": server_name,
+            "type": conn_type,
+            "message": f"Connected. Loaded {len(tool_names)} tools.",
+            "latency_ms": elapsed_ms(),
+            "tools_count": len(tool_names),
+            "tools": tool_names[:30],
+            "prompts_count": len(prompt_names),
+            "prompts": prompt_names[:30],
+        }
+    finally:
+        await connection.disconnect()
 
 
 def _resolve_mcp_config_path(config_path: str) -> Path | None:

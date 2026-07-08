@@ -19,7 +19,6 @@
                 "codexCLI"
             ],
             "env": {},
-            "cwd": "~/code",
             "autoApprove": []
         },
         "minimax_search": {

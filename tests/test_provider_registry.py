@@ -1,3 +1,5 @@
+import pytest
+
 from open_agent.schema import LLMProvider
 from open_agent.user_config import ModelConfig
 
@@ -133,3 +135,24 @@ def test_diagnose_model_config_uses_anthropic_protocol_check():
     assert diagnostic["status"] == "ok"
     assert diagnostic["checks"]["protocol"]["status"] == "ok"
     assert diagnostic["route"]["api_protocol"] == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_live_test_model_config_rejects_missing_api_key_without_network():
+    from open_agent.provider_registry import get_provider_registry
+
+    config = ModelConfig(
+        id="volcano",
+        name="glm-5-2-260617",
+        display_name="Volcano GLM",
+        provider="volcano",
+        api_key="",
+        base_url="",
+        provider_type="",
+    )
+
+    result = await get_provider_registry().test_model_config(config)
+
+    assert result["status"] == "error"
+    assert result["checks"]["live_request"]["category"] == "api_key"
+    assert "API key is not available" in result["checks"]["live_request"]["message"]

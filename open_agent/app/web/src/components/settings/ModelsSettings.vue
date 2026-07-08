@@ -242,6 +242,37 @@
           </template>
         </div>
 
+        <div
+          v-if="config.liveTest || config.liveTestError"
+          class="diagnostic-panel"
+          :class="config.liveTest ? `diagnostic-${config.liveTest.status}` : 'diagnostic-error'"
+        >
+          <div class="diagnostic-header">
+            <span>{{ t('真实测试', 'Live test') }}</span>
+            <strong>{{ liveTestStatusLabel(config) }}</strong>
+          </div>
+          <p v-if="config.liveTestError" class="diagnostic-message">{{ config.liveTestError }}</p>
+          <template v-else-if="config.liveTest">
+            <p class="diagnostic-message">
+              {{ config.liveTest.route.provider }} / {{ config.liveTest.route.model }}
+              <span v-if="config.liveTest.latency_ms"> · {{ config.liveTest.latency_ms }}ms</span>
+            </p>
+            <p v-if="config.liveTest.response_preview" class="diagnostic-message">
+              {{ t('响应预览：', 'Response: ') }}{{ config.liveTest.response_preview }}
+            </p>
+            <ul class="diagnostic-checks">
+              <li
+                v-for="(check, key) in config.liveTest.checks"
+                :key="key"
+                :class="`check-${check.status}`"
+              >
+                <span class="check-name">{{ diagnosticCheckLabel(String(key)) }}</span>
+                <span>{{ check.message }}</span>
+              </li>
+            </ul>
+          </template>
+        </div>
+
         <div class="card-footer">
           <button
             class="btn-diagnose"
@@ -249,6 +280,13 @@
             :disabled="config.diagnosing || !config.provider"
           >
             {{ config.diagnosing ? t('诊断中...', 'Checking...') : t('诊断', 'Diagnose') }}
+          </button>
+          <button
+            class="btn-diagnose"
+            @click="liveTestConfig(config)"
+            :disabled="config.testingLive || !config.provider"
+          >
+            {{ config.testingLive ? t('测试中...', 'Testing...') : t('真实测试', 'Live test') }}
           </button>
           <button class="btn-save" @click="saveConfig(config)" :disabled="config.saving || (config.isNew && !config.provider)">
             {{ config.saving ? t('保存中...', 'Saving...') : t('保存', 'Save') }}
@@ -274,7 +312,7 @@ import { reactive, onMounted } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useAgentStore } from '@/stores/agent'
 import { api } from '@/api'
-import type { ModelConfig, ProviderDiagnostic, ProviderInfo } from '@/types'
+import type { ModelConfig, ProviderDiagnostic, ProviderInfo, ProviderLiveTest } from '@/types'
 
 const settingsStore = useSettingsStore()
 const agentStore = useAgentStore()
@@ -303,6 +341,9 @@ interface LocalModelConfig {
   diagnosing: boolean
   diagnostic?: ProviderDiagnostic
   diagnosticError?: string
+  testingLive: boolean
+  liveTest?: ProviderLiveTest
+  liveTestError?: string
   newModel: string
 }
 
@@ -422,6 +463,7 @@ function createNewModel() {
     editing: true,
     loadingModels: false,
     diagnosing: false,
+    testingLive: false,
     newModel: ''
   })
 }
@@ -592,6 +634,8 @@ function addCustomModel(config: LocalModelConfig) {
 function clearDiagnostic(config: LocalModelConfig) {
   config.diagnostic = undefined
   config.diagnosticError = ''
+  config.liveTest = undefined
+  config.liveTestError = ''
 }
 
 function diagnosticApiKey(config: LocalModelConfig): string {
@@ -629,12 +673,58 @@ async function diagnoseConfig(config: LocalModelConfig) {
   }
 }
 
+async function liveTestConfig(config: LocalModelConfig) {
+  if (!config.provider) return
+  config.testingLive = true
+  config.liveTestError = ''
+  try {
+    const result = config.isNew || config.editing
+      ? await api.liveTestProvider(config.provider, {
+          name: config.selectedModel,
+          api_key: diagnosticApiKey(config),
+          base_url: config.base_url,
+          provider_type: config.provider_type || 'openai',
+        })
+      : await api.liveTestModelConfig(config.id)
+
+    if (result.success && result.live_test) {
+      config.liveTest = result.live_test
+      config.diagnostic = {
+        status: result.live_test.diagnostic_status,
+        id: result.live_test.id,
+        display_name: result.live_test.display_name,
+        route: result.live_test.route,
+        checks: Object.fromEntries(
+          Object.entries(result.live_test.checks).filter(([key]) => key !== 'live_request'),
+        ),
+      }
+    } else {
+      config.liveTest = undefined
+      config.liveTestError = result.error || t('真实测试失败', 'Live test failed')
+    }
+  } catch (error) {
+    config.liveTest = undefined
+    config.liveTestError = error instanceof Error ? error.message : t('真实测试失败', 'Live test failed')
+  } finally {
+    config.testingLive = false
+  }
+}
+
 function diagnosticStatusLabel(config: LocalModelConfig): string {
   if (config.diagnosticError) return t('失败', 'Failed')
   const status = config.diagnostic?.status
   if (status === 'ok') return t('正常', 'OK')
   if (status === 'warning') return t('需确认', 'Warning')
   if (status === 'error') return t('有问题', 'Error')
+  return status || ''
+}
+
+function liveTestStatusLabel(config: LocalModelConfig): string {
+  if (config.liveTestError) return t('失败', 'Failed')
+  const status = config.liveTest?.status
+  if (status === 'ok') return t('已通过', 'Passed')
+  if (status === 'warning') return t('需确认', 'Warning')
+  if (status === 'error') return t('失败', 'Failed')
   return status || ''
 }
 
@@ -645,6 +735,7 @@ function diagnosticCheckLabel(key: string): string {
     api_base: ['API 地址', 'API Base'],
     api_key: ['API Key', 'API Key'],
     model: ['模型', 'Model'],
+    live_request: ['真实请求', 'Live request'],
   }
   const label = labels[key]
   return label ? t(label[0], label[1]) : key
@@ -684,6 +775,7 @@ function createDefaultLocalConfig(provider: ProviderOption, index: number): Loca
     editing: false,
     loadingModels: false,
     diagnosing: false,
+    testingLive: false,
     newModel: ''
   }
 }
@@ -766,6 +858,7 @@ onMounted(async () => {
       editing: false,
       loadingModels: false,
       diagnosing: false,
+      testingLive: false,
       newModel: ''
     })
   })
@@ -1070,7 +1163,7 @@ onMounted(async () => {
 
 .card-footer {
   display: grid;
-  grid-template-columns: minmax(96px, 0.45fr) minmax(120px, 0.55fr);
+  grid-template-columns: minmax(76px, 0.32fr) minmax(88px, 0.34fr) minmax(96px, 0.34fr);
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--border-color);

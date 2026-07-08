@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -11,10 +12,12 @@ from open_agent.tools.mcp_loader import (
     MCPServerConnection,
     MCPTimeoutConfig,
     _determine_connection_type,
+    _stdio_spawn_command,
     cleanup_mcp_connections,
     get_mcp_timeout_config,
     load_mcp_tools_async,
     set_mcp_timeout_config,
+    check_mcp_server_async,
 )
 
 
@@ -112,6 +115,16 @@ class TestMCPServerConnectionInit:
         assert conn.env == {"API_KEY": "test"}
         assert conn.cwd == "~/code"
         assert conn.url is None
+
+    def test_empty_cwd_is_normalized_to_none(self):
+        """Blank cwd from UI payload should not be passed to subprocess APIs."""
+        conn = MCPServerConnection(
+            name="test-stdio",
+            connection_type="stdio",
+            command="npx",
+            cwd="",
+        )
+        assert conn.cwd is None
 
     def test_url_connection_init(self):
         """Test URL-based connection initialization."""
@@ -308,6 +321,55 @@ async def test_stdio_config_validation(tmp_path):
         assert tools == []
     finally:
         await cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+async def test_stdio_config_with_invalid_cwd_is_skipped(tmp_path):
+    """Invalid STDIO cwd should skip the server before spawning a subprocess."""
+    config = {
+        "mcpServers": {
+            "broken-cwd": {
+                "type": "stdio",
+                "command": sys.executable,
+                "cwd": str(tmp_path / "missing"),
+            }
+        }
+    }
+    config_path = write_temp_mcp_config(tmp_path, config)
+
+    try:
+        tools = await load_mcp_tools_async(str(config_path))
+        assert tools == []
+    finally:
+        await cleanup_mcp_connections()
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_check_reports_invalid_cwd(tmp_path):
+    """Single-server check should return a useful invalid-cwd result."""
+    result = await check_mcp_server_async(
+        "broken-cwd",
+        {
+            "type": "stdio",
+            "command": sys.executable,
+            "cwd": str(tmp_path / "missing"),
+        },
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "error"
+    assert "Working directory is not valid" in result["message"]
+
+
+def test_stdio_spawn_command_wraps_windows_cmd(monkeypatch):
+    """Windows .cmd/.bat MCP launchers should run through cmd.exe."""
+    monkeypatch.setattr("open_agent.tools.mcp_loader.sys.platform", "win32")
+    command, args = _stdio_spawn_command("C:/node/npx.cmd", ["-y", "server"])
+
+    assert command.lower().endswith("cmd.exe")
+    assert args[:3] == ["/D", "/S", "/C"]
+    assert args[3] == "C:/node/npx.cmd"
+    assert args[4:] == ["-y", "server"]
 
 
 @pytest.mark.asyncio

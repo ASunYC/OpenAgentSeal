@@ -80,9 +80,29 @@
         </div>
 
         <div class="mcp-actions">
-          <button class="btn-secondary" @click="validateServer(server)">{{ t('检查', 'Check') }}</button>
+          <button class="btn-secondary" :disabled="checkingServer === serverKey(server)" @click="validateServer(server)">
+            {{ checkingServer === serverKey(server) ? t('检查中...', 'Checking...') : t('检查', 'Check') }}
+          </button>
           <button v-if="server.readonly" class="btn-secondary" @click="copyPluginServer(server)">{{ t('复制为用户 MCP', 'Copy as user MCP') }}</button>
           <button v-else class="btn-danger" @click="deleteServer(server)">{{ t('删除', 'Delete') }}</button>
+        </div>
+
+        <div
+          v-if="checkResults[serverKey(server)]"
+          class="mcp-check-result"
+          :class="{ ok: checkResults[serverKey(server)]?.success, error: !checkResults[serverKey(server)]?.success }"
+        >
+          <div class="check-summary">
+            <strong>{{ checkResults[serverKey(server)]?.success ? t('连接成功', 'Connected') : t('检查失败', 'Check failed') }}</strong>
+            <span v-if="checkResults[serverKey(server)]?.latency_ms !== undefined">
+              {{ checkResults[serverKey(server)]?.latency_ms }} ms
+            </span>
+          </div>
+          <p>{{ checkResults[serverKey(server)]?.message || checkResults[serverKey(server)]?.error }}</p>
+          <div v-if="checkResults[serverKey(server)]?.tools?.length" class="check-tools">
+            <span>{{ t('工具', 'Tools') }} {{ checkResults[serverKey(server)]?.tools_count ?? checkResults[serverKey(server)]?.tools?.length }}:</span>
+            <code>{{ checkResults[serverKey(server)]?.tools?.slice(0, 8).join(', ') }}</code>
+          </div>
         </div>
       </div>
 
@@ -110,7 +130,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { mcpApi, type MCPServerConfig } from '@/api'
+import { mcpApi, type MCPCheckResult, type MCPServerConfig } from '@/api'
 import { useSettingsStore } from '@/stores/settings'
 
 interface EditableMCPServer extends MCPServerConfig {
@@ -125,6 +145,8 @@ const configPath = ref('')
 const loading = ref(false)
 const saving = ref(false)
 const savingServer = ref<string | null>(null)
+const checkingServer = ref<string | null>(null)
+const checkResults = ref<Record<string, MCPCheckResult>>({})
 const error = ref<string | null>(null)
 const searchQuery = ref('')
 
@@ -253,21 +275,65 @@ async function toggleServer(server: EditableMCPServer) {
   server.disabled = nextDisabled
 }
 
-function validateServer(server: EditableMCPServer) {
+function setLocalCheckResult(server: EditableMCPServer, message: string) {
+  checkResults.value = {
+    ...checkResults.value,
+    [serverKey(server)]: {
+      success: false,
+      status: 'error',
+      name: server.name,
+      type: server.type,
+      message,
+    },
+  }
+}
+
+async function validateServer(server: EditableMCPServer) {
+  const key = serverKey(server)
   const payload = toPayload(server)
   if (!payload.name) {
-    alert(t('名称不能为空。', 'Name is required.'))
+    setLocalCheckResult(server, t('名称不能为空。', 'Name is required.'))
     return
   }
   if (payload.type === 'stdio' && !payload.command) {
-    alert(t('stdio 类型需要命令。', 'stdio servers require a command.'))
+    setLocalCheckResult(server, t('stdio 类型需要命令。', 'stdio servers require a command.'))
     return
   }
   if (payload.type !== 'stdio' && !payload.url) {
-    alert(t('HTTP/SSE 类型需要 URL。', 'HTTP/SSE servers require a URL.'))
+    setLocalCheckResult(server, t('HTTP/SSE 类型需要 URL。', 'HTTP/SSE servers require a URL.'))
     return
   }
-  alert(t('配置格式看起来正常。', 'The config shape looks valid.'))
+  checkingServer.value = key
+  checkResults.value = {
+    ...checkResults.value,
+    [key]: {
+      success: false,
+      status: 'checking',
+      name: payload.name,
+      type: payload.type,
+      message: t('正在连接 MCP 服务...', 'Connecting to MCP server...'),
+    },
+  }
+  try {
+    const result = await mcpApi.checkServer(payload)
+    checkResults.value = {
+      ...checkResults.value,
+      [key]: result,
+    }
+  } catch (e) {
+    checkResults.value = {
+      ...checkResults.value,
+      [key]: {
+        success: false,
+        status: 'error',
+        name: payload.name,
+        type: payload.type,
+        message: e instanceof Error ? e.message : String(e),
+      },
+    }
+  } finally {
+    checkingServer.value = null
+  }
 }
 
 function deleteServer(server: EditableMCPServer) {
@@ -599,6 +665,60 @@ onMounted(() => {
 
 .btn-danger {
   color: #ef4444;
+}
+
+.btn-secondary:disabled,
+.btn-danger:disabled,
+.btn-primary:disabled {
+  opacity: 0.62;
+  cursor: wait;
+}
+
+.mcp-check-result {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--hover-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.mcp-check-result.ok {
+  border-color: color-mix(in srgb, #16a34a 55%, var(--border-color));
+  background: color-mix(in srgb, #16a34a 10%, var(--main-bg));
+}
+
+.mcp-check-result.error {
+  border-color: color-mix(in srgb, #ef4444 55%, var(--border-color));
+  background: color-mix(in srgb, #ef4444 9%, var(--main-bg));
+}
+
+.check-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-primary);
+}
+
+.mcp-check-result p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.check-tools {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.check-tools code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 720px) {

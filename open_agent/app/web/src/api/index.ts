@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, ProviderDiagnosticResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
+import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, ProviderDiagnosticResponse, ProviderLiveTestResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
 import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
@@ -544,6 +544,10 @@ export const modelConfigApi = {
     return request<ProviderDiagnosticResponse>(`/model-configs/${configId}/diagnostics`)
   },
 
+  async liveTest(configId: string): Promise<ProviderLiveTestResponse> {
+    return request<ProviderLiveTestResponse>(`/model-configs/${configId}/live-test`, { method: 'POST' })
+  },
+
   async resolveContextWindow(modelName: string, provider = ''): Promise<{
     model_name: string
     provider: string
@@ -574,6 +578,13 @@ export const providerApi = {
 
   async diagnose(provider: string, config: Partial<ModelConfig>): Promise<ProviderDiagnosticResponse> {
     return request<ProviderDiagnosticResponse>(`/providers/${provider}/diagnostics`, {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  },
+
+  async liveTest(provider: string, config: Partial<ModelConfig>): Promise<ProviderLiveTestResponse> {
+    return request<ProviderLiveTestResponse>(`/providers/${provider}/live-test`, {
       method: 'POST',
       body: JSON.stringify(config),
     })
@@ -746,6 +757,20 @@ export interface MCPServerConfig {
   [key: string]: unknown
 }
 
+export interface MCPCheckResult {
+  success: boolean
+  status: 'ok' | 'error' | string
+  name?: string
+  type?: string
+  message?: string
+  error?: string
+  latency_ms?: number
+  tools_count?: number
+  tools?: string[]
+  prompts_count?: number
+  prompts?: string[]
+}
+
 export const mcpApi = {
   async getConfig(): Promise<{ success: boolean; path: string; servers: MCPServerConfig[]; warnings?: Record<string, unknown>[]; error?: string }> {
     return request('/mcp/config')
@@ -755,6 +780,13 @@ export const mcpApi = {
     return request<ApiResponse<{ path: string }>>('/mcp/config', {
       method: 'POST',
       body: JSON.stringify({ servers }),
+    })
+  },
+
+  async checkServer(server: MCPServerConfig): Promise<MCPCheckResult> {
+    return request<MCPCheckResult>('/mcp/check', {
+      method: 'POST',
+      body: JSON.stringify({ server }),
     })
   },
 
@@ -1141,12 +1173,14 @@ export const api = {
   deleteModelConfig: modelConfigApi.delete,
   setDefaultModelConfig: modelConfigApi.setDefault,
   diagnoseModelConfig: modelConfigApi.diagnose,
+  liveTestModelConfig: modelConfigApi.liveTest,
   resolveModelContextWindow: modelConfigApi.resolveContextWindow,
 
   // Provider
   getProviders: providerApi.list,
   getProviderModels: providerApi.getModels,
   diagnoseProvider: providerApi.diagnose,
+  liveTestProvider: providerApi.liveTest,
 
   // Command
   getCommands: commandApi.list,

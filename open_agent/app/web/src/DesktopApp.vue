@@ -325,6 +325,12 @@
                       </button>
                     </template>
                     <template v-else>
+                      <button type="button" @click="retrieveQueuedMessageForEdit(queued)" :title="t('取回编辑', 'Retrieve for editing')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M9 14 4 9l5-5"/>
+                          <path d="M4 9h10a6 6 0 0 1 0 12H7"/>
+                        </svg>
+                      </button>
                       <button type="button" @click="editQueuedMessage(queued)" :title="t('编辑排队消息', 'Edit queued message')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M12 20h9"/>
@@ -939,6 +945,12 @@
                   </button>
                 </template>
                 <template v-else>
+                  <button type="button" @click="retrieveQueuedMessageForEdit(queued)" :title="t('取回编辑', 'Retrieve for editing')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M9 14 4 9l5-5"/>
+                      <path d="M4 9h10a6 6 0 0 1 0 12H7"/>
+                    </svg>
+                  </button>
                   <button type="button" @click="editQueuedMessage(queued)" :title="t('编辑排队消息', 'Edit queued message')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M12 20h9"/>
@@ -1217,6 +1229,7 @@ import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import WorkspaceManager from '@/views/WorkspaceManager.vue'
 import SandboxPanel from '@/components/SandboxPanel.vue'
 import { useWorkspaceManager } from '@/composables/useWorkspaceManager'
+import { useMessageQueue, type QueuedComposerMessage } from '@/composables/useMessageQueue'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
@@ -1490,14 +1503,18 @@ const inputMessage = ref('')
 const attachmentInput = ref<HTMLInputElement | null>(null)
 const pendingAttachments = ref<ChatAttachment[]>([])
 const canSendMessage = computed(() => !!inputMessage.value.trim() || pendingAttachments.value.length > 0)
-interface QueuedComposerMessage {
-  id: string
-  content: string
-  draftContent: string
-  attachments: ChatAttachment[]
-  editing: boolean
-}
-const queuedMessages = ref<QueuedComposerMessage[]>([])
+const {
+  queuedMessages,
+  setQueueScope,
+  queueMessage,
+  editQueuedMessage,
+  cancelQueuedMessageEdit,
+  saveQueuedMessageEdit,
+  removeQueuedMessage,
+  takeQueuedMessage,
+  nextQueuedMessage,
+  clearQueue,
+} = useMessageQueue()
 const composerMenuOpen = ref(false)
 const mentionOpen = ref(false)
 const mentionQuery = ref('')
@@ -1727,10 +1744,10 @@ async function switchAgentSession(agentId: string) {
   if (!agentId) return
   const previousAgentId = selectedAgentId.value
   selectedAgentId.value = agentId
+  setQueueScope(agentId)
   localStorage.setItem('selected_agent_id', agentId)
   if (previousAgentId !== agentId) {
     isAgentSwitching.value = true
-    queuedMessages.value = []
   }
 
   messages.value = []
@@ -2835,15 +2852,7 @@ function queueComposerMessage(): boolean {
   if (!canSendMessage.value || !selectedAgentId.value) return false
   const content = inputMessage.value.trim()
   const attachments = [...pendingAttachments.value]
-  if (!content && attachments.length === 0) return false
-
-  queuedMessages.value.push({
-    id: generateId(),
-    content,
-    draftContent: content,
-    attachments,
-    editing: false,
-  })
+  if (!queueMessage(content, attachments)) return false
   inputMessage.value = ''
   pendingAttachments.value = []
   mentionTarget.value = null
@@ -2852,34 +2861,22 @@ function queueComposerMessage(): boolean {
   return true
 }
 
-function editQueuedMessage(item: QueuedComposerMessage) {
-  item.draftContent = item.content
-  item.editing = true
-}
-
-function cancelQueuedMessageEdit(item: QueuedComposerMessage) {
-  item.draftContent = item.content
-  item.editing = false
-}
-
-function saveQueuedMessageEdit(item: QueuedComposerMessage) {
-  const nextContent = item.draftContent.trim()
-  if (!nextContent && item.attachments.length === 0) {
-    removeQueuedMessage(item.id)
-    return
+function retrieveQueuedMessageForEdit(item: QueuedComposerMessage) {
+  if (inputMessage.value.trim() || pendingAttachments.value.length > 0) {
+    queueComposerMessage()
   }
-  item.content = nextContent
-  item.draftContent = nextContent
-  item.editing = false
-}
-
-function removeQueuedMessage(id: string) {
-  queuedMessages.value = queuedMessages.value.filter(item => item.id !== id)
+  const queued = takeQueuedMessage(item.id)
+  if (!queued) return
+  inputMessage.value = queued.content
+  pendingAttachments.value = [...queued.attachments]
+  mentionTarget.value = null
+  closeAgentMention()
+  focusActiveComposer()
 }
 
 async function sendNextQueuedMessage() {
   if (loading.value || queuedMessages.value.length === 0 || !selectedAgentId.value) return
-  const next = queuedMessages.value.find(item => !item.editing)
+  const next = nextQueuedMessage()
   if (!next) return
   await sendMessage(next)
 }
@@ -3191,7 +3188,7 @@ async function confirmClearChat() {
 
 async function clearChat() {
   messages.value = []
-  queuedMessages.value = []
+  clearQueue()
   if (runnerSessionId.value) {
     localStorage.removeItem(`messages_${runnerSessionId.value}`)
     try {
@@ -3523,6 +3520,7 @@ onMounted(async () => {
   
   if (agentToSelect) {
     selectedAgentId.value = agentToSelect.id
+    setQueueScope(agentToSelect.id)
     if (agentToSelect.model_id) {
       selectedModelId.value = agentToSelect.model_id
     }

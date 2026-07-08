@@ -6,9 +6,12 @@ runtime create the same LLM client for a saved model configuration.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any
 
+from open_agent.retry import RetryConfig
 from open_agent.schema import LLMProvider
 from open_agent.user_config import ModelConfig, ModelProvider
 
@@ -218,6 +221,93 @@ class ProviderRegistry:
             "checks": checks,
         }
 
+    async def test_model_config(
+        self,
+        config: ModelConfig,
+        *,
+        prompt: str = "Reply exactly: OK",
+        timeout_secs: float = 30.0,
+    ) -> dict[str, Any]:
+        """Run a minimal live request against a model configuration."""
+        diagnostic = self.diagnose_model_config(config)
+        route = self.resolve_model_config(config)
+        api_key = str(config.api_key or "").strip()
+
+        if not api_key or api_key == "__configured__":
+            return self._live_test_result(
+                config,
+                route,
+                diagnostic,
+                status="error",
+                category="api_key",
+                message=(
+                    "API key is not available for a live test. "
+                    "Save the model config or enter the key again before testing."
+                ),
+            )
+
+        if not str(route.model or "").strip():
+            return self._live_test_result(
+                config,
+                route,
+                diagnostic,
+                status="error",
+                category="model",
+                message="Model name is empty.",
+            )
+
+        started = perf_counter()
+        try:
+            from open_agent.llm.llm_wrapper import LLMClient
+            from open_agent.schema import Message
+
+            client = LLMClient(
+                api_key=api_key,
+                provider=route.llm_provider,
+                api_base=route.api_base,
+                model=route.model,
+                retry_config=RetryConfig(enabled=False, max_retries=0),
+            )
+            response = await asyncio.wait_for(
+                client.generate([Message(role="user", content=prompt)], tools=[]),
+                timeout=timeout_secs,
+            )
+            latency_ms = int((perf_counter() - started) * 1000)
+            return self._live_test_result(
+                config,
+                route,
+                diagnostic,
+                status="ok",
+                category="live_request",
+                message="Provider responded successfully.",
+                latency_ms=latency_ms,
+                response_preview=self._truncate(str(response.content or ""), 240),
+                finish_reason=response.finish_reason,
+            )
+        except asyncio.TimeoutError:
+            latency_ms = int((perf_counter() - started) * 1000)
+            return self._live_test_result(
+                config,
+                route,
+                diagnostic,
+                status="error",
+                category="timeout",
+                message=f"Live test timed out after {timeout_secs:.0f}s.",
+                latency_ms=latency_ms,
+            )
+        except Exception as exc:
+            latency_ms = int((perf_counter() - started) * 1000)
+            category = self._classify_live_test_error(exc)
+            return self._live_test_result(
+                config,
+                route,
+                diagnostic,
+                status="error",
+                category=category,
+                message=self._sanitize_error_message(exc, api_key),
+                latency_ms=latency_ms,
+            )
+
     def to_llm_provider(self, api_protocol: str) -> LLMProvider:
         if _normalize_id(api_protocol) == ANTHROPIC_PROTOCOL:
             return LLMProvider.ANTHROPIC
@@ -358,6 +448,69 @@ class ProviderRegistry:
         if "warning" in statuses:
             return "warning"
         return "ok"
+
+    def _live_test_result(
+        self,
+        config: ModelConfig,
+        route: ModelRoute,
+        diagnostic: dict[str, Any],
+        *,
+        status: str,
+        category: str,
+        message: str,
+        latency_ms: int | None = None,
+        response_preview: str = "",
+        finish_reason: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "id": config.id,
+            "display_name": config.display_name,
+            "route": diagnostic["route"],
+            "diagnostic_status": diagnostic["status"],
+            "latency_ms": latency_ms,
+            "response_preview": response_preview,
+            "finish_reason": finish_reason,
+            "checks": {
+                **diagnostic["checks"],
+                "live_request": {
+                    "status": status,
+                    "category": category,
+                    "message": message,
+                    "provider": route.provider,
+                    "model": route.model,
+                    "api_base": route.api_base,
+                },
+            },
+        }
+
+    @staticmethod
+    def _truncate(value: str, limit: int) -> str:
+        text = value.strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit].rstrip()}..."
+
+    def _sanitize_error_message(self, exc: Exception, api_key: str) -> str:
+        message = self._truncate(str(exc) or exc.__class__.__name__, 1200)
+        if api_key:
+            message = message.replace(api_key, "[redacted]")
+        return message
+
+    @staticmethod
+    def _classify_live_test_error(exc: Exception) -> str:
+        text = f"{exc.__class__.__name__}: {exc}".lower()
+        if any(token in text for token in ("401", "403", "unauthorized", "forbidden", "api key", "apikey", "authentication")):
+            return "api_key"
+        if any(token in text for token in ("404", "not found", "unsupportedmodel", "model")):
+            return "model"
+        if any(token in text for token in ("timeout", "timed out")):
+            return "timeout"
+        if any(token in text for token in ("dns", "connect", "connection", "tls", "ssl", "network")):
+            return "network"
+        if any(token in text for token in ("base_url", "base url", "invalid url", "api base")):
+            return "api_base"
+        return "provider"
 
     def _build_default_profiles(self) -> list[ProviderProfile]:
         profiles: list[ProviderProfile] = []
