@@ -90,10 +90,14 @@
         <div
           v-if="checkResults[serverKey(server)]"
           class="mcp-check-result"
-          :class="{ ok: checkResults[serverKey(server)]?.success, error: !checkResults[serverKey(server)]?.success }"
+          :class="{
+            ok: checkResults[serverKey(server)]?.success,
+            checking: isCheckingResult(checkResults[serverKey(server)]),
+            error: !checkResults[serverKey(server)]?.success && !isCheckingResult(checkResults[serverKey(server)]),
+          }"
         >
           <div class="check-summary">
-            <strong>{{ checkResults[serverKey(server)]?.success ? t('连接成功', 'Connected') : t('检查失败', 'Check failed') }}</strong>
+            <strong>{{ checkResultTitle(checkResults[serverKey(server)]) }}</strong>
             <span v-if="checkResults[serverKey(server)]?.latency_ms !== undefined">
               {{ checkResults[serverKey(server)]?.latency_ms }} ms
             </span>
@@ -179,6 +183,10 @@ const filteredServers = computed(() => {
     server.disabled ? 'disabled 已禁用' : 'enabled 已启用',
     server.argsText,
     server.envText,
+    server.cwdText,
+    server.connect_timeout,
+    server.execute_timeout,
+    server.sse_read_timeout,
   ]
     .filter(Boolean)
     .join(' ')
@@ -202,6 +210,16 @@ function parseEnv(text: string): Record<string, string> {
       }
       return env
     }, {})
+}
+
+function isCheckingResult(result?: MCPCheckResult): boolean {
+  return result?.status === 'checking'
+}
+
+function checkResultTitle(result?: MCPCheckResult): string {
+  if (result?.success) return t('连接成功', 'Connected')
+  if (isCheckingResult(result)) return t('正在连接', 'Connecting')
+  return t('检查失败', 'Check failed')
 }
 
 function toEditable(server: MCPServerConfig): EditableMCPServer {
@@ -687,6 +705,11 @@ onMounted(() => {
 .mcp-check-result.ok {
   border-color: color-mix(in srgb, #16a34a 55%, var(--border-color));
   background: color-mix(in srgb, #16a34a 10%, var(--main-bg));
+}
+
+.mcp-check-result.checking {
+  border-color: color-mix(in srgb, var(--primary-color) 42%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--main-bg));
 }
 
 .mcp-check-result.error {

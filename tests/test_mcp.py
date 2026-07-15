@@ -361,6 +361,36 @@ async def test_mcp_server_check_reports_invalid_cwd(tmp_path):
     assert "Working directory is not valid" in result["message"]
 
 
+@pytest.mark.asyncio
+async def test_mcp_server_check_returns_connection_error_detail(monkeypatch):
+    """Single-server check should surface the loader's concrete connection failure."""
+
+    class FakeConnection:
+        def __init__(self, *args, **kwargs):
+            self.last_error = "Connection to MCP server timed out after 30s."
+
+        async def connect(self):
+            return False
+
+        async def disconnect(self):
+            pass
+
+    monkeypatch.setattr("open_agent.tools.mcp_loader.MCPServerConnection", FakeConnection)
+
+    result = await check_mcp_server_async(
+        "slow-server",
+        {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": ["-c", "print('ready')"],
+        },
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "error"
+    assert result["message"] == "Connection to MCP server timed out after 30s."
+
+
 def test_stdio_spawn_command_wraps_windows_cmd(monkeypatch):
     """Windows .cmd/.bat MCP launchers should run through cmd.exe."""
     monkeypatch.setattr("open_agent.tools.mcp_loader.sys.platform", "win32")
@@ -493,6 +523,7 @@ async def test_configured_mcp_tool_availability(mcp_config):
         "The default MCP config should include drawio and pencil. "
         f"Configured servers: {sorted(configured_servers)}"
     )
+    assert mcp_config["mcpServers"]["drawio"].get("connect_timeout") == 30
 
     try:
         tools = await load_mcp_tools_async("open_agent/config/mcp.json")

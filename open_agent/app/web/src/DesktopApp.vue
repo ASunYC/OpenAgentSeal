@@ -645,17 +645,10 @@
               </button>
               <button
                 class="workspace-tab"
-                :class="{ active: runtimePanelTab === 'runtime' }"
-                @click="switchRuntimePanelTab('runtime')"
+                :class="{ active: runtimePanelTab === 'task' }"
+                @click="switchRuntimePanelTab('task')"
               >
-                {{ t('运行事件', 'Runtime events') }}
-              </button>
-              <button
-                class="workspace-tab"
-                :class="{ active: runtimePanelTab === 'context' }"
-                @click="switchRuntimePanelTab('context')"
-              >
-                {{ t('上下文', 'Context') }}
+                {{ t('任务', 'Task') }}
               </button>
             </div>
 
@@ -716,150 +709,148 @@
               </div>
             </div>
 
-            <template v-else-if="runtimePanelTab === 'runtime'">
+            <div v-else class="task-workspace">
               <div class="runtime-toolbar">
                 <div class="runtime-summary">
-                  <span class="runtime-summary-value">{{ runtimeEvents.length }}</span>
-                  <span>{{ t('事件', 'Events') }}</span>
+                  <span class="runtime-summary-value">{{ taskOverviewTotal }}</span>
+                  <span>{{ t('任务项', 'Task items') }}</span>
                 </div>
-                <button class="runtime-refresh" @click="loadRuntimeReplay" :disabled="runtimeLoading" :title="t('刷新', 'Refresh')">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-                    <path d="M21 3v6h-6"/>
-                  </svg>
-                </button>
-              </div>
-
-              <div class="runtime-meta" v-if="runtimeThread">
-                <div>
-                  <span>{{ t('线程', 'Thread') }}</span>
-                  <strong>{{ runtimeThread.thread_id }}</strong>
-                </div>
-                <div>
-                  <span>{{ t('状态', 'Status') }}</span>
-                  <strong>{{ runtimeThread.status }}</strong>
-                </div>
-                <div>
-                  <span>{{ t('序号', 'Seq') }}</span>
-                  <strong>{{ runtimeThread.latest_event_seq }}</strong>
+                <div class="runtime-toolbar-actions">
+                  <button class="runtime-refresh" @click="refreshTaskPanel" :disabled="taskPanelLoading" :title="t('刷新任务面板', 'Refresh task panel')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                      <path d="M21 3v6h-6"/>
+                    </svg>
+                  </button>
                 </div>
               </div>
 
-              <div v-if="runtimeError" class="runtime-empty">{{ runtimeError }}</div>
-              <div v-else-if="runtimeLoading" class="runtime-empty">{{ t('加载中...', 'Loading...') }}</div>
-              <div v-else-if="!runtimeThread" class="runtime-empty">{{ t('当前会话还没有运行事件', 'No runtime events for this session') }}</div>
-
-              <div v-else class="runtime-content">
-                <div class="runtime-turns" v-if="runtimeTurns.length">
-                  <div
-                    v-for="turn in runtimeTurns"
-                    :key="turn.turn_id"
-                    class="runtime-turn"
-                  >
-                    <span class="runtime-turn-status">{{ turn.status }}</span>
-                    <span class="runtime-turn-input">{{ turn.user_input }}</span>
-                  </div>
-                </div>
-
-                <div class="runtime-events">
-                  <article
-                    v-for="event in runtimeEvents"
-                    :key="event.event_id"
-                    class="runtime-event"
-                  >
-                    <div class="runtime-event-head">
-                      <span class="runtime-seq">#{{ event.seq }}</span>
-                      <span class="runtime-event-type">{{ event.event_type }}</span>
-                      <time>{{ formatTime(event.created_at) }}</time>
-                    </div>
-                    <p class="runtime-event-summary">{{ formatRuntimeEventSummary(event) }}</p>
-                    <pre v-if="formatRuntimeEventDetail(event)" class="runtime-event-detail">{{ formatRuntimeEventDetail(event) }}</pre>
-                  </article>
-                </div>
-              </div>
-            </template>
-
-            <div v-else class="context-workspace">
-              <div class="runtime-toolbar">
-                <div class="runtime-summary">
-                  <span class="runtime-summary-value">{{ contextBlocks.length }}</span>
-                  <span>{{ t('压缩块', 'Blocks') }}</span>
-                </div>
-                <button class="runtime-refresh" @click="loadContextBlocks" :disabled="contextBlocksLoading" :title="t('刷新', 'Refresh')">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-                    <path d="M21 3v6h-6"/>
-                  </svg>
-                </button>
-              </div>
-
-              <div class="context-meta">
-                <div>
-                  <span>{{ t('会话', 'Session') }}</span>
-                  <strong>{{ runnerSessionId || '-' }}</strong>
-                </div>
-                <div>
-                  <span>{{ t('当前上下文', 'Context') }}</span>
-                  <strong>{{ contextStatus.used_tokens }}/{{ contextStatus.context_window }} Token</strong>
-                </div>
-              </div>
-
-              <div v-if="contextBlocksError" class="runtime-empty">{{ contextBlocksError }}</div>
-              <div v-else-if="contextBlocksLoading" class="runtime-empty">{{ t('加载中...', 'Loading...') }}</div>
-              <div v-else-if="!contextBlocks.length" class="runtime-empty">
-                {{ t('当前会话还没有上下文压缩块', 'No compressed context blocks for this session yet') }}
-              </div>
-
-              <div v-else class="context-content">
-                <article
-                  v-for="block in contextBlocks"
-                  :key="block.ref_id"
-                  class="context-block-card"
-                  :class="{ active: selectedContextBlockRef === block.ref_id }"
+              <div class="task-overview-grid">
+                <button
+                  v-for="section in taskSections"
+                  :key="section.id"
+                  class="task-overview-tile"
+                  :class="{ active: taskPanelSection === section.id }"
+                  type="button"
+                  @click="taskPanelSection = section.id"
                 >
-                  <div class="context-block-head">
-                    <span class="context-kind">{{ formatContextBlockKind(block.kind) }}</span>
-                    <time>{{ formatChatDate(block.created_at) }}</time>
-                  </div>
-                  <div class="context-ref">{{ block.ref_id }}</div>
-                  <p class="context-preview">{{ block.compressed_text }}</p>
-                  <div class="context-block-foot">
-                    <span>{{ block.token_before }} → {{ block.token_after }} Token</span>
-                    <div class="context-block-actions">
-                      <button type="button" class="context-open-original" @click="copyContextRef(block.ref_id)">
-                        {{ t('复制 ref', 'Copy ref') }}
-                      </button>
-                      <button type="button" class="context-open-original" @click="insertContextRef(block.ref_id)">
-                        {{ t('插入引用', 'Insert ref') }}
-                      </button>
-                      <button type="button" class="context-open-original primary" @click="openContextBlock(block.ref_id)">
-                        {{ selectedContextBlockRef === block.ref_id ? t('刷新原文', 'Reload original') : t('查看原文', 'View original') }}
-                      </button>
-                    </div>
-                  </div>
-                </article>
+                  <span class="task-overview-value">{{ section.count }}</span>
+                  <span>{{ section.label }}</span>
+                </button>
+              </div>
 
-                <section v-if="selectedContextBlock || selectedContextBlockLoading" class="context-original-panel">
-                  <div class="context-original-head">
-                    <div>
-                      <h4>{{ t('原文', 'Original text') }}</h4>
-                      <p>{{ selectedContextBlockRef }}</p>
+              <div v-if="taskPanelError" class="runtime-empty">{{ taskPanelError }}</div>
+              <div v-else class="task-content">
+                <section v-if="taskPanelSection === 'overview'" class="task-section">
+                  <article class="task-card task-status-card">
+                    <div class="task-card-head">
+                      <h4>{{ t('当前运行', 'Current run') }}</h4>
+                      <span class="task-pill" :class="{ live: loading }">{{ taskRunStatusLabel }}</span>
                     </div>
-                    <button type="button" class="workspace-chat-delete" @click="closeContextBlock">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M18 6 6 18"/>
-                        <path d="m6 6 12 12"/>
-                      </svg>
-                    </button>
-                  </div>
-                  <div v-if="selectedContextBlockLoading" class="runtime-empty">{{ t('加载原文中...', 'Loading original text...') }}</div>
-                  <template v-else-if="selectedContextBlock">
-                    <div v-if="selectedContextBlock.truncated" class="context-truncated">
-                      {{ t('原文较长，当前仅展示前 120000 字符。智能体可通过 retrieve_context 获取完整内容。', 'This original text is long; showing the first 120000 characters. The agent can retrieve the full content with retrieve_context.') }}
+                    <div class="task-status-grid">
+                      <div>
+                        <span>{{ t('会话', 'Session') }}</span>
+                        <strong>{{ runnerSessionId || '-' }}</strong>
+                      </div>
+                      <div>
+                        <span>{{ t('事件', 'Events') }}</span>
+                        <strong>{{ runtimeEvents.length }}</strong>
+                      </div>
                     </div>
-                    <pre class="context-original-text">{{ selectedContextBlock.original_text }}</pre>
-                  </template>
+                  </article>
+
+                  <article class="task-card">
+                    <div class="task-card-head">
+                      <h4>{{ t('计划', 'Plan') }}</h4>
+                      <span>{{ taskPlanItems.length }}</span>
+                    </div>
+                    <ol class="task-plan-list">
+                      <li v-for="item in taskPlanItems" :key="item.id" :class="item.status">
+                        <span class="task-plan-dot"></span>
+                        <div>
+                          <strong>{{ item.title }}</strong>
+                          <p>{{ item.detail }}</p>
+                        </div>
+                      </li>
+                    </ol>
+                  </article>
                 </section>
+
+                <section v-else-if="taskPanelSection === 'references'" class="task-section">
+                  <article class="task-card">
+                    <div class="task-card-head">
+                      <h4>{{ t('引用文件', 'References') }}</h4>
+                      <span>{{ taskReferenceItems.length }}</span>
+                    </div>
+                    <div v-if="!taskReferenceItems.length" class="task-empty-line">{{ t('本轮还没有引用文件或附件', 'No referenced files or attachments yet') }}</div>
+                    <div v-else class="task-list">
+                      <div v-for="item in taskReferenceItems" :key="item.id" class="task-list-row">
+                        <span class="task-kind">{{ item.kind }}</span>
+                        <div>
+                          <strong>{{ item.name }}</strong>
+                          <p>{{ item.path }}</p>
+                        </div>
+                        <button type="button" class="context-open-original" @click="copyTaskText(item.path)">{{ t('复制', 'Copy') }}</button>
+                      </div>
+                    </div>
+                  </article>
+                </section>
+
+                <section v-else-if="taskPanelSection === 'tools'" class="task-section">
+                  <article class="task-card">
+                    <div class="task-card-head">
+                      <h4>{{ t('工具输出', 'Tool output') }}</h4>
+                      <span>{{ taskToolEvents.length }}</span>
+                    </div>
+                    <div v-if="!taskToolEvents.length" class="task-empty-line">{{ t('当前任务还没有工具调用', 'No tool calls for this task yet') }}</div>
+                    <div v-else class="task-tool-timeline">
+                      <article v-for="event in taskToolEvents" :key="event.event_id" class="task-tool-event">
+                        <button type="button" class="task-tool-head" @click="toggleTaskEvent(event.event_id)">
+                          <span class="runtime-event-type">{{ formatRuntimeEventSummary(event) }}</span>
+                          <span>{{ event.event_type }}</span>
+                          <time>{{ formatTime(event.created_at) }}</time>
+                        </button>
+                        <pre v-if="expandedTaskEventIds.has(event.event_id) && formatRuntimeEventDetail(event)" class="runtime-event-detail">{{ formatRuntimeEventDetail(event) }}</pre>
+                      </article>
+                    </div>
+                  </article>
+                </section>
+
+                <section v-else-if="taskPanelSection === 'changes'" class="task-section">
+                  <article class="task-card">
+                    <div class="task-card-head">
+                      <h4>{{ t('改动', 'Changes') }}</h4>
+                      <span v-if="taskDiffLoading">{{ t('加载中', 'Loading') }}</span>
+                      <span v-else>{{ taskDiff?.files.length || 0 }}</span>
+                    </div>
+                    <div v-if="taskDiffLoading" class="task-empty-line">{{ t('正在读取 git diff...', 'Reading git diff...') }}</div>
+                    <div v-else-if="!taskDiff?.available" class="task-empty-line">{{ taskDiff?.reason || t('当前工作目录没有可用 git 信息', 'No git information is available for the workspace') }}</div>
+                    <template v-else>
+                      <div class="task-diff-meta">
+                        <span>{{ taskDiff.repo_root }}</span>
+                        <strong>{{ taskDiff.clean ? t('无改动', 'Clean') : t('有改动', 'Changed') }}</strong>
+                      </div>
+                      <div v-if="taskDiff.clean" class="task-empty-line">{{ t('当前工作目录没有未提交改动', 'No uncommitted changes in the current workspace') }}</div>
+                      <div v-else class="task-list">
+                        <div v-for="file in taskDiff.files" :key="file.path" class="task-list-item">
+                          <div class="task-list-row">
+                            <span class="task-kind">{{ file.status }}</span>
+                            <div>
+                              <strong>{{ file.path }}</strong>
+                              <p>{{ formatTaskDiffFileState(file) }}</p>
+                            </div>
+                            <button type="button" class="context-open-original" @click="toggleTaskFile(file.path)">
+                              {{ expandedTaskFilePaths.has(file.path) ? t('收起', 'Collapse') : t('展开', 'Expand') }}
+                            </button>
+                          </div>
+                          <pre v-if="expandedTaskFilePaths.has(file.path)" class="task-diff-stat">{{ file.diff || t('此文件没有可展示的 diff 预览', 'No diff preview is available for this file') }}</pre>
+                        </div>
+                      </div>
+                      <pre v-if="taskDiff.cached_stat || taskDiff.stat" class="task-diff-stat">{{ [taskDiff.cached_stat, taskDiff.stat].filter(Boolean).join('\n\n') }}</pre>
+                    </template>
+                  </article>
+                </section>
+
               </div>
             </div>
           </section>
@@ -1230,10 +1221,16 @@ import WorkspaceManager from '@/views/WorkspaceManager.vue'
 import SandboxPanel from '@/components/SandboxPanel.vue'
 import { useWorkspaceManager } from '@/composables/useWorkspaceManager'
 import { useMessageQueue, type QueuedComposerMessage } from '@/composables/useMessageQueue'
+import {
+  collectWorkspaceSourcePaths,
+  compactWorkspaceSourceSelection,
+  isSameOrDescendantPath,
+  normalizeWorkspaceSourceSelection as normalizeWorkspaceSourceSelectionModel,
+} from '@/models/workspaceSelection'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
-import type { AgentConfig, AgentEvent, Chat, ChatAttachment, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, Message, RuntimeCapabilities, RuntimeEvent, RuntimeThread, RuntimeTurn, ThinkingStep, WorkspaceSource, WorkspaceSourceNode, WorkspaceSourceState } from '@/types'
+import type { AgentConfig, AgentEvent, Chat, ChatAttachment, ContextCompactionStatus, Message, RuntimeCapabilities, RuntimeEvent, RuntimeThread, TaskDiffFile, TaskDiffResponse, ThinkingStep, WorkspaceSource, WorkspaceSourceState } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
@@ -1244,7 +1241,8 @@ const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
 // 褰撳墠瑙嗗浘
 type WorkspacePanel = '' | 'browser' | 'runtime' | 'sandbox'
-type RuntimePanelTab = 'chats' | 'runtime' | 'context'
+type RuntimePanelTab = 'chats' | 'task'
+type TaskPanelSection = 'overview' | 'references' | 'tools' | 'changes'
 type ToolAccessMode = 'default' | 'full'
 
 const activeWorkspacePanel = ref<WorkspacePanel>('')
@@ -1541,17 +1539,123 @@ const skillsEnabled = ref(true)  // 技能开关状态
 const messagesContainer = ref<HTMLElement | null>(null)
 const agentDockRef = ref<HTMLElement | null>(null)
 const runtimeThread = ref<RuntimeThread | null>(null)
-const runtimeTurns = ref<RuntimeTurn[]>([])
 const runtimeEvents = ref<RuntimeEvent[]>([])
 const runtimeLoading = ref(false)
 const runtimeError = ref('')
-const contextBlocks = ref<ContextBlockSummary[]>([])
-const contextBlocksLoading = ref(false)
-const contextBlocksError = ref('')
-const selectedContextBlockRef = ref('')
-const selectedContextBlock = ref<ContextBlockDetail | null>(null)
-const selectedContextBlockLoading = ref(false)
+const taskPanelSection = ref<TaskPanelSection>('overview')
+const taskDiff = ref<TaskDiffResponse | null>(null)
+const taskDiffLoading = ref(false)
+const taskPanelError = ref('')
+const expandedTaskEventIds = ref<Set<string>>(new Set())
+const expandedTaskFilePaths = ref<Set<string>>(new Set())
 let unlistenDesktopFileDrops: (() => void) | null = null
+
+interface TaskPlanItem {
+  id: string
+  title: string
+  detail: string
+  status: 'done' | 'active' | 'pending' | 'error'
+}
+
+interface TaskReferenceItem {
+  id: string
+  kind: string
+  name: string
+  path: string
+}
+
+const taskToolEvents = computed(() =>
+  runtimeEvents.value.filter(event => ['tool_call', 'tool_result', 'error'].includes(event.event_type)),
+)
+
+const taskReferenceItems = computed<TaskReferenceItem[]>(() => {
+  const items: TaskReferenceItem[] = []
+  const seen = new Set<string>()
+  const push = (kind: string, name: string, path: string) => {
+    const key = `${kind}:${path}`
+    if (!path || seen.has(key)) return
+    seen.add(key)
+    items.push({ id: key, kind, name: name || path, path })
+  }
+
+  for (const path of mergedSelectedWorkspacePaths()) {
+    push(t('路径', 'Path'), path.split(/[\\/]/).filter(Boolean).pop() || path, path)
+  }
+  for (const source of workspaceSources.value) {
+    if (selectedWorkspacePaths.value.includes(source.path)) {
+      push(formatWorkspaceSourceKind(source.type), source.name, source.path)
+    }
+  }
+  for (const attachment of pendingAttachments.value) {
+    push(t('附件', 'Attachment'), attachment.name, `${attachment.name}${attachment.size ? ` (${formatFileSize(attachment.size)})` : ''}`)
+  }
+  return items
+})
+
+const taskRunStatusLabel = computed(() => {
+  if (isCancellingRun.value) return t('停止中', 'Stopping')
+  if (loading.value) return t('运行中', 'Running')
+  if (runtimeThread.value?.status) return runtimeThread.value.status
+  return t('空闲', 'Idle')
+})
+
+const taskPlanItems = computed<TaskPlanItem[]>(() => {
+  const items: TaskPlanItem[] = []
+  const lastUserMessage = [...messages.value].reverse().find(message => message.role === 'user')
+  items.push({
+    id: 'input',
+    title: t('接收任务', 'Receive request'),
+    detail: lastUserMessage?.content || t('等待用户发送任务', 'Waiting for a user request'),
+    status: lastUserMessage ? 'done' : 'pending',
+  })
+  items.push({
+    id: 'context',
+    title: t('准备上下文', 'Prepare context'),
+    detail: taskReferenceItems.value.length
+      ? t(`已引用 ${taskReferenceItems.value.length} 项资料`, `${taskReferenceItems.value.length} references attached`)
+      : t('未选择额外资料', 'No extra references selected'),
+    status: lastUserMessage ? 'done' : 'pending',
+  })
+  const hasToolActivity = taskToolEvents.value.length > 0
+  items.push({
+    id: 'tools',
+    title: t('执行工具', 'Run tools'),
+    detail: hasToolActivity
+      ? t(`记录到 ${taskToolEvents.value.length} 条工具事件`, `${taskToolEvents.value.length} tool events recorded`)
+      : t('还没有工具调用', 'No tool calls yet'),
+    status: hasToolActivity ? (loading.value ? 'active' : 'done') : (loading.value ? 'active' : 'pending'),
+  })
+  const hasError = runtimeEvents.value.some(event => event.event_type === 'error')
+  items.push({
+    id: 'result',
+    title: t('生成结果', 'Produce result'),
+    detail: hasError
+      ? t('运行中出现错误', 'The run reported an error')
+      : loading.value
+        ? t('正在生成回复', 'Generating response')
+        : t('当前没有进行中的运行', 'No active run'),
+    status: hasError ? 'error' : loading.value ? 'active' : runtimeEvents.value.length ? 'done' : 'pending',
+  })
+  return items
+})
+
+const taskSections = computed(() => [
+  { id: 'overview' as const, label: t('计划', 'Plan'), count: taskPlanItems.value.length },
+  { id: 'references' as const, label: t('引用', 'Refs'), count: taskReferenceItems.value.length },
+  { id: 'tools' as const, label: t('工具', 'Tools'), count: taskToolEvents.value.length },
+  { id: 'changes' as const, label: t('改动', 'Diff'), count: taskDiff.value?.files.length || 0 },
+])
+
+const taskOverviewTotal = computed(() =>
+  taskPlanItems.value.length +
+  taskReferenceItems.value.length +
+  taskToolEvents.value.length +
+  (taskDiff.value?.files.length || 0),
+)
+
+const taskPanelLoading = computed(() =>
+  runtimeLoading.value || taskDiffLoading.value,
+)
 
 // 缈昏瘧鍑芥暟
 function t(zh: string, en: string): string {
@@ -1673,9 +1777,53 @@ function formatChatDate(timestamp?: string): string {
   })
 }
 
-function formatContextBlockKind(kind?: string): string {
-  if (kind === 'tool_output') return t('工具输出', 'Tool output')
-  return t('会话', 'Chat')
+function formatFileSize(bytes?: number | null): string {
+  if (!bytes && bytes !== 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatWorkspaceSourceKind(kind?: string): string {
+  if (kind === 'directory') return t('目录', 'Folder')
+  if (kind === 'web') return 'Web'
+  return t('文件', 'File')
+}
+
+function formatTaskDiffFileState(file: TaskDiffFile): string {
+  const parts = []
+  if (file.staged) parts.push(t('已暂存', 'staged'))
+  if (file.unstaged) parts.push(t('未暂存', 'unstaged'))
+  return parts.join(' / ') || t('已修改', 'changed')
+}
+
+function toggleTaskEvent(eventId: string): void {
+  const expanded = new Set(expandedTaskEventIds.value)
+  if (expanded.has(eventId)) {
+    expanded.delete(eventId)
+  } else {
+    expanded.add(eventId)
+  }
+  expandedTaskEventIds.value = expanded
+}
+
+function toggleTaskFile(path: string): void {
+  const expanded = new Set(expandedTaskFilePaths.value)
+  if (expanded.has(path)) {
+    expanded.delete(path)
+  } else {
+    expanded.add(path)
+  }
+  expandedTaskFilePaths.value = expanded
+}
+
+async function copyTaskText(text: string): Promise<void> {
+  if (!text) return
+  try {
+    await navigator.clipboard?.writeText(text)
+  } catch (error) {
+    console.warn('Failed to copy task panel text:', error)
+  }
 }
 
 // 娓叉煋 Markdown
@@ -1759,11 +1907,8 @@ async function switchAgentSession(agentId: string) {
   }
   await loadChatHistory()
   resetRuntimeReplay()
-  resetContextBlocks()
-  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
-    await loadRuntimeReplay()
-  } else if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'context') {
-    await loadContextBlocks()
+  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'task') {
+    await refreshTaskPanel()
   }
   await nextTick()
   scrollSelectedAgentIntoView()
@@ -1882,17 +2027,8 @@ function saveMessages() {
 
 function resetRuntimeReplay() {
   runtimeThread.value = null
-  runtimeTurns.value = []
   runtimeEvents.value = []
   runtimeError.value = ''
-}
-
-function resetContextBlocks() {
-  contextBlocks.value = []
-  contextBlocksError.value = ''
-  selectedContextBlockRef.value = ''
-  selectedContextBlock.value = null
-  selectedContextBlockLoading.value = false
 }
 
 async function loadRuntimeCapabilities() {
@@ -1943,11 +2079,7 @@ async function switchRuntimePanelTab(tab: RuntimePanelTab) {
     await chatStore.loadChats()
     return
   }
-  if (tab === 'runtime') {
-    await loadRuntimeReplay()
-    return
-  }
-  await loadContextBlocks()
+  await refreshTaskPanel()
 }
 
 async function openManagedChat(chat: Chat) {
@@ -1963,14 +2095,11 @@ async function openManagedChat(chat: Chat) {
   pendingAttachments.value = []
   inputMessage.value = ''
   resetRuntimeReplay()
-  resetContextBlocks()
 
   await chatStore.selectChat(chat.id)
   await loadChatHistory()
-  if (runtimePanelTab.value === 'runtime') {
-    await loadRuntimeReplay()
-  } else if (runtimePanelTab.value === 'context') {
-    await loadContextBlocks()
+  if (runtimePanelTab.value === 'task') {
+    await refreshTaskPanel()
   }
 }
 
@@ -1984,7 +2113,6 @@ async function deleteManagedChat(chat: Chat) {
     messages.value = []
     pendingAttachments.value = []
     resetRuntimeReplay()
-    resetContextBlocks()
     if (selectedAgentId.value) {
       localStorage.removeItem(`session_${selectedAgentId.value}`)
       await createOrGetSession()
@@ -2028,7 +2156,6 @@ async function clearAllManagedChats() {
     messages.value = []
     pendingAttachments.value = []
     resetRuntimeReplay()
-    resetContextBlocks()
     if (selectedAgentId.value) {
       localStorage.removeItem(`session_${selectedAgentId.value}`)
       await createOrGetSession()
@@ -2050,11 +2177,7 @@ async function loadRuntimeReplay() {
   try {
     const thread = await api.getRuntimeThreadBySession(runnerSessionId.value)
     runtimeThread.value = thread
-    const [turns, events] = await Promise.all([
-      api.getRuntimeTurns(thread.thread_id),
-      api.getRuntimeEvents(thread.thread_id, 0),
-    ])
-    runtimeTurns.value = turns
+    const events = await api.getRuntimeEvents(thread.thread_id, 0)
     runtimeEvents.value = events
   } catch (error) {
     resetRuntimeReplay()
@@ -2067,82 +2190,24 @@ async function loadRuntimeReplay() {
   }
 }
 
-async function loadContextBlocks() {
-  const sessionId = runnerSessionId.value
-  if (!sessionId) {
-    resetContextBlocks()
-    return
-  }
-
-  contextBlocksLoading.value = true
-  contextBlocksError.value = ''
+async function loadTaskDiff() {
+  taskDiffLoading.value = true
   try {
-    const blocks = await api.listChatContextBlocks(sessionId, selectedAgentId.value || 'main')
-    if (runnerSessionId.value === sessionId) {
-      contextBlocks.value = blocks
-      if (selectedContextBlockRef.value && !blocks.some(block => block.ref_id === selectedContextBlockRef.value)) {
-        closeContextBlock()
-      }
-    }
+    taskDiff.value = await api.getRuntimeTaskDiff()
   } catch (error) {
-    contextBlocks.value = []
-    selectedContextBlock.value = null
-    selectedContextBlockRef.value = ''
-    const message = error instanceof Error ? error.message : String(error)
-    if (!message.includes('404')) {
-      contextBlocksError.value = message
-    }
+    taskDiff.value = null
+    taskPanelError.value = error instanceof Error ? error.message : String(error)
   } finally {
-    contextBlocksLoading.value = false
+    taskDiffLoading.value = false
   }
 }
 
-async function openContextBlock(refId: string) {
-  const sessionId = runnerSessionId.value
-  if (!sessionId || !refId) return
-
-  selectedContextBlockRef.value = refId
-  selectedContextBlockLoading.value = true
-  selectedContextBlock.value = null
-  try {
-    const block = await api.getChatContextBlock(sessionId, refId, selectedAgentId.value || 'main')
-    if (runnerSessionId.value === sessionId && selectedContextBlockRef.value === refId) {
-      selectedContextBlock.value = block
-    }
-  } catch (error) {
-    contextBlocksError.value = error instanceof Error ? error.message : String(error)
-  } finally {
-    selectedContextBlockLoading.value = false
-  }
-}
-
-async function copyContextRef(refId: string) {
-  if (!refId) return
-  try {
-    await navigator.clipboard?.writeText(refId)
-  } catch (error) {
-    console.warn('Failed to copy context ref:', error)
-  }
-}
-
-function insertContextRef(refId: string) {
-  if (!refId) return
-  const line = t(
-    `请读取这个上下文原文并继续分析：${refId}`,
-    `Please retrieve this context block and continue the analysis: ${refId}`,
-  )
-  inputMessage.value = inputMessage.value.trim()
-    ? `${inputMessage.value}\n${line}`
-    : line
-  nextTick(() => {
-    activeComposerTextarea?.focus()
-  })
-}
-
-function closeContextBlock() {
-  selectedContextBlockRef.value = ''
-  selectedContextBlock.value = null
-  selectedContextBlockLoading.value = false
+async function refreshTaskPanel() {
+  taskPanelError.value = ''
+  await Promise.all([
+    loadRuntimeReplay(),
+    loadTaskDiff(),
+  ])
 }
 
 function syncRuntimeEventFromStream(event: AgentEvent) {
@@ -2160,7 +2225,6 @@ function syncRuntimeEventFromStream(event: AgentEvent) {
       updated_at: event.created_at || new Date().toISOString(),
       metadata: {},
     }
-    runtimeTurns.value = []
     runtimeEvents.value = []
   } else {
     runtimeThread.value.latest_event_seq = Math.max(runtimeThread.value.latest_event_seq, event.seq)
@@ -2474,10 +2538,10 @@ async function startNewChat() {
   pendingAttachments.value = []
   inputMessage.value = ''
   resetRuntimeReplay()
-  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
-    await loadRuntimeReplay()
-  } else if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
+  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
     await chatStore.loadChats()
+  } else if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'task') {
+    await refreshTaskPanel()
   }
   scrollToBottom()
 }
@@ -2549,12 +2613,7 @@ async function loadWorkspaceSourceState() {
   try {
     const state = await api.getWorkspaceSourcesState()
     workspaceSources.value = state.sources || []
-    const availablePaths = new Set<string>()
-    const collect = (source: WorkspaceSourceNode) => {
-      availablePaths.add(source.path)
-      for (const child of source.children || []) collect(child)
-    }
-    for (const source of workspaceSources.value) collect(source)
+    const availablePaths = collectWorkspaceSourcePaths(workspaceSources.value)
     selectedWorkspacePaths.value = normalizeWorkspaceSourceSelection(
       (state.selected_paths || []).filter(path => availablePaths.has(path)),
     )
@@ -2651,46 +2710,11 @@ async function chooseWorkspaceDirectory() {
 }
 
 function normalizeWorkspaceSourceSelection(paths: Iterable<string>): string[] {
-  const selected = new Set(paths)
-  const available = new Set<string>()
-
-  const visit = (source: WorkspaceSourceNode): boolean => {
-    available.add(source.path)
-    const children = source.children || []
-    if (!children.length) {
-      return selected.has(source.path)
-    }
-
-    const allChildrenSelected = children.map(visit).every(Boolean)
-    if (allChildrenSelected) {
-      selected.add(source.path)
-      return true
-    }
-
-    selected.delete(source.path)
-    return false
-  }
-
-  workspaceSources.value.forEach(visit)
-  return Array.from(selected).filter(path => available.has(path))
+  return normalizeWorkspaceSourceSelectionModel(workspaceSources.value, paths)
 }
 
 function compactSelectedWorkspacePaths(): string[] {
-  const selected = new Set(selectedWorkspacePaths.value)
-  const compacted: string[] = []
-
-  const visit = (source: WorkspaceSourceNode, ancestorSelected = false) => {
-    const isSelected = selected.has(source.path)
-    if (isSelected && !ancestorSelected) {
-      compacted.push(source.path)
-    }
-    for (const child of source.children || []) {
-      visit(child, ancestorSelected || isSelected)
-    }
-  }
-
-  workspaceSources.value.forEach(source => visit(source))
-  return compacted
+  return compactWorkspaceSourceSelection(workspaceSources.value, selectedWorkspacePaths.value)
 }
 
 function mergedWorkspacePayload(): WorkspaceSource[] {
@@ -2726,13 +2750,7 @@ function mergedSelectedWorkspacePaths(): string[] {
 }
 
 function isPathWithinRoot(path: string, root: string): boolean {
-  const normalizedPathValue = normalizePathForCompare(path)
-  const normalizedRoot = normalizePathForCompare(root)
-  return normalizedPathValue === normalizedRoot || normalizedPathValue.startsWith(`${normalizedRoot}/`)
-}
-
-function normalizePathForCompare(path: string): string {
-  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  return isSameOrDescendantPath(path, root)
 }
 
 function openWebSourceInput() {
@@ -3003,8 +3021,8 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
     await api.chat(sendSessionId, userMessage, (event) => {
       console.log('[Iteration Debug] Received event:', event)
       syncRuntimeEventFromStream(event)
-      if (event.event === 'context_compaction' && activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'context') {
-        void loadContextBlocks()
+      if (event.event === 'context_compaction') {
+        void refreshContextStatus()
       }
 
       if (event.event === 'message' && event.content) {
@@ -3119,8 +3137,8 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
       }
     }, attachments, workspacePayload, selectedWorkspacePayload, toolAccessMode.value, sendAgentId)
 
-    if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'runtime') {
-      await loadRuntimeReplay()
+    if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'task') {
+      await refreshTaskPanel()
     }
     
     assistantMessage.isLoading = false
@@ -3156,8 +3174,8 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
     saveMessages()
     if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'chats') {
       await chatStore.loadChats()
-    } else if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'context') {
-      await loadContextBlocks()
+    } else if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'task') {
+      await refreshTaskPanel()
     }
     await refreshContextStatus()
     await sendNextQueuedMessage()
@@ -3198,9 +3216,8 @@ async function clearChat() {
     }
   }
   await refreshContextStatus()
-  resetContextBlocks()
-  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'context') {
-    await loadContextBlocks()
+  if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'task') {
+    await refreshTaskPanel()
   }
 }
 
@@ -6176,7 +6193,7 @@ onUnmounted(() => {
 .workspace-tabs {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   padding: 10px 12px;
   background: var(--glass-bg);
@@ -6400,33 +6417,6 @@ onUnmounted(() => {
   height: 15px;
 }
 
-.runtime-meta {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  padding: 12px;
-  border-bottom: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.runtime-meta div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.runtime-meta strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .runtime-empty {
   margin: 16px;
   padding: 18px;
@@ -6438,91 +6428,6 @@ onUnmounted(() => {
   text-align: center;
 }
 
-.runtime-content {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.runtime-turns {
-  display: flex;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-color);
-  overflow-x: auto;
-}
-
-.runtime-turn {
-  min-width: 180px;
-  max-width: 260px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.58);
-}
-
-.runtime-turn-status {
-  flex: 0 0 auto;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: rgba(47, 110, 244, 0.12);
-  color: #245bd2;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.runtime-turn-input {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.runtime-events {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  overflow-y: auto;
-}
-
-.runtime-event {
-  border: 1px solid var(--border-color);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.66);
-  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.06);
-  overflow: hidden;
-}
-
-.runtime-event-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 10px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.runtime-event-head time {
-  margin-left: auto;
-  flex: 0 0 auto;
-}
-
-.runtime-seq {
-  color: #245bd2;
-  font-weight: 750;
-}
-
 .runtime-event-type {
   min-width: 0;
   overflow: hidden;
@@ -6530,15 +6435,6 @@ onUnmounted(() => {
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.runtime-event-summary {
-  margin: 0;
-  padding: 10px;
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.45;
-  word-break: break-word;
 }
 
 .runtime-event-detail {
@@ -6556,126 +6452,6 @@ onUnmounted(() => {
   word-break: break-word;
 }
 
-.context-workspace {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.context-meta {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  padding: 12px;
-  border-bottom: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.context-meta div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.context-meta strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.context-content {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  overflow-y: auto;
-}
-
-.context-block-card {
-  border: 1px solid var(--border-color);
-  border-radius: 14px;
-  background: var(--glass-bg-strong);
-  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.05);
-  overflow: hidden;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
-}
-
-.context-block-card:hover {
-  transform: translateY(-1px);
-}
-
-.context-block-card.active {
-  border-color: rgba(47, 110, 244, 0.32);
-  box-shadow: inset 3px 0 0 var(--primary-color), 0 10px 24px rgba(47, 110, 244, 0.08);
-}
-
-.context-block-head,
-.context-block-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px;
-}
-
-.context-block-head {
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-}
-
-.context-block-head time,
-.context-block-foot span {
-  flex: 0 0 auto;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.context-block-actions {
-  min-width: 0;
-  display: flex;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.context-kind {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 750;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.context-ref {
-  margin: 10px 10px 0;
-  overflow: hidden;
-  color: #245bd2;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.context-preview {
-  max-height: 132px;
-  margin: 8px 10px 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.5;
-  word-break: break-word;
-}
-
 .context-open-original {
   flex: 0 0 auto;
   min-height: 30px;
@@ -6690,76 +6466,299 @@ onUnmounted(() => {
   transition: all 0.16s ease;
 }
 
-.context-open-original.primary {
-  background: rgba(47, 110, 244, 0.13);
-}
-
 .context-open-original:hover {
   border-color: rgba(47, 110, 244, 0.42);
   background: rgba(47, 110, 244, 0.14);
 }
 
-.context-original-panel {
-  border: 1px solid rgba(47, 110, 244, 0.24);
-  border-radius: 14px;
-  background: var(--glass-bg-strong);
-  box-shadow: 0 14px 32px rgba(47, 110, 244, 0.08);
-  overflow: hidden;
+.task-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-.context-original-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+.task-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border-color);
 }
 
-.context-original-head div {
+.task-overview-tile {
+  min-width: 0;
+  min-height: 58px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.task-overview-tile:hover,
+.task-overview-tile.active {
+  border-color: rgba(47, 110, 244, 0.34);
+  background: var(--glass-bg-strong);
+  color: var(--primary-color);
+}
+
+.task-overview-tile.active {
+  box-shadow: inset 0 -2px 0 var(--primary-color);
+}
+
+.task-overview-value {
+  color: var(--text-primary);
+  font-size: 18px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.task-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.task-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.task-card {
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--glass-bg-strong);
+  box-shadow: 0 10px 24px rgba(17, 24, 39, 0.05);
+  overflow: hidden;
+}
+
+.task-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.task-card-head h4 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.task-card-head span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.task-pill {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(107, 114, 128, 0.1);
+  color: var(--text-secondary) !important;
+  font-weight: 700;
+}
+
+.task-pill.live {
+  background: rgba(34, 197, 94, 0.12);
+  color: #15803d !important;
+}
+
+.task-status-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 12px;
+}
+
+.task-status-grid div,
+.task-diff-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   min-width: 0;
 }
 
-.context-original-head h4 {
-  margin: 0 0 3px;
-  color: var(--text-primary);
-  font-size: 14px;
-}
-
-.context-original-head p {
-  margin: 0;
+.task-status-grid span,
+.task-diff-meta span {
+  min-width: 0;
   overflow: hidden;
-  color: var(--text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
+  color: var(--text-secondary);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.context-truncated {
-  margin: 10px 12px 0;
-  padding: 9px 10px;
-  border: 1px solid rgba(245, 158, 11, 0.22);
-  border-radius: 10px;
-  background: rgba(245, 158, 11, 0.08);
-  color: #a16207;
+.task-status-grid strong,
+.task-diff-meta strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
   font-size: 12px;
-  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.context-original-text {
-  max-height: 340px;
-  margin: 10px 12px 12px;
+.task-plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 6px 12px 12px;
+  list-style: none;
+}
+
+.task-plan-list li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.task-plan-dot {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.task-plan-list li.done .task-plan-dot {
+  background: #16a34a;
+}
+
+.task-plan-list li.active .task-plan-dot {
+  background: var(--primary-color);
+}
+
+.task-plan-list li.error .task-plan-dot {
+  background: #dc2626;
+}
+
+.task-plan-list strong,
+.task-list-row strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-plan-list p,
+.task-list-row p {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-empty-line {
+  margin: 12px;
   padding: 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+  text-align: center;
+}
+
+.task-list,
+.task-tool-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.task-list-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.task-list-item {
+  min-width: 0;
+}
+
+.task-kind {
+  max-width: 86px;
+  overflow: hidden;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(47, 110, 244, 0.1);
+  color: #245bd2;
+  font-size: 11px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-tool-event {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
+  overflow: hidden;
+}
+
+.task-tool-head {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.task-tool-head time,
+.task-tool-head span:not(.runtime-event-type) {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.task-diff-meta {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.task-diff-stat {
+  max-height: 220px;
+  margin: 0 12px 12px;
+  padding: 10px;
   overflow: auto;
   border-radius: 10px;
   background: rgba(17, 24, 39, 0.06);
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.45;
   white-space: pre-wrap;
-  word-break: break-word;
 }
 
 :global(body.workspace-resizing) {

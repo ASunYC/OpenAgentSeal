@@ -218,6 +218,26 @@ export interface RuntimeEvent {
   metadata?: Record<string, any>
 }
 
+export interface TaskDiffFile {
+  path: string
+  status: string
+  staged: boolean
+  unstaged: boolean
+  diff: string
+}
+
+export interface TaskDiffResponse {
+  available: boolean
+  clean: boolean
+  workspace: string
+  repo_root: string
+  reason: string
+  files: TaskDiffFile[]
+  stat: string
+  cached_stat: string
+  updated_at: string
+}
+
 // 大模型配置
 export interface ModelConfig {
   id: string

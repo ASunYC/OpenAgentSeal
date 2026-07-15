@@ -6,7 +6,8 @@
                 "-y",
                 "@next-ai-drawio/mcp-server@latest"
             ],
-            "autoApprove": []
+            "autoApprove": [],
+            "connect_timeout": 30
         },
         "pencil": {
             "description": "Pencil - Visual design MCP server",

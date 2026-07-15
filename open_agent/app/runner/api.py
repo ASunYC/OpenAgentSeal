@@ -14,7 +14,9 @@ import json
 import logging
 import base64
 import mimetypes
+import subprocess
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
@@ -110,6 +112,26 @@ class WorkspaceSourceState(BaseModel):
     expanded_paths: List[str] = Field(default_factory=list)
 
 
+class TaskDiffFile(BaseModel):
+    path: str
+    status: str
+    staged: bool = False
+    unstaged: bool = False
+    diff: str = ""
+
+
+class TaskDiffResponse(BaseModel):
+    available: bool = False
+    clean: bool = True
+    workspace: str = ""
+    repo_root: str = ""
+    reason: str = ""
+    files: List[TaskDiffFile] = Field(default_factory=list)
+    stat: str = ""
+    cached_stat: str = ""
+    updated_at: str = ""
+
+
 class PersistMessagesRequest(BaseModel):
     messages: List[dict] = []
 
@@ -133,16 +155,134 @@ def _workspace_state_path() -> Path:
     return get_data_dir() / "workspace_sources.json"
 
 
+def _configured_workspace_path() -> Path:
+    try:
+        from open_agent.user_config import get_user_config
+
+        raw_workspace = str(get_user_config().get_settings().workspace or "").strip()
+    except Exception:
+        raw_workspace = ""
+
+    path = Path(raw_workspace).expanduser() if raw_workspace else Path.cwd()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
+
+
+def _run_git(args: list[str], cwd: Path, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _parse_git_status_line(line: str) -> TaskDiffFile | None:
+    if len(line) < 4:
+        return None
+    status = line[:2]
+    path = line[3:].strip()
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1].strip()
+    return TaskDiffFile(
+        path=path,
+        status=status,
+        staged=status[0] not in (" ", "?"),
+        unstaged=status[1] not in (" ", "?") or status.startswith("??"),
+    )
+
+
+def _task_diff_snapshot() -> TaskDiffResponse:
+    workspace = _configured_workspace_path()
+    updated_at = datetime.now(timezone.utc).isoformat()
+    if not workspace.exists():
+        return TaskDiffResponse(
+            available=False,
+            workspace=str(workspace),
+            reason="workspace does not exist",
+            updated_at=updated_at,
+        )
+
+    try:
+        root_result = _run_git(["rev-parse", "--show-toplevel"], workspace)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return TaskDiffResponse(
+            available=False,
+            workspace=str(workspace),
+            reason=str(exc),
+            updated_at=updated_at,
+        )
+
+    if root_result.returncode != 0:
+        return TaskDiffResponse(
+            available=False,
+            workspace=str(workspace),
+            reason=(root_result.stderr or "not a git repository").strip(),
+            updated_at=updated_at,
+        )
+
+    repo_root = Path(root_result.stdout.strip() or workspace)
+    status_result = _run_git(["status", "--short"], repo_root)
+    diff_stat = _run_git(["diff", "--stat"], repo_root)
+    cached_stat = _run_git(["diff", "--cached", "--stat"], repo_root)
+    files = [
+        item
+        for item in (_parse_git_status_line(line) for line in status_result.stdout.splitlines())
+        if item is not None
+    ]
+    for item in files[:30]:
+        if not item.path or item.status.startswith("??"):
+            continue
+        diff_parts: list[str] = []
+        if item.staged:
+            cached_file_diff = _run_git(["diff", "--cached", "--", item.path], repo_root)
+            cached_stdout = cached_file_diff.stdout or ""
+            if cached_stdout.strip():
+                diff_parts.append(cached_stdout.strip())
+        if item.unstaged:
+            file_diff = _run_git(["diff", "--", item.path], repo_root)
+            stdout = file_diff.stdout or ""
+            if stdout.strip():
+                diff_parts.append(stdout.strip())
+        item.diff = "\n\n".join(diff_parts)[:12000]
+    return TaskDiffResponse(
+        available=True,
+        clean=len(files) == 0,
+        workspace=str(workspace),
+        repo_root=str(repo_root),
+        files=files,
+        stat=diff_stat.stdout.strip(),
+        cached_stat=cached_stat.stdout.strip(),
+        updated_at=updated_at,
+    )
+
+
 def _chat_manager_for_profile(profile_id: str | None):
     return get_chat_manager(None if not profile_id or profile_id == "main" else profile_id)
 
 
 def _sanitize_workspace_state(state: WorkspaceSourceState) -> WorkspaceSourceState:
-    available_paths = {
-        str(source.get("path"))
-        for source in state.sources
-        if isinstance(source, dict) and source.get("path")
-    }
+    available_paths: set[str] = set()
+
+    def collect_paths(source: dict) -> None:
+        raw_path = source.get("path")
+        if raw_path:
+            available_paths.add(str(raw_path))
+        children = source.get("children")
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    collect_paths(child)
+
+    for source in state.sources:
+        if isinstance(source, dict):
+            collect_paths(source)
+
     return WorkspaceSourceState(
         sources=state.sources[:50],
         selected_paths=[path for path in state.selected_paths if path in available_paths],
@@ -607,8 +747,14 @@ async def list_profile_runtime_events(
         events = []
         for thread in threads:
             events.extend(control_plane.list_runtime_events(thread["thread_id"], limit=limit))
-        events = sorted(events, key=lambda item: item.get("created_at", ""))[-limit:]
+    events = sorted(events, key=lambda item: item.get("created_at", ""))[-limit:]
     return {"profile_id": profile_id, "events": events}
+
+
+@router.get("/runtime/task-diff")
+async def get_runtime_task_diff() -> dict:
+    """Return a read-only git diff snapshot for the configured workspace."""
+    return _task_diff_snapshot().model_dump()
 
 
 def _workspace_source_from_path(path: Path) -> dict:

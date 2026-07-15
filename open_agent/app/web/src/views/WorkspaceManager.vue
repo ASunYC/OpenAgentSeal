@@ -204,7 +204,7 @@
             <input
               type="checkbox"
               :checked="selectionState(ws.id, item.file) === 'checked'"
-              :indeterminate="selectionState(ws.id, item.file) === 'mixed'"
+              :indeterminate.prop="selectionState(ws.id, item.file) === 'mixed'"
               :aria-checked="selectionState(ws.id, item.file) === 'mixed' ? 'mixed' : selectionState(ws.id, item.file) === 'checked'"
               @click.stop
               @change="onFileCheckboxChange($event, ws.id, item.file)"
@@ -298,6 +298,13 @@ import { ref, onMounted, computed } from 'vue'
 import type { FileEntry } from '@/types'
 import { workspaceApi } from '@/api'
 import { useWorkspaceManager } from '@/composables/useWorkspaceManager'
+import {
+  deselectWorkspaceFilePath,
+  selectWorkspaceFilePath,
+  workspaceCacheKey,
+  workspaceFileSelectionState,
+  type WorkspaceSelectionState,
+} from '@/models/workspaceSelection'
 
 defineEmits<{
   (event: 'choose-files'): void
@@ -371,7 +378,7 @@ function toggleWorkspaceExpand(wsId: string) {
 }
 
 function cacheKey(wsId: string, path = ''): string {
-  return path ? `${wsId}:${path}` : wsId
+  return workspaceCacheKey(wsId, path)
 }
 
 async function loadWorkspaceFiles(wsId: string, path = '') {
@@ -423,145 +430,34 @@ function workspaceRoot(wsId: string): string {
   return workspaces.value.find(ws => ws.id === wsId)?.path || ''
 }
 
-function absoluteWorkspacePath(wsId: string, relativePath: string): string {
-  const root = workspaceRoot(wsId).replace(/[\\/]+$/, '')
-  const rel = relativePath.replace(/^[\\/]+/, '').replace(/\//g, '\\')
-  if (!root) return relativePath
-  return rel ? `${root}\\${rel}` : root
-}
-
-function normalizedPath(path: string): string {
-  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-}
-
-function isSameOrDescendantPath(candidate: string, root: string): boolean {
-  const normalizedCandidate = normalizedPath(candidate)
-  const normalizedRoot = normalizedPath(root)
-  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`)
-}
-
-function loadedChildren(wsId: string, relativePath: string): FileEntry[] {
-  return workspaceFiles.value[cacheKey(wsId, relativePath)] || []
-}
-
-function loadedDescendantSelectionPaths(wsId: string, relativePath: string): string[] {
-  const result: string[] = []
-  const append = (path: string) => {
-    for (const child of loadedChildren(wsId, path)) {
-      const childSelectionPath = absoluteWorkspacePath(wsId, child.path)
-      result.push(childSelectionPath)
-      if (child.is_dir) append(child.path)
-    }
-  }
-  append(relativePath)
-  return result
-}
-
-function selectedAncestor(path: string): string {
-  const normalized = normalizedPath(path)
-  let best = ''
-  for (const selected of selectedPaths.value) {
-    const normalizedSelected = normalizedPath(selected)
-    if (
-      normalized !== normalizedSelected &&
-      normalized.startsWith(`${normalizedSelected}/`) &&
-      normalizedSelected.length > best.length
-    ) {
-      best = selected
-    }
-  }
-  return best
-}
-
-function addLoadedSelectionExcept(
-  selected: Set<string>,
-  wsId: string,
-  file: FileEntry,
-  excludedPath: string,
-) {
-  const fileSelectionPath = absoluteWorkspacePath(wsId, file.path)
-  if (isSameOrDescendantPath(fileSelectionPath, excludedPath)) return
-
-  if (file.is_dir && isSameOrDescendantPath(excludedPath, fileSelectionPath)) {
-    for (const child of loadedChildren(wsId, file.path)) {
-      addLoadedSelectionExcept(selected, wsId, child, excludedPath)
-    }
-    return
-  }
-
-  selected.add(fileSelectionPath)
-}
-
-function removeSelectionSubtree(selected: Set<string>, path: string) {
-  for (const candidate of Array.from(selected)) {
-    if (isSameOrDescendantPath(candidate, path)) {
-      selected.delete(candidate)
-    }
-  }
-}
-
 function selectFilePath(wsId: string, file: FileEntry) {
-  const path = absoluteWorkspacePath(wsId, file.path)
-  const selected = new Set(selectedPaths.value)
-  selected.add(path)
-  if (file.is_dir) {
-    for (const descendant of loadedDescendantSelectionPaths(wsId, file.path)) {
-      selected.delete(descendant)
-    }
-  }
-  selectedPaths.value = selected
+  selectedPaths.value = selectWorkspaceFilePath(
+    selectedPaths.value,
+    workspaceFiles.value,
+    wsId,
+    workspaceRoot(wsId),
+    file,
+  )
 }
 
 function deselectFilePath(wsId: string, file: FileEntry) {
-  const path = absoluteWorkspacePath(wsId, file.path)
-  const selected = new Set(selectedPaths.value)
-  const ancestor = selectedAncestor(path)
-
-  if (ancestor) {
-    selected.delete(ancestor)
-    const relativeAncestor = relativePathForSelection(wsId, ancestor)
-    for (const child of loadedChildren(wsId, relativeAncestor)) {
-      addLoadedSelectionExcept(selected, wsId, child, path)
-    }
-  }
-
-  removeSelectionSubtree(selected, path)
-  selectedPaths.value = selected
+  selectedPaths.value = deselectWorkspaceFilePath(
+    selectedPaths.value,
+    workspaceFiles.value,
+    wsId,
+    workspaceRoot(wsId),
+    file,
+  )
 }
 
-function relativePathForSelection(wsId: string, selectionPath: string): string {
-  const root = workspaceRoot(wsId).replace(/\\/g, '/').replace(/\/+$/, '')
-  const selection = selectionPath.replace(/\\/g, '/').replace(/\/+$/, '')
-  const normalizedRoot = root.toLowerCase()
-  const normalizedSelection = selection.toLowerCase()
-  if (!normalizedRoot || normalizedSelection === normalizedRoot) return ''
-  if (!normalizedSelection.startsWith(`${normalizedRoot}/`)) return ''
-  return selection.slice(root.length + 1)
-}
-
-function selectionState(wsId: string, file: FileEntry): 'checked' | 'mixed' | 'unchecked' {
-  const path = absoluteWorkspacePath(wsId, file.path)
-  if (selectedPaths.value.has(path) || selectedAncestor(path)) {
-    return 'checked'
-  }
-
-  if (!file.is_dir) {
-    return 'unchecked'
-  }
-
-  const children = loadedChildren(wsId, file.path)
-  if (!children.length) {
-    return 'unchecked'
-  }
-
-  const childStates = children.map(child => selectionState(wsId, child))
-  if (childStates.every(state => state === 'checked')) {
-    return 'checked'
-  }
-  if (childStates.some(state => state !== 'unchecked')) {
-    return 'mixed'
-  }
-  return 'unchecked'
+function selectionState(wsId: string, file: FileEntry): WorkspaceSelectionState {
+  return workspaceFileSelectionState(
+    selectedPaths.value,
+    workspaceFiles.value,
+    wsId,
+    workspaceRoot(wsId),
+    file,
+  )
 }
 
 function onFileCheckboxChange(event: Event, wsId: string, file: FileEntry) {

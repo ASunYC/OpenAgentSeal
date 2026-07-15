@@ -182,16 +182,6 @@ export function useWorkspaceManager() {
     }
   }
 
-  function toggleSelect(path: string) {
-    if (selectedPaths.value.has(path)) {
-      selectedPaths.value.delete(path)
-    } else {
-      selectedPaths.value.add(path)
-    }
-    // Trigger reactivity
-    selectedPaths.value = new Set(selectedPaths.value)
-  }
-
   async function searchAllWorkspaces(query: string) {
     if (!query.trim()) {
       return []
@@ -237,9 +227,6 @@ export function useWorkspaceManager() {
     deleteItem,
     renameItem,
     uploadFile,
-
-    // Selection
-    toggleSelect,
 
     // Search
     searchAllWorkspaces,

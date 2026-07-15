@@ -1080,6 +1080,11 @@ def _setup_app_routes(app: FastAPI):
                 if name not in user_servers:
                     user_servers[name] = config
                     changed = True
+                elif isinstance(user_servers.get(name), dict) and isinstance(config, dict):
+                    for key, value in config.items():
+                        if key not in user_servers[name]:
+                            user_servers[name][key] = value
+                            changed = True
             if changed:
                 user_config_path.write_text(
                     json.dumps(user_config, ensure_ascii=False, indent=2),
@@ -1136,6 +1141,9 @@ def _setup_app_routes(app: FastAPI):
                     "args": config.get("args", []),
                     "env": config.get("env", {}),
                     "cwd": config.get("cwd", ""),
+                    "connect_timeout": config.get("connect_timeout"),
+                    "execute_timeout": config.get("execute_timeout"),
+                    "sse_read_timeout": config.get("sse_read_timeout"),
                     "disabled": bool(config.get("disabled", False)),
                     "source": source,
                     "plugin_id": plugin_id,
@@ -1195,6 +1203,9 @@ def _setup_app_routes(app: FastAPI):
                 args = server.get("args", [])
                 env = server.get("env", {})
                 cwd = str(server.get("cwd", "")).strip()
+                connect_timeout = server.get("connect_timeout")
+                execute_timeout = server.get("execute_timeout")
+                sse_read_timeout = server.get("sse_read_timeout")
 
                 if command:
                     config["command"] = command
@@ -1212,6 +1223,18 @@ def _setup_app_routes(app: FastAPI):
                     config["cwd"] = cwd
                 else:
                     config.pop("cwd", None)
+                for timeout_key, timeout_value in (
+                    ("connect_timeout", connect_timeout),
+                    ("execute_timeout", execute_timeout),
+                    ("sse_read_timeout", sse_read_timeout),
+                ):
+                    if timeout_value in (None, ""):
+                        config.pop(timeout_key, None)
+                        continue
+                    try:
+                        config[timeout_key] = float(timeout_value)
+                    except (TypeError, ValueError):
+                        config.pop(timeout_key, None)
 
                 mcp_servers[name] = config
 

@@ -172,6 +172,7 @@ class MCPServerConnection:
         self.connect_timeout = connect_timeout
         self.execute_timeout = execute_timeout
         self.sse_read_timeout = sse_read_timeout
+        self.last_error: str | None = None
         # Connection state
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack | None = None
@@ -194,11 +195,13 @@ class MCPServerConnection:
     async def connect(self) -> bool:
         """Connect to the MCP server with timeout protection."""
         connect_timeout = self._get_connect_timeout()
+        self.last_error = None
 
         try:
             if self.connection_type == "stdio" and self.cwd:
                 cwd_path = Path(_expand_mcp_value(str(self.cwd)))
                 if not cwd_path.exists() or not cwd_path.is_dir():
+                    self.last_error = f"Working directory is not valid: {self.cwd}"
                     logger.warning(
                         "Skipping MCP server '%s': configured cwd is not a valid directory: %s",
                         self.name,
@@ -270,6 +273,11 @@ class MCPServerConnection:
             return True
 
         except TimeoutError:
+            self.last_error = (
+                f"Connection to MCP server timed out after {connect_timeout}s. "
+                "If this server is launched with npx or needs to download packages, "
+                "increase connect_timeout and try again."
+            )
             logger.warning("Connection to MCP server '%s' timed out after %ss", self.name, connect_timeout)
             if self.exit_stack:
                 await self.exit_stack.aclose()
@@ -277,6 +285,7 @@ class MCPServerConnection:
             return False
 
         except Exception as e:
+            self.last_error = f"Failed to connect to MCP server: {e}"
             logger.warning("Failed to connect to MCP server '%s': %s", self.name, e, exc_info=True)
             if self.exit_stack:
                 await self.exit_stack.aclose()
@@ -482,7 +491,8 @@ async def check_mcp_server_async(name: str, server_config: dict) -> dict[str, An
                 "status": "error",
                 "name": server_name,
                 "type": conn_type,
-                "message": "Failed to connect to MCP server. Check the command, URL, environment variables, and logs.",
+                "message": connection.last_error
+                or "Failed to connect to MCP server. Check the command, URL, environment variables, and logs.",
                 "latency_ms": elapsed_ms(),
             }
 

@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, ProviderDiagnosticResponse, ProviderLiveTestResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
+import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, ProviderDiagnosticResponse, ProviderLiveTestResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, TaskDiffResponse, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
 import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
@@ -269,6 +269,10 @@ export const runtimeApi = {
       `/runtime/threads/${encodeURIComponent(threadId)}/events?${params.toString()}`,
     )
     return result.events
+  },
+
+  async getTaskDiff(): Promise<TaskDiffResponse> {
+    return request<TaskDiffResponse>('/runtime/task-diff')
   },
 }
 
@@ -750,6 +754,9 @@ export interface MCPServerConfig {
   args?: string[]
   env?: Record<string, string>
   cwd?: string
+  connect_timeout?: number
+  execute_timeout?: number
+  sse_read_timeout?: number
   disabled?: boolean
   source?: 'user' | 'plugin' | string
   plugin_id?: string | null
@@ -1210,6 +1217,7 @@ export const api = {
   getRuntimeThread: runtimeApi.getThread,
   getRuntimeTurns: runtimeApi.listTurns,
   getRuntimeEvents: runtimeApi.listEvents,
+  getRuntimeTaskDiff: runtimeApi.getTaskDiff,
 
   // Sandbox
   getSandboxCliStatus: sandboxApi.getCliStatus,
