@@ -5,7 +5,6 @@
   "identifier": "com.openagentseal.desktop",
   "build": {
     "beforeDevCommand": "npm run web:dev",
-    "beforeBuildCommand": "npm run web:build",
     "devUrl": "http://127.0.0.1:10086",
     "frontendDist": "../../open_agent/app/static"
   },
@@ -43,7 +42,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico"],
+    "icon": ["../../icon.png", "icons/icon.ico"],
     "externalBin": ["binaries/open-agent-backend"]
   }
 }

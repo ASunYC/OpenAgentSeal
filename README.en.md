@@ -161,13 +161,21 @@ npm install
 npm run dev
 ```
 
-Build the Windows desktop app:
+Build the Windows x64 desktop app and standalone CLI:
 
 ```bash
 npm run build
 ```
 
-This command runs `scripts/build_desktop_sidecar.ps1`, packages the Python backend as a PyInstaller sidecar, then runs the Tauri build.
+This runs the cross-platform Node build pipeline, synchronizes versions, packages the Python backend and standalone CLI with PyInstaller, builds the Tauri bundles, and writes checksums.
+
+The default build is incremental: PyInstaller, Tauri, and installer caches are reused. Run `npm run build:clean` only for a full rebuild after cache or toolchain problems. `npm run build:desktop` and `npm run build:cli` build one release type without deleting the other.
+
+Build Linux x64 desktop and CLI releases from a Docker-enabled Windows host:
+
+```bash
+npm run build:linux:docker
+```
 
 See [desktop/README.md](./desktop/README.md) for shell-specific notes.
 
@@ -188,7 +196,6 @@ OpenAgentSeal/
 │   ├── memory_manager.py     # Memory manager
 │   ├── logger.py             # Logging system
 │   ├── retry.py              # Retry mechanism
-│   ├── tray.py               # System tray
 │   ├── user_config.py        # User configuration
 │   ├── llm/                  # LLM clients
 │   │   ├── anthropic_client.py

@@ -295,18 +295,6 @@ from open_agent.task_queue import (
     TaskStatus,
     create_task_dispatcher,
 )
-from open_agent.tray import (
-    is_tray_available,
-    init_embedded_tray,
-    start_embedded_tray,
-    stop_embedded_tray,
-    minimize_to_tray,
-    restore_from_tray,
-    get_embedded_tray,
-    is_launcher_managed,
-)
-
-
 def enable_windows_ansi():
     """Enable ANSI escape sequences on Windows console.
 
@@ -2152,16 +2140,6 @@ async def run_agent(
                     print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
                     continue
 
-                elif command == "/tray":
-                    # Tray command - no longer supported in CLI-only mode
-                    print(
-                        f"\n{Colors.YELLOW}⚠️  Tray mode is managed by the launcher{Colors.RESET}"
-                    )
-                    print(
-                        f"   {Colors.DIM}Use 'python run.py --tray' to run in tray mode{Colors.RESET}\n"
-                    )
-                    continue
-
                 else:
                     print(f"{Colors.RED}❌ Unknown command: {user_input}{Colors.RESET}")
                     print(
@@ -2293,11 +2271,7 @@ async def run_agent(
             print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
             print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
 
-    # 11. Cleanup
-    # Stop embedded tray if running
-    stop_embedded_tray()
-
-    # Cleanup MCP connections
+    # 11. Cleanup MCP connections
     await _quiet_cleanup()
 
 

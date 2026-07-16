@@ -36,7 +36,8 @@ It is designed for building local-first agent applications that can run as:
 
 - an interactive CLI assistant
 - a FastAPI + Vue Web UI
-- a Windows desktop shell with tray integration
+- Windows and Linux x64 desktop applications with tray integration
+- standalone Windows and Linux x64 CLI distributions
 - an ACP-compatible agent service
 - a tool-using agent runtime with MCP and skills support
 
@@ -50,7 +51,8 @@ OpenAgentSeal 是一个以 Python 为核心的 AI Agent 框架，包含完整的
 
 - 交互式 CLI 助手
 - FastAPI + Vue Web UI
-- 带系统托盘的 Windows 桌面壳
+- 带系统托盘的 Windows 与 Linux x64 桌面应用
+- 独立运行的 Windows 与 Linux x64 CLI 发行包
 - ACP 兼容 Agent 服务
 - 支持 MCP 和 Skills 的工具调用运行时
 
@@ -79,7 +81,7 @@ Start the Web UI:
 open-agent --web-only --port 9998
 ```
 
-Linux Web-only setup:
+Linux Web-only source setup:
 
 ```bash
 bash scripts/linux/install.sh
@@ -95,6 +97,10 @@ cd desktop
 npm install
 npm run dev
 ```
+
+Build Windows x64 desktop and CLI releases incrementally with `npm run build`, or
+build Linux x64 desktop and CLI releases in Docker with `npm run build:linux:docker`.
+Use `npm run build:clean` only when a full local rebuild is required.
 
 ## Links
 

@@ -18,7 +18,6 @@ open_agent/
 ├── master_agent.py          # 主 Agent (整合任务队列和子 Agent)
 ├── memory_manager.py        # 记忆管理器 (SQLite)
 ├── retry.py                 # 重试机制
-├── tray.py                  # 系统托盘应用
 ├── user_config.py           # 用户配置管理
 │
 ├── acp/                     # ACP (Agent Communication Protocol)
@@ -284,9 +283,9 @@ open_agent/
 - **职责**: 命令行交互
 - **功能**: 交互式对话、配置管理
 
-#### `tray.py` - 系统托盘
-- **职责**: 系统托盘应用
-- **功能**: 快速启动、状态显示
+#### `desktop/src-tauri` - 桌面壳与系统托盘
+- **职责**: 原生窗口、系统托盘、Python 后端生命周期与桌面打包
+- **功能**: 快速启动、状态显示、CLI 启动、后端日志
 
 ### 9. 配置与工具
 
@@ -313,7 +312,7 @@ open_agent/
 ## 模块依赖关系
 
 ```
-用户交互层 (CLI/Web/Tray)
+用户交互层 (CLI/Web/Tauri Desktop)
     │
     ▼
 服务层 (AgentService)

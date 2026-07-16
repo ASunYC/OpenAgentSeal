@@ -154,14 +154,24 @@ cd desktop
 npm run build
 ```
 
-该命令会调用 `scripts/build_desktop_sidecar.ps1`，先用 PyInstaller 把 Python 后端打成 sidecar，再执行 Tauri 打包。
+该命令会运行跨平台 Node 构建管线，同步版本、构建前端、用 PyInstaller 打包 Python 后端与独立 CLI，再执行 Tauri 打包并生成校验清单。
+
+默认构建会复用 PyInstaller、Tauri 和安装包缓存。仅在缓存异常或工具链变更后使用 `npm run build:clean` 全量重建。`npm run build:desktop` 与 `npm run build:cli` 可单独构建，并保留另一类已有产物。
 
 Windows 构建产物位于：
 
 ```text
-dist/OpenAgentSeal-win-x64/installers/OpenAgentSeal_0.1.0_x64-setup.exe
-dist/OpenAgentSeal-win-x64/installers/OpenAgentSeal_0.1.0_x64_en-US.msi
-dist/OpenAgentSeal-win-x64/portable/OpenAgentSeal.exe
+dist/OpenAgentSeal-windows-x64/desktop/installers/OpenAgentSeal_0.1.0_x64-setup.exe
+dist/OpenAgentSeal-windows-x64/desktop/installers/OpenAgentSeal_0.1.0_x64_en-US.msi
+dist/OpenAgentSeal-windows-x64/desktop/portable/OpenAgentSeal.exe
+dist/OpenAgentSeal-windows-x64/cli/OpenAgentSeal-CLI-0.1.0-windows-x64.zip
+```
+
+在已安装 Docker Desktop 的 Windows 主机上构建 Linux x64 桌面版与 CLI：
+
+```bash
+cd desktop
+npm run build:linux:docker
 ```
 
 ### 托盘能力

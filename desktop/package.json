@@ -5,8 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "powershell -ExecutionPolicy Bypass -File ../scripts/build_desktop_sidecar.ps1",
-    "tauri:build": "tauri build",
+    "build": "node ../scripts/package-release.mjs all",
+    "build:clean": "node ../scripts/package-release.mjs all --clean",
+    "build:desktop": "node ../scripts/package-release.mjs desktop",
+    "build:cli": "node ../scripts/package-release.mjs cli",
+    "build:linux:docker": "node ../scripts/build-linux-docker.mjs",
+    "test:packaging": "node --test ../scripts/tests/package-release.test.mjs ../scripts/tests/sync-version.test.mjs ../scripts/tests/linux-docker.test.mjs",
+    "tauri:build": "npm run web:build && tauri build",
+    "tauri:compile": "tauri build",
+    "tauri:bundle": "tauri bundle",
     "web:dev": "npm --prefix ../open_agent/app/web run dev -- --host 127.0.0.1 --port 10086",
     "web:build": "npm --prefix ../open_agent/app/web run build"
   },

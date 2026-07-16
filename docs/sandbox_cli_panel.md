@@ -146,9 +146,8 @@ Failed to start sandbox terminal: Unknown error
 Sandbox session not found
 ```
 
-The build script explicitly includes the missing runtime executables:
-
-- `scripts/build_desktop_sidecar.ps1`
+The packaging plan in `scripts/package-release.mjs` explicitly includes the
+missing runtime executables for Windows builds.
 
 Relevant PyInstaller flags:
 

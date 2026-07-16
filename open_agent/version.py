@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 
+DEFAULT_VERSION = "0.1.0"
+
+
 def _version_file() -> Path:
     return Path(__file__).resolve().parent.parent / "VERSION.md"
 
@@ -19,7 +22,7 @@ def get_version() -> str:
                     return line.split(":", 1)[1].strip()
     except Exception:
         pass
-    return "0.1.0"
+    return DEFAULT_VERSION
 
 
 def get_release_date() -> str:
@@ -33,4 +36,3 @@ def get_release_date() -> str:
     except Exception:
         pass
     return ""
-

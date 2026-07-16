@@ -428,12 +428,6 @@ def main():
         action="store_true",
         help="Don't open browser automatically when Web UI starts",
     )
-    parser.add_argument(
-        "--tray",
-        action="store_true",
-        help="Run as system tray daemon (background mode)",
-    )
-
     args, unknown_args = parser.parse_known_args()
 
     print("=" * 50)
@@ -499,23 +493,6 @@ def main():
     if args.workspace:
         run_args.extend(["--workspace", args.workspace])
     run_args.extend(unknown_args)
-
-    # Handle tray mode
-    if args.tray:
-        try:
-            from open_agent.tray import run_tray_app
-
-            workspace = args.workspace or str(Path.cwd())
-            run_tray_app(
-                host="127.0.0.1",
-                port=9998,
-                workspace_dir=workspace,
-            )
-            return 0
-        except ImportError as e:
-            print(f"❌ Failed to import tray module: {e}")
-            print("   Please install: pip install pystray pillow")
-            return 1
 
     # Determine running mode
     # Default: Unified mode (CLI + Web UI in same process)

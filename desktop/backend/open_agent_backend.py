@@ -7,13 +7,20 @@ import sys
 from pathlib import Path
 
 
-def _desktop_log_path() -> Path:
-    base_dir = (
-        os.environ.get("LOCALAPPDATA")
-        or os.environ.get("APPDATA")
-        or os.environ.get("USERPROFILE")
-        or "."
-    )
+def _desktop_log_path(platform_name: str | None = None) -> Path:
+    platform_name = platform_name or os.name
+    if platform_name == "nt":
+        base_dir = (
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or os.environ.get("USERPROFILE")
+            or "."
+        )
+    else:
+        base_dir = os.environ.get("XDG_STATE_HOME")
+        if not base_dir:
+            home = Path(os.environ.get("HOME") or Path.home())
+            base_dir = home / ".local" / "state"
     log_dir = Path(base_dir) / "OpenAgentSeal"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / "desktop-backend.log"

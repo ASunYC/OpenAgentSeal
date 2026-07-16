@@ -21,8 +21,21 @@ use tauri::{
 const BACKEND_BIND_HOST: &str = "0.0.0.0";
 const BACKEND_CONNECT_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: &str = "9998";
-const SIDECAR_NAME: &str = "open-agent-backend-x86_64-pc-windows-msvc.exe";
+const SIDECAR_BASE_NAME: &str = "open-agent-backend";
+const TARGET_TRIPLE: &str = env!("OPEN_AGENT_TARGET_TRIPLE");
 const ABOUT_URL: &str = "https://github.com/ASunYC";
+
+fn sidecar_file_names(target_triple: &str, windows: bool) -> Vec<String> {
+    let extension = if windows { ".exe" } else { "" };
+    vec![
+        format!("{SIDECAR_BASE_NAME}-{target_triple}{extension}"),
+        format!("{SIDECAR_BASE_NAME}{extension}"),
+    ]
+}
+
+fn current_sidecar_file_names() -> Vec<String> {
+    sidecar_file_names(TARGET_TRIPLE, cfg!(target_os = "windows"))
+}
 
 struct BackendProcess {
     child: Mutex<Option<Child>>,
@@ -141,6 +154,62 @@ fn python_executable(root: &Path) -> PathBuf {
     }
 }
 
+fn user_home_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        env::var_os("USERPROFILE")
+            .or_else(|| env::var_os("HOME"))
+            .map(PathBuf::from)
+    } else {
+        env::var_os("HOME")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    }
+}
+
+fn default_workspace_for(home: Option<&Path>) -> PathBuf {
+    home.unwrap_or_else(|| Path::new(".")).join("OpenAgentSeal")
+}
+
+fn default_workspace_dir() -> PathBuf {
+    env::var_os("OPEN_AGENT_DESKTOP_WORKSPACE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_workspace_for(user_home_dir().as_deref()))
+}
+
+fn app_data_dir_for(
+    windows: bool,
+    windows_base: Option<&Path>,
+    xdg_state_home: Option<&Path>,
+    home: Option<&Path>,
+) -> PathBuf {
+    let base = if windows {
+        windows_base
+            .map(Path::to_path_buf)
+            .or_else(|| home.map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        xdg_state_home
+            .map(Path::to_path_buf)
+            .or_else(|| home.map(|path| path.join(".local").join("state")))
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    base.join("OpenAgentSeal")
+}
+
+fn app_data_dir() -> PathBuf {
+    let windows_base = env::var_os("LOCALAPPDATA")
+        .or_else(|| env::var_os("APPDATA"))
+        .map(PathBuf::from);
+    let xdg_state_home = env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+    let home = user_home_dir();
+    app_data_dir_for(
+        cfg!(target_os = "windows"),
+        windows_base.as_deref(),
+        xdg_state_home.as_deref(),
+        home.as_deref(),
+    )
+}
+
 fn resolve_backend_command(app: &tauri::App) -> BackendCommand {
     let root = repo_root().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -160,14 +229,7 @@ fn resolve_backend_command(app: &tauri::App) -> BackendCommand {
     if let Some(path) = find_sidecar(app) {
         return BackendCommand::Sidecar {
             path,
-            workspace: PathBuf::from(env::var("OPEN_AGENT_DESKTOP_WORKSPACE").unwrap_or_else(
-                |_| {
-                    PathBuf::from(env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string()))
-                        .join("OpenAgentSeal")
-                        .to_string_lossy()
-                        .into_owned()
-                },
-            )),
+            workspace: default_workspace_dir(),
         };
     }
 
@@ -179,27 +241,34 @@ fn resolve_backend_command(app: &tauri::App) -> BackendCommand {
 
 fn find_sidecar(app: &tauri::App) -> Option<PathBuf> {
     let mut candidates = Vec::new();
+    let names = current_sidecar_file_names();
 
     if let Ok(current_exe) = env::current_exe() {
         if let Some(parent) = current_exe.parent() {
-            candidates.push(parent.join(SIDECAR_NAME));
-            candidates.push(parent.join("binaries").join(SIDECAR_NAME));
+            for name in &names {
+                candidates.push(parent.join(name));
+                candidates.push(parent.join("binaries").join(name));
+            }
         }
     }
 
     if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join(SIDECAR_NAME));
-        candidates.push(resource_dir.join("binaries").join(SIDECAR_NAME));
-        candidates.push(resource_dir.join("resources").join(SIDECAR_NAME));
+        for name in &names {
+            candidates.push(resource_dir.join(name));
+            candidates.push(resource_dir.join("binaries").join(name));
+            candidates.push(resource_dir.join("resources").join(name));
+        }
     }
 
     if let Ok(root) = repo_root() {
-        candidates.push(
-            root.join("desktop")
-                .join("src-tauri")
-                .join("binaries")
-                .join(SIDECAR_NAME),
-        );
+        for name in &names {
+            candidates.push(
+                root.join("desktop")
+                    .join("src-tauri")
+                    .join("binaries")
+                    .join(name),
+            );
+        }
     }
 
     candidates.into_iter().find(|path| path.exists())
@@ -261,12 +330,7 @@ fn spawn_backend(command_config: &BackendCommand) -> Result<Child, String> {
 }
 
 fn backend_log_path() -> Result<PathBuf, String> {
-    let base_dir = env::var("LOCALAPPDATA")
-        .or_else(|_| env::var("APPDATA"))
-        .or_else(|_| env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let log_dir = base_dir.join("OpenAgentSeal");
+    let log_dir = app_data_dir();
     std::fs::create_dir_all(&log_dir)
         .map_err(|error| format!("Failed to create backend log directory: {error}"))?;
     Ok(log_dir.join("desktop-backend.log"))
@@ -402,7 +466,7 @@ fn open_target(target: &str) -> Result<(), String> {
         .map_err(|error| format!("Failed to open {target}: {error}"))
 }
 
-#[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
+#[cfg(target_os = "macos")]
 fn quote_shell_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -996,6 +1060,62 @@ mod tests {
         assert_eq!(
             quote_powershell_literal("C:\\User's Files\\cli.cmd").unwrap(),
             "'C:\\User''s Files\\cli.cmd'"
+        );
+    }
+
+    #[test]
+    fn sidecar_candidates_cover_portable_and_tauri_bundle_names() {
+        let names = sidecar_file_names("x86_64-unknown-linux-gnu", false);
+
+        assert_eq!(
+            names,
+            vec![
+                "open-agent-backend-x86_64-unknown-linux-gnu".to_string(),
+                "open-agent-backend".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_sidecar_candidates_include_exe_suffix() {
+        let names = sidecar_file_names("x86_64-pc-windows-msvc", true);
+
+        assert_eq!(
+            names,
+            vec![
+                "open-agent-backend-x86_64-pc-windows-msvc.exe".to_string(),
+                "open-agent-backend.exe".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_app_data_prefers_xdg_state_home() {
+        let path = app_data_dir_for(
+            false,
+            None,
+            Some(Path::new("/tmp/xdg-state")),
+            Some(Path::new("/home/tester")),
+        );
+
+        assert_eq!(path, PathBuf::from("/tmp/xdg-state/OpenAgentSeal"));
+    }
+
+    #[test]
+    fn linux_app_data_falls_back_to_home_state_directory() {
+        let path = app_data_dir_for(false, None, None, Some(Path::new("/home/tester")));
+
+        assert_eq!(
+            path,
+            PathBuf::from("/home/tester/.local/state/OpenAgentSeal")
+        );
+    }
+
+    #[test]
+    fn default_workspace_is_created_below_the_user_home() {
+        assert_eq!(
+            default_workspace_for(Some(Path::new("/home/tester"))),
+            PathBuf::from("/home/tester/OpenAgentSeal")
         );
     }
 }

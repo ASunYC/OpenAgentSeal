@@ -140,14 +140,19 @@ def _setup_app_routes(app: FastAPI):
 
         is_windows = platform == "windows"
         is_linux = platform == "linux"
+        is_desktop = os.environ.get("OPEN_AGENT_DESKTOP", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         return {
             "platform": platform,
-            "shell": "web",
+            "shell": "desktop" if is_desktop else "web",
             "features": {
                 "browserPanel": not is_linux,
                 "sandboxPanel": is_windows,
-                "openFileLocation": not is_linux,
-                "tauriFilePicker": is_windows,
+                "openFileLocation": is_desktop or not is_linux,
+                "tauriFilePicker": is_desktop,
             },
         }
 
