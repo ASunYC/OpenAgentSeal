@@ -3,7 +3,7 @@
  * Provides REST API calls and SSE streaming
  */
 
-import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, ProviderDiagnosticResponse, ProviderLiveTestResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, TaskDiffResponse, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
+import type { Chat, ChatHistory, ContextBlockDetail, ContextBlockSummary, ContextCompactionStatus, RuntimeCapabilities, Message, AgentEvent, AgentConfig, AgentTaskSummary, ModelConfig, CommandInfo, AppSettings, ApiResponse, ProviderInfo, ProviderModelsResponse, ProviderDiagnosticResponse, ProviderLiveTestResponse, UploadedFile, ForkChatResponse, RuntimeThread, RuntimeTurn, RuntimeEvent, TaskDiffResponse, SmartRoutingConfig, ChatAttachment, WorkspaceSource, WorkspaceSourceState, Workspace, FileEntry, WorkspaceSearchResult } from '@/types'
 import { Capacitor } from '@capacitor/core'
 
 const DESKTOP_BACKEND = 'http://127.0.0.1:9998'
@@ -241,30 +241,34 @@ export async function cancelRunnerChat(runnerSessionId: string): Promise<boolean
 }
 
 export const runtimeApi = {
-  async listThreads(userId?: string): Promise<RuntimeThread[]> {
-    const query = userId ? `?user_id=${encodeURIComponent(userId)}` : ''
+  async listThreads(userId?: string, profileId?: string): Promise<RuntimeThread[]> {
+    const params = new URLSearchParams()
+    if (userId) params.set('user_id', userId)
+    if (profileId) params.set('profile_id', profileId)
+    const query = params.size ? `?${params.toString()}` : ''
     const result = await request<{ threads: RuntimeThread[] }>(`/runtime/threads${query}`)
     return result.threads
   },
 
-  async getThreadBySession(runnerSessionId: string): Promise<RuntimeThread> {
-    return request<RuntimeThread>(`/runtime/threads/session/${encodeURIComponent(runnerSessionId)}`)
+  async getThreadBySession(runnerSessionId: string, profileId?: string): Promise<RuntimeThread> {
+    return request<RuntimeThread>(`/runtime/threads/session/${encodeURIComponent(runnerSessionId)}${profileQuery(profileId)}`)
   },
 
-  async getThread(threadId: string): Promise<RuntimeThread> {
-    return request<RuntimeThread>(`/runtime/threads/${encodeURIComponent(threadId)}`)
+  async getThread(threadId: string, profileId?: string): Promise<RuntimeThread> {
+    return request<RuntimeThread>(`/runtime/threads/${encodeURIComponent(threadId)}${profileQuery(profileId)}`)
   },
 
-  async listTurns(threadId: string): Promise<RuntimeTurn[]> {
-    const result = await request<{ turns: RuntimeTurn[] }>(`/runtime/threads/${encodeURIComponent(threadId)}/turns`)
+  async listTurns(threadId: string, profileId?: string): Promise<RuntimeTurn[]> {
+    const result = await request<{ turns: RuntimeTurn[] }>(`/runtime/threads/${encodeURIComponent(threadId)}/turns${profileQuery(profileId)}`)
     return result.turns
   },
 
-  async listEvents(threadId: string, sinceSeq = 0, limit = 1000): Promise<RuntimeEvent[]> {
+  async listEvents(threadId: string, sinceSeq = 0, limit = 1000, profileId?: string): Promise<RuntimeEvent[]> {
     const params = new URLSearchParams({
       since_seq: String(sinceSeq),
       limit: String(limit),
     })
+    if (profileId) params.set('profile_id', profileId)
     const result = await request<{ events: RuntimeEvent[] }>(
       `/runtime/threads/${encodeURIComponent(threadId)}/events?${params.toString()}`,
     )
@@ -519,6 +523,15 @@ export const agentApi = {
       method: 'PUT',
       body: JSON.stringify({ config }),
     })
+  },
+
+  async listTasks(filters: { profileId?: string; parentSessionId?: string; limit?: number } = {}): Promise<AgentTaskSummary[]> {
+    const params = new URLSearchParams()
+    if (filters.profileId) params.set('profile_id', filters.profileId)
+    if (filters.parentSessionId) params.set('parent_session_id', filters.parentSessionId)
+    params.set('limit', String(filters.limit || 100))
+    const result = await request<{ tasks: AgentTaskSummary[] }>(`/agent-tasks?${params.toString()}`)
+    return result.tasks
   },
 }
 

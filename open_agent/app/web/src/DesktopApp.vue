@@ -19,10 +19,10 @@
                 :key="agent.id"
                 type="button"
                 class="agent-dock-card"
-                :class="{ active: agent.id === selectedAgentId, running: isAgentRunning(agent.id) }"
+                :class="[`status-${agentRuntimeStatus(agent.id)}`, { active: agent.id === selectedAgentId, running: isAgentRunning(agent.id) }]"
                 :data-agent-id="agent.id"
                 @click="switchAgentFromDock(agent.id)"
-                :title="agent.name"
+                :title="`${agent.name} · ${collaborationStatusLabel(agentRuntimeStatus(agent.id))}`"
               >
                 <span class="agent-dock-name">{{ agent.name }}</span>
                 <span v-if="isAgentRunning(agent.id)" class="agent-dock-equalizer" aria-hidden="true">
@@ -31,7 +31,7 @@
                   <span></span>
                   <span></span>
                 </span>
-                <span v-else class="agent-dock-idle" aria-hidden="true"></span>
+                <span v-else class="agent-dock-idle" :class="`status-${agentRuntimeStatus(agent.id)}`" aria-hidden="true"></span>
               </button>
             </div>
           </div>
@@ -368,7 +368,7 @@
                     v-if="loading && canSendMessage"
                     type="button"
                     class="queue-now-button"
-                    @click="queueComposerMessage"
+                    @click="queueComposerMessage()"
                     :title="t('加入队列', 'Queue message')"
                   >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -665,7 +665,7 @@
                       <path d="M19,6v14a2,2,0,0,1-2,2H7a2,2,0,0,1-2-2V6m3,0V4a2,2,0,0,1,2-2h4a2,2,0,0,1,2,2v2"/>
                     </svg>
                   </button>
-                  <button type="button" class="runtime-refresh" @click="chatStore.loadChats()" :title="t('刷新', 'Refresh')">
+                  <button type="button" class="runtime-refresh" @click="refreshRuntimeChats" :title="t('刷新', 'Refresh')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
                       <path d="M21 3v6h-6"/>
@@ -695,6 +695,7 @@
                     <p>{{ formatChatDate(chat.updated_at) }}</p>
                     <span>{{ chat.session_id }}</span>
                   </div>
+                  <span class="workspace-chat-status" :class="`status-${chatRuntimeStatus(chat)}`">{{ collaborationStatusLabel(chatRuntimeStatus(chat)) }}</span>
                   <button
                     class="workspace-chat-delete"
                     @click.stop="deleteManagedChat(chat)"
@@ -759,12 +760,21 @@
                     </div>
                   </article>
 
+                  <article v-if="taskStaleReferences.length" class="task-context-warning">
+                    <div>
+                      <strong>{{ t('上下文可能已过期', 'Context may be stale') }}</strong>
+                      <p>{{ t(`${taskStaleReferences.length} 个引用文件在本轮读取后发生了修改`, `${taskStaleReferences.length} referenced files changed after this run started`) }}</p>
+                    </div>
+                    <button type="button" class="context-open-original" @click="prepareRefreshContextPrompt">{{ t('重新检查', 'Recheck') }}</button>
+                  </article>
+
                   <article class="task-card">
                     <div class="task-card-head">
                       <h4>{{ t('计划', 'Plan') }}</h4>
                       <span>{{ taskPlanItems.length }}</span>
                     </div>
-                    <ol class="task-plan-list">
+                    <div v-if="!taskPlanItems.length" class="task-empty-line">{{ t('当前会话还没有运行记录', 'No run has been recorded for this chat') }}</div>
+                    <ol v-else class="task-plan-list">
                       <li v-for="item in taskPlanItems" :key="item.id" :class="item.status">
                         <span class="task-plan-dot"></span>
                         <div>
@@ -782,15 +792,32 @@
                       <h4>{{ t('引用文件', 'References') }}</h4>
                       <span>{{ taskReferenceItems.length }}</span>
                     </div>
-                    <div v-if="!taskReferenceItems.length" class="task-empty-line">{{ t('本轮还没有引用文件或附件', 'No referenced files or attachments yet') }}</div>
-                    <div v-else class="task-list">
+                    <div v-if="taskReferenceItems.length" class="task-list">
                       <div v-for="item in taskReferenceItems" :key="item.id" class="task-list-row">
-                        <span class="task-kind">{{ item.kind }}</span>
+                        <span class="task-kind">{{ formatTaskReferenceKind(item.kind) }}</span>
                         <div>
                           <strong>{{ item.name }}</strong>
                           <p>{{ item.path }}</p>
                         </div>
                         <button type="button" class="context-open-original" @click="copyTaskText(item.path)">{{ t('复制', 'Copy') }}</button>
+                      </div>
+                    </div>
+                    <div v-else class="task-empty-line">{{ t('本轮还没有引用文件或附件', 'No referenced files or attachments yet') }}</div>
+                  </article>
+
+                  <article v-if="taskMemoryItems.length" class="task-card">
+                    <div class="task-card-head">
+                      <h4>{{ t('自动召回记忆', 'Recalled memories') }}</h4>
+                      <span>{{ taskMemoryItems.length }}</span>
+                    </div>
+                    <div class="task-list">
+                      <div v-for="item in taskMemoryItems" :key="item.id" class="task-list-row task-memory-row">
+                        <span class="task-kind">{{ item.category }}</span>
+                        <div>
+                          <strong>{{ t(`记忆 #${item.id}`, `Memory #${item.id}`) }}</strong>
+                          <p>{{ item.content }}</p>
+                        </div>
+                        <span class="task-memory-importance">{{ item.importance }}</span>
                       </div>
                     </div>
                   </article>
@@ -800,17 +827,17 @@
                   <article class="task-card">
                     <div class="task-card-head">
                       <h4>{{ t('工具输出', 'Tool output') }}</h4>
-                      <span>{{ taskToolEvents.length }}</span>
+                      <span>{{ taskToolActivities.length }}</span>
                     </div>
-                    <div v-if="!taskToolEvents.length" class="task-empty-line">{{ t('当前任务还没有工具调用', 'No tool calls for this task yet') }}</div>
+                    <div v-if="!taskToolActivities.length" class="task-empty-line">{{ t('当前任务还没有工具调用', 'No tool calls for this task yet') }}</div>
                     <div v-else class="task-tool-timeline">
-                      <article v-for="event in taskToolEvents" :key="event.event_id" class="task-tool-event">
-                        <button type="button" class="task-tool-head" @click="toggleTaskEvent(event.event_id)">
-                          <span class="runtime-event-type">{{ formatRuntimeEventSummary(event) }}</span>
-                          <span>{{ event.event_type }}</span>
-                          <time>{{ formatTime(event.created_at) }}</time>
+                      <article v-for="tool in taskToolActivities" :key="tool.id" class="task-tool-event" :class="tool.status">
+                        <button type="button" class="task-tool-head" @click="toggleTaskEvent(tool.id)">
+                          <span class="runtime-event-type">{{ tool.name }}</span>
+                          <span>{{ formatTaskToolStatus(tool.status) }}</span>
+                          <time>{{ formatTaskToolElapsed(tool.elapsedSeconds) }}</time>
                         </button>
-                        <pre v-if="expandedTaskEventIds.has(event.event_id) && formatRuntimeEventDetail(event)" class="runtime-event-detail">{{ formatRuntimeEventDetail(event) }}</pre>
+                        <pre v-if="expandedTaskEventIds.has(tool.id)" class="runtime-event-detail">{{ formatTaskToolDetail(tool) }}</pre>
                       </article>
                     </div>
                   </article>
@@ -823,6 +850,13 @@
                       <span v-if="taskDiffLoading">{{ t('加载中', 'Loading') }}</span>
                       <span v-else>{{ taskDiff?.files.length || 0 }}</span>
                     </div>
+                    <input
+                      v-if="taskDiff?.available && !taskDiff.clean"
+                      v-model="taskDiffFilter"
+                      class="task-diff-filter"
+                      type="search"
+                      :placeholder="t('筛选改动文件', 'Filter changed files')"
+                    />
                     <div v-if="taskDiffLoading" class="task-empty-line">{{ t('正在读取 git diff...', 'Reading git diff...') }}</div>
                     <div v-else-if="!taskDiff?.available" class="task-empty-line">{{ taskDiff?.reason || t('当前工作目录没有可用 git 信息', 'No git information is available for the workspace') }}</div>
                     <template v-else>
@@ -832,18 +866,25 @@
                       </div>
                       <div v-if="taskDiff.clean" class="task-empty-line">{{ t('当前工作目录没有未提交改动', 'No uncommitted changes in the current workspace') }}</div>
                       <div v-else class="task-list">
-                        <div v-for="file in taskDiff.files" :key="file.path" class="task-list-item">
+                        <div v-for="file in filteredTaskDiffFiles" :key="file.path" class="task-list-item">
                           <div class="task-list-row">
                             <span class="task-kind">{{ file.status }}</span>
                             <div>
                               <strong>{{ file.path }}</strong>
                               <p>{{ formatTaskDiffFileState(file) }}</p>
                             </div>
-                            <button type="button" class="context-open-original" @click="toggleTaskFile(file.path)">
-                              {{ expandedTaskFilePaths.has(file.path) ? t('收起', 'Collapse') : t('展开', 'Expand') }}
-                            </button>
+                            <div class="task-file-actions">
+                              <button type="button" class="context-open-original" @click="copyTaskText(file.path)">{{ t('复制路径', 'Copy path') }}</button>
+                              <button type="button" class="context-open-original" @click="askAboutTaskDiff(file)">{{ t('解释', 'Explain') }}</button>
+                              <button type="button" class="context-open-original" @click="toggleTaskFile(file.path)">
+                                {{ expandedTaskFilePaths.has(file.path) ? t('收起', 'Collapse') : t('展开', 'Expand') }}
+                              </button>
+                            </div>
                           </div>
-                          <pre v-if="expandedTaskFilePaths.has(file.path)" class="task-diff-stat">{{ file.diff || t('此文件没有可展示的 diff 预览', 'No diff preview is available for this file') }}</pre>
+                          <div v-if="expandedTaskFilePaths.has(file.path)" class="task-diff-preview">
+                            <button v-if="file.diff" type="button" class="context-open-original" @click="copyTaskText(file.diff)">{{ t('复制补丁', 'Copy diff') }}</button>
+                            <pre class="task-diff-stat">{{ file.diff || t('此文件没有可展示的 diff 预览', 'No diff preview is available for this file') }}</pre>
+                          </div>
                         </div>
                       </div>
                       <pre v-if="taskDiff.cached_stat || taskDiff.stat" class="task-diff-stat">{{ [taskDiff.cached_stat, taskDiff.stat].filter(Boolean).join('\n\n') }}</pre>
@@ -905,8 +946,13 @@
             </button>
           </div>
           <div v-if="queuedMessages.length" class="queued-message-list">
-            <div v-for="(queued, index) in queuedMessages" :key="queued.id" class="queued-message-item">
-              <span class="queued-message-order">{{ index + 1 }}</span>
+            <div
+              v-for="(queued, index) in queuedMessages"
+              :key="queued.id"
+              class="queued-message-item"
+              :class="[`status-${queued.status}`, { interrupt: queued.kind === 'interrupt' }]"
+            >
+              <span class="queued-message-order">{{ queued.kind === 'interrupt' ? '!' : index + 1 }}</span>
               <div class="queued-message-body">
                 <textarea
                   v-if="queued.editing"
@@ -919,6 +965,9 @@
                 <template v-else>
                   <p>{{ queued.content || t('[附件]', '[attachment]') }}</p>
                   <small v-if="queued.attachments.length">{{ queuedAttachmentLabel(queued) }}</small>
+                  <small v-if="queued.kind === 'interrupt'" class="queued-message-kind">{{ t('插队提醒', 'Interrupt') }}</small>
+                  <small v-if="queued.status === 'sending'" class="queued-message-status">{{ t('发送中...', 'Sending...') }}</small>
+                  <small v-if="queued.status === 'failed'" class="queued-message-error">{{ queued.error || t('发送失败', 'Send failed') }}</small>
                 </template>
               </div>
               <div class="queued-message-actions">
@@ -935,7 +984,21 @@
                     </svg>
                   </button>
                 </template>
-                <template v-else>
+                <template v-else-if="queued.status === 'failed'">
+                  <button type="button" @click="retryQueuedMessageNow(queued.id)" :title="t('重试', 'Retry')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                      <path d="M21 3v6h-6"/>
+                    </svg>
+                  </button>
+                  <button type="button" @click="removeQueuedMessage(queued.id)" :title="t('删除排队消息', 'Delete queued message')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="3,6 5,6 21,6"/>
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+                    </svg>
+                  </button>
+                </template>
+                <template v-else-if="queued.status !== 'sending'">
                   <button type="button" @click="retrieveQueuedMessageForEdit(queued)" :title="t('取回编辑', 'Retrieve for editing')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M9 14 4 9l5-5"/>
@@ -979,7 +1042,7 @@
                 v-if="loading && canSendMessage"
                 type="button"
                 class="queue-now-button"
-                @click="queueComposerMessage"
+                @click="queueComposerMessage()"
                 :title="t('加入队列', 'Queue message')"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -990,6 +1053,20 @@
                   <path d="M15 17h6"/>
                 </svg>
                 <span>{{ t('排队', 'Queue') }}</span>
+              </button>
+              <button
+                v-if="loading && canSendMessage"
+                type="button"
+                class="queue-now-button interrupt"
+                @click="queueComposerMessage('interrupt')"
+                :title="t('当前任务结束后优先发送', 'Send first after the current task')"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 3v12"/>
+                  <path d="m7 8 5-5 5 5"/>
+                  <path d="M5 21h14"/>
+                </svg>
+                <span>{{ t('插队', 'Interrupt') }}</span>
               </button>
               <div class="composer-menu-wrap" @click.stop>
                 <button class="composer-plus" @click="toggleComposerMenu" :title="t('更多操作', 'More actions')">
@@ -1214,7 +1291,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, reactive } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 import { useSettingsStore } from '@/stores/settings'
 import { useChatStore } from '@/stores/chat'
-import { api } from '@/api'
+import { api, agentApi } from '@/api'
 import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import WorkspaceManager from '@/views/WorkspaceManager.vue'
@@ -1227,10 +1304,12 @@ import {
   isSameOrDescendantPath,
   normalizeWorkspaceSourceSelection as normalizeWorkspaceSourceSelectionModel,
 } from '@/models/workspaceSelection'
+import { buildRuntimeTaskProjection, type RuntimeToolActivity } from '@/models/runtimeTask'
+import { deriveAgentStatus, findStaleReferences, type CollaborationStatus } from '@/models/collaborationState'
 import appIconUrl from '@/assets/icon.png'
 import assistantAvatarUrl from '@/assets/assistant-avatar.png'
 import { marked } from 'marked'
-import type { AgentConfig, AgentEvent, Chat, ChatAttachment, ContextCompactionStatus, Message, RuntimeCapabilities, RuntimeEvent, RuntimeThread, TaskDiffFile, TaskDiffResponse, ThinkingStep, WorkspaceSource, WorkspaceSourceState } from '@/types'
+import type { AgentConfig, AgentEvent, AgentTaskSummary, Chat, ChatAttachment, ContextCompactionStatus, Message, RuntimeCapabilities, RuntimeEvent, RuntimeThread, RuntimeTurn, TaskDiffFile, TaskDiffResponse, ThinkingStep, WorkspaceSource, WorkspaceSourceState } from '@/types'
 import { typewriterReveal } from '@/utils/typewriter'
 
 const agentStore = useAgentStore()
@@ -1511,6 +1590,9 @@ const {
   removeQueuedMessage,
   takeQueuedMessage,
   nextQueuedMessage,
+  markQueuedMessageSending,
+  markQueuedMessageFailed,
+  retryQueuedMessage,
   clearQueue,
 } = useMessageQueue()
 const composerMenuOpen = ref(false)
@@ -1539,58 +1621,43 @@ const skillsEnabled = ref(true)  // 技能开关状态
 const messagesContainer = ref<HTMLElement | null>(null)
 const agentDockRef = ref<HTMLElement | null>(null)
 const runtimeThread = ref<RuntimeThread | null>(null)
+const runtimeThreads = ref<RuntimeThread[]>([])
+const runtimeTurns = ref<RuntimeTurn[]>([])
 const runtimeEvents = ref<RuntimeEvent[]>([])
 const runtimeLoading = ref(false)
 const runtimeError = ref('')
 const taskPanelSection = ref<TaskPanelSection>('overview')
 const taskDiff = ref<TaskDiffResponse | null>(null)
 const taskDiffLoading = ref(false)
+const taskDiffFilter = ref('')
 const taskPanelError = ref('')
 const expandedTaskEventIds = ref<Set<string>>(new Set())
 const expandedTaskFilePaths = ref<Set<string>>(new Set())
+const agentTasks = ref<AgentTaskSummary[]>([])
 let unlistenDesktopFileDrops: (() => void) | null = null
+let collaborationRefreshTimer: number | undefined
 
-interface TaskPlanItem {
-  id: string
-  title: string
-  detail: string
-  status: 'done' | 'active' | 'pending' | 'error'
-}
+const latestRuntimeTurn = computed<RuntimeTurn | null>(() => {
+  return [...runtimeTurns.value].sort((a, b) => b.started_at.localeCompare(a.started_at))[0] || null
+})
 
-interface TaskReferenceItem {
-  id: string
-  kind: string
-  name: string
-  path: string
-}
+const latestRuntimeEvents = computed(() => {
+  const turnId = latestRuntimeTurn.value?.turn_id
+  return turnId ? runtimeEvents.value.filter(event => event.turn_id === turnId) : runtimeEvents.value
+})
 
-const taskToolEvents = computed(() =>
-  runtimeEvents.value.filter(event => ['tool_call', 'tool_result', 'error'].includes(event.event_type)),
+const runtimeTaskProjection = computed(() =>
+  buildRuntimeTaskProjection(latestRuntimeTurn.value, latestRuntimeEvents.value),
 )
 
-const taskReferenceItems = computed<TaskReferenceItem[]>(() => {
-  const items: TaskReferenceItem[] = []
-  const seen = new Set<string>()
-  const push = (kind: string, name: string, path: string) => {
-    const key = `${kind}:${path}`
-    if (!path || seen.has(key)) return
-    seen.add(key)
-    items.push({ id: key, kind, name: name || path, path })
-  }
-
-  for (const path of mergedSelectedWorkspacePaths()) {
-    push(t('路径', 'Path'), path.split(/[\\/]/).filter(Boolean).pop() || path, path)
-  }
-  for (const source of workspaceSources.value) {
-    if (selectedWorkspacePaths.value.includes(source.path)) {
-      push(formatWorkspaceSourceKind(source.type), source.name, source.path)
-    }
-  }
-  for (const attachment of pendingAttachments.value) {
-    push(t('附件', 'Attachment'), attachment.name, `${attachment.name}${attachment.size ? ` (${formatFileSize(attachment.size)})` : ''}`)
-  }
-  return items
-})
+const taskToolActivities = computed(() => runtimeTaskProjection.value.tools)
+const taskReferenceItems = computed(() => runtimeTaskProjection.value.references)
+const taskMemoryItems = computed(() => runtimeTaskProjection.value.memories)
+const taskStaleReferences = computed(() => findStaleReferences(
+  taskReferenceItems.value,
+  taskDiff.value?.files || [],
+  taskDiff.value?.repo_root || '',
+))
 
 const taskRunStatusLabel = computed(() => {
   if (isCancellingRun.value) return t('停止中', 'Stopping')
@@ -1599,63 +1666,54 @@ const taskRunStatusLabel = computed(() => {
   return t('空闲', 'Idle')
 })
 
-const taskPlanItems = computed<TaskPlanItem[]>(() => {
-  const items: TaskPlanItem[] = []
-  const lastUserMessage = [...messages.value].reverse().find(message => message.role === 'user')
-  items.push({
-    id: 'input',
-    title: t('接收任务', 'Receive request'),
-    detail: lastUserMessage?.content || t('等待用户发送任务', 'Waiting for a user request'),
-    status: lastUserMessage ? 'done' : 'pending',
-  })
-  items.push({
-    id: 'context',
-    title: t('准备上下文', 'Prepare context'),
-    detail: taskReferenceItems.value.length
-      ? t(`已引用 ${taskReferenceItems.value.length} 项资料`, `${taskReferenceItems.value.length} references attached`)
-      : t('未选择额外资料', 'No extra references selected'),
-    status: lastUserMessage ? 'done' : 'pending',
-  })
-  const hasToolActivity = taskToolEvents.value.length > 0
-  items.push({
-    id: 'tools',
-    title: t('执行工具', 'Run tools'),
-    detail: hasToolActivity
-      ? t(`记录到 ${taskToolEvents.value.length} 条工具事件`, `${taskToolEvents.value.length} tool events recorded`)
-      : t('还没有工具调用', 'No tool calls yet'),
-    status: hasToolActivity ? (loading.value ? 'active' : 'done') : (loading.value ? 'active' : 'pending'),
-  })
-  const hasError = runtimeEvents.value.some(event => event.event_type === 'error')
-  items.push({
-    id: 'result',
+const taskPlanItems = computed(() => runtimeTaskProjection.value.plan.map(item => {
+  if (item.kind === 'request') {
+    return { ...item, title: t('接收任务', 'Receive request'), detail: item.title || t('已接收请求', 'Request received') }
+  }
+  if (item.kind === 'context') {
+    return { ...item, title: t('准备上下文', 'Prepare context'), detail: t(`已发送 ${item.title} 项资料`, `${item.title} references sent`) }
+  }
+  if (item.kind === 'step') {
+    return {
+      ...item,
+      title: t(`执行步骤 ${item.title}`, `Run step ${item.title}`),
+      detail: item.detail ? t(`耗时 ${Number(item.detail).toFixed(2)} 秒`, `${Number(item.detail).toFixed(2)} seconds`) : t('正在执行', 'Running'),
+    }
+  }
+  if (item.kind === 'tool') {
+    return { ...item, title: t(`调用工具：${item.title}`, `Tool: ${item.title}`), detail: item.detail || formatTaskToolStatus(item.status) }
+  }
+  return {
+    ...item,
     title: t('生成结果', 'Produce result'),
-    detail: hasError
-      ? t('运行中出现错误', 'The run reported an error')
-      : loading.value
-        ? t('正在生成回复', 'Generating response')
-        : t('当前没有进行中的运行', 'No active run'),
-    status: hasError ? 'error' : loading.value ? 'active' : runtimeEvents.value.length ? 'done' : 'pending',
-  })
-  return items
-})
+    detail: item.detail || (item.status === 'active' ? t('正在生成回复', 'Generating response') : t('运行已结束', 'Run finished')),
+  }
+}))
 
 const taskSections = computed(() => [
   { id: 'overview' as const, label: t('计划', 'Plan'), count: taskPlanItems.value.length },
-  { id: 'references' as const, label: t('引用', 'Refs'), count: taskReferenceItems.value.length },
-  { id: 'tools' as const, label: t('工具', 'Tools'), count: taskToolEvents.value.length },
+  { id: 'references' as const, label: t('引用', 'Refs'), count: taskReferenceItems.value.length + taskMemoryItems.value.length },
+  { id: 'tools' as const, label: t('工具', 'Tools'), count: taskToolActivities.value.length },
   { id: 'changes' as const, label: t('改动', 'Diff'), count: taskDiff.value?.files.length || 0 },
 ])
 
 const taskOverviewTotal = computed(() =>
   taskPlanItems.value.length +
   taskReferenceItems.value.length +
-  taskToolEvents.value.length +
+  taskMemoryItems.value.length +
+  taskToolActivities.value.length +
   (taskDiff.value?.files.length || 0),
 )
 
 const taskPanelLoading = computed(() =>
   runtimeLoading.value || taskDiffLoading.value,
 )
+
+const filteredTaskDiffFiles = computed(() => {
+  const query = taskDiffFilter.value.trim().toLowerCase()
+  const files = taskDiff.value?.files || []
+  return query ? files.filter(file => file.path.toLowerCase().includes(query)) : files
+})
 
 // 缈昏瘧鍑芥暟
 function t(zh: string, en: string): string {
@@ -1777,19 +1835,6 @@ function formatChatDate(timestamp?: string): string {
   })
 }
 
-function formatFileSize(bytes?: number | null): string {
-  if (!bytes && bytes !== 0) return ''
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function formatWorkspaceSourceKind(kind?: string): string {
-  if (kind === 'directory') return t('目录', 'Folder')
-  if (kind === 'web') return 'Web'
-  return t('文件', 'File')
-}
-
 function formatTaskDiffFileState(file: TaskDiffFile): string {
   const parts = []
   if (file.staged) parts.push(t('已暂存', 'staged'))
@@ -1815,6 +1860,23 @@ function toggleTaskFile(path: string): void {
     expanded.add(path)
   }
   expandedTaskFilePaths.value = expanded
+}
+
+function askAboutTaskDiff(file: TaskDiffFile): void {
+  inputMessage.value = t(
+    `请解释 ${file.path} 的当前改动，重点说明行为变化、风险和是否需要补测试。`,
+    `Explain the current changes in ${file.path}, focusing on behavior, risks, and missing tests.`,
+  )
+  focusActiveComposer()
+}
+
+function prepareRefreshContextPrompt(): void {
+  const paths = taskStaleReferences.value.map(item => item.path).join('\n')
+  inputMessage.value = t(
+    `以下文件在本轮读取后发生了修改，请重新读取并基于最新内容继续：\n${paths}`,
+    `These files changed after this run read them. Re-read them and continue using the latest content:\n${paths}`,
+  )
+  focusActiveComposer()
 }
 
 async function copyTaskText(text: string): Promise<void> {
@@ -1906,6 +1968,7 @@ async function switchAgentSession(agentId: string) {
     await createOrGetSession()
   }
   await loadChatHistory()
+  await refreshCollaborationState()
   resetRuntimeReplay()
   if (activeWorkspacePanel.value === 'runtime' && runtimePanelTab.value === 'task') {
     await refreshTaskPanel()
@@ -1938,6 +2001,7 @@ async function createOrGetSession() {
     const savedRunnerSessionId = localStorage.getItem(`session_${selectedAgentId.value}`)
     if (savedRunnerSessionId) {
       runnerSessionId.value = savedRunnerSessionId
+      setQueueScope(selectedAgentId.value, runnerSessionId.value)
       console.log('Restored runner chat channel:', runnerSessionId.value)
       return
     }
@@ -1946,6 +2010,7 @@ async function createOrGetSession() {
       ? `session_main_${Date.now()}`
       : `session_${selectedAgentId.value}_${Date.now()}`
     localStorage.setItem(`session_${selectedAgentId.value}`, runnerSessionId.value)
+    setQueueScope(selectedAgentId.value, runnerSessionId.value)
     console.log('Created runner chat channel:', runnerSessionId.value)
   } catch (error) {
     console.error('Failed to create runner chat channel:', error)
@@ -2027,8 +2092,48 @@ function saveMessages() {
 
 function resetRuntimeReplay() {
   runtimeThread.value = null
+  runtimeTurns.value = []
   runtimeEvents.value = []
   runtimeError.value = ''
+}
+
+function normalizeCollaborationStatus(status?: string): CollaborationStatus {
+  if (status === 'running' || status === 'queued' || status === 'completed' || status === 'failed' || status === 'cancelled') {
+    return status
+  }
+  return 'idle'
+}
+
+function agentRuntimeStatus(agentId: string): CollaborationStatus {
+  return deriveAgentStatus(agentId, agentTasks.value, activeRunAgentId.value)
+}
+
+function chatRuntimeStatus(chat: Chat): CollaborationStatus {
+  if (loading.value && chat.session_id === activeRunSessionId.value) return 'running'
+  const thread = runtimeThreads.value.find(item => item.session_id === chat.session_id)
+  return normalizeCollaborationStatus(thread?.latest_turn_status)
+}
+
+function collaborationStatusLabel(status: CollaborationStatus): string {
+  if (status === 'running') return t('运行中', 'Running')
+  if (status === 'queued') return t('排队', 'Queued')
+  if (status === 'completed') return t('完成', 'Completed')
+  if (status === 'failed') return t('失败', 'Failed')
+  if (status === 'cancelled') return t('已取消', 'Cancelled')
+  return t('空闲', 'Idle')
+}
+
+async function refreshCollaborationState(): Promise<void> {
+  const [threadsResult, tasksResult] = await Promise.allSettled([
+    api.getRuntimeThreads(undefined, selectedAgentId.value || 'main'),
+    agentApi.listTasks({ limit: 100 }),
+  ])
+  if (threadsResult.status === 'fulfilled') runtimeThreads.value = threadsResult.value
+  if (tasksResult.status === 'fulfilled') agentTasks.value = tasksResult.value
+}
+
+async function refreshRuntimeChats(): Promise<void> {
+  await Promise.all([chatStore.loadChats(), refreshCollaborationState()])
 }
 
 async function loadRuntimeCapabilities() {
@@ -2057,7 +2162,7 @@ async function openRuntimePanel() {
   activeWorkspacePanel.value = 'runtime'
   syncPanelWidths()
   runtimePanelTab.value = 'chats'
-  await chatStore.loadChats()
+  await refreshRuntimeChats()
 }
 
 function openSandboxPanel() {
@@ -2076,7 +2181,7 @@ function openSandboxPanel() {
 async function switchRuntimePanelTab(tab: RuntimePanelTab) {
   runtimePanelTab.value = tab
   if (tab === 'chats') {
-    await chatStore.loadChats()
+    await refreshRuntimeChats()
     return
   }
   await refreshTaskPanel()
@@ -2089,6 +2194,7 @@ async function openManagedChat(chat: Chat) {
   }
 
   runnerSessionId.value = chat.session_id
+  setQueueScope(selectedAgentId.value || 'main', chat.session_id)
   if (selectedAgentId.value) {
     localStorage.setItem(`session_${selectedAgentId.value}`, chat.session_id)
   }
@@ -2175,9 +2281,14 @@ async function loadRuntimeReplay() {
   runtimeLoading.value = true
   runtimeError.value = ''
   try {
-    const thread = await api.getRuntimeThreadBySession(runnerSessionId.value)
+    const profileId = selectedAgentId.value || 'main'
+    const thread = await api.getRuntimeThreadBySession(runnerSessionId.value, profileId)
     runtimeThread.value = thread
-    const events = await api.getRuntimeEvents(thread.thread_id, 0)
+    const [turns, events] = await Promise.all([
+      api.getRuntimeTurns(thread.thread_id, profileId),
+      api.getRuntimeEvents(thread.thread_id, 0, 1000, profileId),
+    ])
+    runtimeTurns.value = turns
     runtimeEvents.value = events
   } catch (error) {
     resetRuntimeReplay()
@@ -2243,6 +2354,26 @@ function syncRuntimeEventFromStream(event: AgentEvent) {
     metadata: { source: 'stream' },
   }
 
+  if (event.turn_id && !runtimeTurns.value.some(turn => turn.turn_id === event.turn_id)) {
+    const lastUserMessage = [...messages.value].reverse().find(message => message.role === 'user')
+    runtimeTurns.value.unshift({
+      turn_id: event.turn_id,
+      thread_id: event.thread_id,
+      session_id: event.session_id || runnerSessionId.value,
+      user_input: lastUserMessage?.content || '',
+      status: event.status === 'idle' ? 'completed' : (event.status || 'running'),
+      started_at: event.created_at || new Date().toISOString(),
+      metadata: {},
+    })
+  } else if (event.turn_id) {
+    const turn = runtimeTurns.value.find(item => item.turn_id === event.turn_id)
+    if (turn && ['complete', 'cancelled', 'error'].includes(event.event)) {
+      turn.status = event.event === 'error' ? 'failed' : event.event === 'cancelled' ? 'cancelled' : 'completed'
+      turn.completed_at = event.created_at || new Date().toISOString()
+      turn.error = event.error
+    }
+  }
+
   const existingIndex = runtimeEvents.value.findIndex(item => item.seq === runtimeEvent.seq)
   if (existingIndex >= 0) {
     runtimeEvents.value.splice(existingIndex, 1, runtimeEvent)
@@ -2252,25 +2383,28 @@ function syncRuntimeEventFromStream(event: AgentEvent) {
   }
 }
 
-function formatRuntimeEventSummary(event: RuntimeEvent): string {
-  const payload = event.payload as AgentEvent
-  if (payload.error) return payload.error
-  if (payload.tool_name) return payload.tool_name
-  if (payload.content) return payload.content
-  if (payload.status) return payload.status
-  return event.event_type
+function formatTaskReferenceKind(kind: string): string {
+  if (kind === 'attachment') return t('附件', 'Attachment')
+  if (kind === 'web') return 'Web'
+  return t('文件', 'File')
 }
 
-function formatRuntimeEventDetail(event: RuntimeEvent): string {
-  const payload = event.payload as AgentEvent
-  const detail = payload.arguments ?? payload.result
-  if (detail === undefined || detail === null || detail === '') return ''
-  if (typeof detail === 'string') return detail
-  try {
-    return JSON.stringify(detail, null, 2)
-  } catch {
-    return String(detail)
-  }
+function formatTaskToolStatus(status: string): string {
+  if (status === 'error') return t('失败', 'Failed')
+  if (status === 'done') return t('完成', 'Done')
+  if (status === 'pending') return t('等待', 'Pending')
+  return t('运行中', 'Running')
+}
+
+function formatTaskToolElapsed(elapsed?: number): string {
+  return elapsed === undefined ? '' : `${elapsed.toFixed(2)} s`
+}
+
+function formatTaskToolDetail(tool: RuntimeToolActivity): string {
+  const detail: Record<string, unknown> = { arguments: tool.arguments }
+  if (tool.result !== null && tool.result !== undefined) detail.result = tool.result
+  if (tool.error) detail.error = tool.error
+  return JSON.stringify(detail, null, 2)
 }
 
 async function forkCurrentTask() {
@@ -2282,6 +2416,7 @@ async function forkCurrentTask() {
     const nextRunnerSessionId = forked.chat.session_id
 
     runnerSessionId.value = nextRunnerSessionId
+    setQueueScope(selectedAgentId.value, nextRunnerSessionId)
     localStorage.setItem(`session_${selectedAgentId.value}`, nextRunnerSessionId)
     await loadChatHistory()
     resetRuntimeReplay()
@@ -2416,7 +2551,7 @@ function focusActiveComposer() {
 }
 
 function isAgentRunning(agentId: string): boolean {
-  return loading.value && activeRunAgentId.value === agentId
+  return agentRuntimeStatus(agentId) === 'running'
 }
 
 function selectMentionAgent(agent?: AgentConfig) {
@@ -2866,11 +3001,11 @@ function queuedAttachmentLabel(item: QueuedComposerMessage): string {
   return t(`含 ${item.attachments.length} 个附件`, `${item.attachments.length} attachment${item.attachments.length > 1 ? 's' : ''}`)
 }
 
-function queueComposerMessage(): boolean {
+function queueComposerMessage(kind: 'normal' | 'interrupt' = 'normal'): boolean {
   if (!canSendMessage.value || !selectedAgentId.value) return false
   const content = inputMessage.value.trim()
   const attachments = [...pendingAttachments.value]
-  if (!queueMessage(content, attachments)) return false
+  if (!queueMessage(content, attachments, kind)) return false
   inputMessage.value = ''
   pendingAttachments.value = []
   mentionTarget.value = null
@@ -2896,7 +3031,14 @@ async function sendNextQueuedMessage() {
   if (loading.value || queuedMessages.value.length === 0 || !selectedAgentId.value) return
   const next = nextQueuedMessage()
   if (!next) return
-  await sendMessage(next)
+  const sending = markQueuedMessageSending(next.id)
+  if (!sending) return
+  await sendMessage(sending)
+}
+
+function retryQueuedMessageNow(id: string) {
+  retryQueuedMessage(id)
+  if (!loading.value) void sendNextQueuedMessage()
 }
 
 function isImageAttachment(attachment: ChatAttachment) {
@@ -2944,11 +3086,14 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
   const rawContent = queuedMessage ? queuedMessage.content : inputMessage.value
   const route = resolveMentionRoute(rawContent)
   const attachments = queuedMessage ? [...queuedMessage.attachments] : [...pendingAttachments.value]
+  const queuedScope = queuedMessage
+    ? { agentId: queuedMessage.agentId, sessionId: queuedMessage.sessionId }
+    : undefined
 
   if (route.agentId && !route.message && attachments.length === 0) {
     await switchToMentionAgent(route.agentId)
     if (queuedMessage) {
-      removeQueuedMessage(queuedMessage.id)
+      removeQueuedMessage(queuedMessage.id, queuedScope)
     } else {
       inputMessage.value = ''
       mentionTarget.value = null
@@ -2970,9 +3115,7 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
   const userMessage = route.message
   const workspacePayload = mergedWorkspacePayload()
   const selectedWorkspacePayload = mergedSelectedWorkspacePaths()
-  if (queuedMessage) {
-    removeQueuedMessage(queuedMessage.id)
-  } else {
+  if (!queuedMessage) {
     inputMessage.value = ''
     pendingAttachments.value = []
     mentionTarget.value = null
@@ -3015,12 +3158,16 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
   try {
     let assistantContent = ''
     let runCancelled = false
+    let runError = ''
     
     // 浣跨敤 runner 閫氶亾 ID锛岃€屼笉鏄?agentId
     // 鐩戝惉鍚庣鍙戦€佺殑浜嬩欢锛歵hinking, tool_call, tool_result, complete, error
     await api.chat(sendSessionId, userMessage, (event) => {
       console.log('[Iteration Debug] Received event:', event)
       syncRuntimeEventFromStream(event)
+      if (event.event === 'run_start') {
+        void loadRuntimeReplay()
+      }
       if (event.event === 'context_compaction') {
         void refreshContextStatus()
       }
@@ -3122,6 +3269,7 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
       // 鐩戝惉閿欒浜嬩欢
       if (event.event === 'error' && event.error) {
         console.error('Agent error:', event.error)
+        runError = event.error
         assistantContent = `${t('调用失败：', 'Request failed: ')}${event.error}`
         assistantMessage.content = assistantContent
         assistantMessage.isLoading = false
@@ -3155,6 +3303,14 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
       )
     }
 
+    if (queuedMessage) {
+      if (runError) {
+        markQueuedMessageFailed(queuedMessage.id, runError, queuedScope)
+      } else {
+        removeQueuedMessage(queuedMessage.id, queuedScope)
+      }
+    }
+
     scrollToBottom()
   } catch (error) {
     console.error('Failed to send message:', error)
@@ -3163,6 +3319,13 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
       assistantMessage.thinking.isThinking = false
     }
     assistantMessage.content = t('抱歉，发生了错误。请重试。', 'Sorry, an error occurred. Please try again.')
+    if (queuedMessage) {
+      markQueuedMessageFailed(
+        queuedMessage.id,
+        error instanceof Error ? error.message : String(error),
+        queuedScope,
+      )
+    }
   } finally {
     loading.value = false
     isCancellingRun.value = false
@@ -3178,6 +3341,7 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
       await refreshTaskPanel()
     }
     await refreshContextStatus()
+    await refreshCollaborationState()
     await sendNextQueuedMessage()
   }
 }
@@ -3551,6 +3715,10 @@ onMounted(async () => {
     // 涓嶅啀鑷姩鍙戦€侀棶鍊欐秷鎭紙閬垮厤涓?CLI 閲嶅锛?
     // 鐢ㄦ埛鍙互涓诲姩杈撳叆娑堟伅寮€濮嬪璇?
   }
+  await refreshCollaborationState()
+  collaborationRefreshTimer = window.setInterval(() => {
+    void refreshCollaborationState()
+  }, 5000)
 })
 
 onUnmounted(() => {
@@ -3559,6 +3727,10 @@ onUnmounted(() => {
   window.removeEventListener('resize', handlePanelViewportResize)
   unlistenDesktopFileDrops?.()
   unlistenDesktopFileDrops = null
+  if (collaborationRefreshTimer !== undefined) {
+    window.clearInterval(collaborationRefreshTimer)
+    collaborationRefreshTimer = undefined
+  }
   stopSourceWorkspaceResize()
   stopWorkspaceResize()
 })
@@ -4714,6 +4886,19 @@ onUnmounted(() => {
   box-shadow: inset 0 1px 0 var(--glass-border);
 }
 
+.queued-message-item.interrupt {
+  border-color: color-mix(in srgb, var(--primary-color) 45%, var(--border-color));
+}
+
+.queued-message-item.status-sending {
+  opacity: 0.72;
+}
+
+.queued-message-item.status-failed {
+  border-color: color-mix(in srgb, #dc2626 55%, var(--border-color));
+  background: color-mix(in srgb, #dc2626 6%, var(--glass-bg));
+}
+
 .queued-message-order {
   display: inline-flex;
   align-items: center;
@@ -4746,6 +4931,17 @@ onUnmounted(() => {
   margin-top: 2px;
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.queued-message-kind,
+.queued-message-status {
+  color: var(--primary-color) !important;
+}
+
+.queued-message-error {
+  color: #dc2626 !important;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .queued-message-editor {
@@ -4783,6 +4979,10 @@ onUnmounted(() => {
   color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
+}
+
+.queue-now-button.interrupt {
+  color: var(--primary-color);
 }
 
 .queued-message-actions button {
@@ -5840,6 +6040,27 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--text-muted) 42%, transparent);
 }
 
+.agent-dock-idle.status-queued {
+  background: #d97706;
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
+.agent-dock-idle.status-completed {
+  background: #16a34a;
+}
+
+.agent-dock-idle.status-failed {
+  background: #dc2626;
+}
+
+.agent-dock-idle.status-cancelled {
+  background: #6b7280;
+}
+
+.agent-dock-card.status-failed {
+  border-color: color-mix(in srgb, #dc2626 45%, var(--border-color));
+}
+
 .agent-dock-equalizer {
   position: relative;
   z-index: 1;
@@ -6243,7 +6464,7 @@ onUnmounted(() => {
 
 .workspace-chat-item {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 34px;
+  grid-template-columns: 38px minmax(0, 1fr) auto 34px;
   align-items: center;
   gap: 10px;
   padding: 10px;
@@ -6253,6 +6474,31 @@ onUnmounted(() => {
   box-shadow: 0 10px 24px rgba(17, 24, 39, 0.05);
   cursor: pointer;
   transition: all 0.2s ease;
+}
+
+.workspace-chat-status {
+  padding: 3px 7px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-muted) 10%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.workspace-chat-status.status-running,
+.workspace-chat-status.status-completed {
+  color: #15803d;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.workspace-chat-status.status-queued {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.workspace-chat-status.status-failed {
+  color: #b91c1c;
+  background: rgba(220, 38, 38, 0.1);
 }
 
 .workspace-chat-item:hover,
@@ -6681,6 +6927,37 @@ onUnmounted(() => {
   text-align: center;
 }
 
+.task-context-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(217, 119, 6, 0.32);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.task-context-warning strong,
+.task-context-warning p {
+  margin: 0;
+}
+
+.task-context-warning strong {
+  color: #92400e;
+  font-size: 13px;
+}
+
+.task-context-warning p {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+@keyframes status-pulse {
+  50% { opacity: 0.35; }
+}
+
 .task-list,
 .task-tool-timeline {
   display: flex;
@@ -6699,6 +6976,21 @@ onUnmounted(() => {
 
 .task-list-item {
   min-width: 0;
+}
+
+.task-memory-row p {
+  display: -webkit-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.task-memory-importance {
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-transform: uppercase;
 }
 
 .task-kind {
@@ -6745,6 +7037,41 @@ onUnmounted(() => {
 .task-diff-meta {
   padding: 10px 12px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.task-diff-filter {
+  width: calc(100% - 24px);
+  min-height: 34px;
+  margin: 10px 12px 0;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--glass-bg-strong);
+  color: var(--text-primary);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.task-diff-filter:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.task-file-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.task-diff-preview {
+  position: relative;
+  padding-top: 8px;
+}
+
+.task-diff-preview > button {
+  display: block;
+  margin: 0 12px 6px auto;
 }
 
 .task-diff-stat {

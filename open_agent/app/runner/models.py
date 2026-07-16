@@ -94,6 +94,7 @@ class AgentEvent(BaseModel):
     created_at: Optional[str] = None
     step: Optional[int] = None
     content: Optional[str] = None
+    tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
     arguments: Optional[Dict[str, Any]] = None
     result: Optional[Any] = None
@@ -101,6 +102,7 @@ class AgentEvent(BaseModel):
     error: Optional[str] = None
     status: Optional[str] = None
     max_steps: Optional[int] = None
+    elapsed: Optional[float] = None
 
 
 # Chat file storage format

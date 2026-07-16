@@ -12,6 +12,7 @@ Examples:
 
 import argparse
 import asyncio
+import os
 import platform
 import subprocess
 import sys
@@ -39,6 +40,20 @@ from open_agent.user_config import (
     get_default_model,
     ModelConfigManager,
 )
+
+
+def _apply_cli_launch_context(agent: Agent, workspace_dir: Path) -> dict[str, str]:
+    session_id = os.environ.get("OPEN_AGENT_SESSION_ID", "").strip() or f"cli-{id(agent)}"
+    profile_id = os.environ.get("OPEN_AGENT_PROFILE_ID", "").strip() or "main"
+    launch_source = os.environ.get("OPEN_AGENT_LAUNCH_SOURCE", "").strip() or "terminal"
+    agent.session_id = session_id
+    agent.profile_id = profile_id
+    return {
+        "session_id": session_id,
+        "profile_id": profile_id,
+        "workspace_dir": str(workspace_dir),
+        "launch_source": launch_source,
+    }
 
 
 # select_model function - defined below after all imports
@@ -1490,6 +1505,7 @@ async def run_agent(
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
     )
+    launch_metadata = _apply_cli_launch_context(agent, workspace_dir)
 
     # 7.3 Register CLI Agent to AgentService (so Web UI can see it)
     cli_agent_id = f"cli_agent_{id(agent)}"
@@ -1514,7 +1530,7 @@ async def run_agent(
                 "model": model,
                 "provider": "CLI",
                 "message_count": 0,
-                "metadata": {},
+                "metadata": launch_metadata,
                 "to_dict": lambda self: {
                     "agent_id": self.agent_id,
                     "agent_type": self.agent_type,
@@ -1525,6 +1541,7 @@ async def run_agent(
                     "model": self.model,
                     "provider": self.provider,
                     "message_count": self.message_count,
+                    "metadata": self.metadata,
                 },
             },
         )()

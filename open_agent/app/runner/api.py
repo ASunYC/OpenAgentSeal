@@ -118,6 +118,7 @@ class TaskDiffFile(BaseModel):
     staged: bool = False
     unstaged: bool = False
     diff: str = ""
+    modified_at: float = 0
 
 
 class TaskDiffResponse(BaseModel):
@@ -149,6 +150,12 @@ def _get_control_plane_for_profile(profile_id: str | None):
 
     home = get_agent_profile_manager().get_agent_home(None if not profile_id or profile_id == "main" else profile_id)
     return get_control_plane(home)
+
+
+def _runtime_control_plane(profile_id: str | None):
+    if not profile_id or profile_id == "main":
+        return _get_control_plane()
+    return _get_control_plane_for_profile(profile_id)
 
 
 def _workspace_state_path() -> Path:
@@ -236,6 +243,10 @@ def _task_diff_snapshot() -> TaskDiffResponse:
         if item is not None
     ]
     for item in files[:30]:
+        try:
+            item.modified_at = (repo_root / item.path).stat().st_mtime
+        except OSError:
+            item.modified_at = 0
         if not item.path or item.status.startswith("??"):
             continue
         diff_parts: list[str] = []
@@ -860,24 +871,29 @@ async def fork_chat(request: ForkChatRequest) -> dict:
 @router.get("/runtime/threads")
 async def list_runtime_threads(
     user_id: str = Query(None),
+    profile_id: str = Query(None),
     include_archived: bool = Query(False),
     limit: int = Query(50, ge=1, le=500),
 ) -> dict:
     """List durable runtime threads."""
-    control_plane = _get_control_plane()
+    control_plane = _runtime_control_plane(profile_id)
+    threads = control_plane.list_runtime_threads(
+        user_id=user_id,
+        include_archived=include_archived,
+        limit=limit,
+    )
+    for thread in threads:
+        turns = control_plane.list_runtime_turns(thread["thread_id"], limit=1)
+        thread["latest_turn_status"] = turns[0]["status"] if turns else "idle"
     return {
-        "threads": control_plane.list_runtime_threads(
-            user_id=user_id,
-            include_archived=include_archived,
-            limit=limit,
-        )
+        "threads": threads
     }
 
 
 @router.get("/runtime/threads/session/{session_id}")
-async def get_runtime_thread_by_session(session_id: str) -> dict:
+async def get_runtime_thread_by_session(session_id: str, profile_id: str = Query(None)) -> dict:
     """Get the latest durable runtime thread for a chat session."""
-    control_plane = _get_control_plane()
+    control_plane = _runtime_control_plane(profile_id)
     thread = control_plane.get_runtime_thread_by_session(session_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Runtime thread not found")
@@ -885,9 +901,9 @@ async def get_runtime_thread_by_session(session_id: str) -> dict:
 
 
 @router.get("/runtime/threads/{thread_id}")
-async def get_runtime_thread(thread_id: str) -> dict:
+async def get_runtime_thread(thread_id: str, profile_id: str = Query(None)) -> dict:
     """Get durable runtime thread metadata."""
-    control_plane = _get_control_plane()
+    control_plane = _runtime_control_plane(profile_id)
     thread = control_plane.get_runtime_thread(thread_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Runtime thread not found")
@@ -897,10 +913,11 @@ async def get_runtime_thread(thread_id: str) -> dict:
 @router.get("/runtime/threads/{thread_id}/turns")
 async def list_runtime_turns(
     thread_id: str,
+    profile_id: str = Query(None),
     limit: int = Query(50, ge=1, le=500),
 ) -> dict:
     """List durable turns for a runtime thread."""
-    control_plane = _get_control_plane()
+    control_plane = _runtime_control_plane(profile_id)
     if not control_plane.get_runtime_thread(thread_id):
         raise HTTPException(status_code=404, detail="Runtime thread not found")
     return {"turns": control_plane.list_runtime_turns(thread_id, limit=limit)}
@@ -909,11 +926,12 @@ async def list_runtime_turns(
 @router.get("/runtime/threads/{thread_id}/events")
 async def list_runtime_events(
     thread_id: str,
+    profile_id: str = Query(None),
     since_seq: int = Query(0, ge=0),
     limit: int = Query(1000, ge=1, le=5000),
 ) -> dict:
     """Replay durable runtime events after a sequence number."""
-    control_plane = _get_control_plane()
+    control_plane = _runtime_control_plane(profile_id)
     if not control_plane.get_runtime_thread(thread_id):
         raise HTTPException(status_code=404, detail="Runtime thread not found")
     return {

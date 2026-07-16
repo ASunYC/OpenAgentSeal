@@ -548,6 +548,130 @@ class AgentRunner:
             context = context[:WEB_SEARCH_CONTEXT_MAX_CHARS] + "\n\n[联网搜索预取结果已截断]"
         return context
 
+    def _runtime_turn_metadata(
+        self,
+        request: AgentRequest,
+        *,
+        agent_id: str,
+        profile_id: str,
+        tool_access_mode: str,
+        memory_references: List[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
+        selected_paths = request.meta.get("selected_workspace_paths") or []
+        references: List[Dict[str, Any]] = []
+        remaining = WORKSPACE_MAX_SELECTED_FILES
+        seen: set[str] = set()
+
+        for raw_path in selected_paths if isinstance(selected_paths, list) else []:
+            value = str(raw_path or "").strip()
+            if not value:
+                continue
+            if self._is_web_url(value):
+                if value not in seen:
+                    seen.add(value)
+                    references.append({"kind": "web", "name": value, "path": value, "root": value})
+                continue
+
+            path = Path(value)
+            candidates: List[Path] = []
+            try:
+                if path.is_file():
+                    candidates = [path]
+                elif path.is_dir():
+                    candidates = [child for child in path.rglob("*") if child.is_file()]
+            except OSError:
+                candidates = []
+
+            for candidate in candidates:
+                if remaining <= 0:
+                    break
+                candidate_path = str(candidate)
+                if candidate_path in seen:
+                    continue
+                try:
+                    modified_at = candidate.stat().st_mtime
+                except OSError:
+                    continue
+                seen.add(candidate_path)
+                remaining -= 1
+                references.append({
+                    "kind": "file",
+                    "name": candidate.name,
+                    "path": candidate_path,
+                    "root": value,
+                    "modified_at": modified_at,
+                })
+
+        attachments: List[Dict[str, Any]] = []
+        if request.messages:
+            last_message = request.messages[-1]
+            raw_attachments = (
+                last_message.get("attachments")
+                if isinstance(last_message, dict)
+                else getattr(last_message, "attachments", None)
+            )
+            for attachment in raw_attachments if isinstance(raw_attachments, list) else []:
+                if not isinstance(attachment, dict):
+                    continue
+                name = str(attachment.get("name") or "attachment")
+                attachments.append({
+                    "kind": "attachment",
+                    "name": name,
+                    "path": name,
+                    "mime_type": str(attachment.get("mime_type") or ""),
+                    "size": int(attachment.get("size") or 0),
+                })
+
+        return {
+            "agent_id": agent_id,
+            "profile_id": profile_id,
+            "tool_access_mode": tool_access_mode,
+            "selected_workspace_paths": [str(path) for path in selected_paths if path]
+            if isinstance(selected_paths, list)
+            else [],
+            "workspace_references": references,
+            "attachments": attachments,
+            "memory_references": memory_references or [],
+        }
+
+    def _recall_memory_context(
+        self,
+        query: str,
+        injected_memory_ids: set[int | str],
+    ) -> tuple[str, List[Dict[str, Any]]]:
+        from open_agent.memory_manager import get_memory_manager
+
+        try:
+            memories = get_memory_manager().recall(query=query, limit=8)
+        except Exception:
+            logger.warning("Memory recall failed for the current turn", exc_info=True)
+            return "", []
+
+        seen = {str(memory_id) for memory_id in injected_memory_ids}
+        references: List[Dict[str, Any]] = []
+        context_lines: List[str] = []
+        for memory in memories:
+            memory_id = str(getattr(memory, "id", ""))
+            content = str(getattr(memory, "content", "")).strip()
+            if not memory_id or not content or memory_id in seen:
+                continue
+            seen.add(memory_id)
+            preview = content[:1000]
+            references.append({
+                "id": getattr(memory, "id", memory_id),
+                "category": str(getattr(memory, "category", "general")),
+                "importance": str(getattr(memory, "importance", "normal")),
+                "content": preview,
+            })
+            context_lines.append(f"- [memory:{memory_id}] {preview}")
+            if len(references) >= 5:
+                break
+
+        if not references:
+            return "", []
+        context = "\n\n## Recalled Memories\nUse these only when relevant to the current request:\n" + "\n".join(context_lines)
+        return context, references
+
     def _append_context_to_agent_content(
         self,
         content: str | List[Dict[str, Any]],
@@ -897,6 +1021,19 @@ class AgentRunner:
         )
         search_context = await self._prefetch_web_search_context(user_content)
         agent_user_content = self._append_context_to_agent_content(agent_user_content, search_context)
+        existing_memory_ids = list(chat.meta.get("injected_memory_ids") or [])
+        injected_memory_ids = set(existing_memory_ids)
+        memory_context, memory_references = self._recall_memory_context(
+            user_content,
+            injected_memory_ids,
+        )
+        agent_user_content = self._append_context_to_agent_content(agent_user_content, memory_context)
+        if memory_references:
+            chat.meta["injected_memory_ids"] = [
+                *existing_memory_ids,
+                *[reference["id"] for reference in memory_references],
+            ][-200:]
+            await chat_manager.update_chat(chat)
         
         # Add user message to history
         user_attachments = []
@@ -922,7 +1059,13 @@ class AgentRunner:
         runtime_turn = control_plane.start_runtime_turn(
             runtime_thread["thread_id"],
             user_input=user_content,
-            metadata={"agent_id": agent_id, "profile_id": profile_id, "tool_access_mode": tool_access_mode},
+            metadata=self._runtime_turn_metadata(
+                request,
+                agent_id=agent_id,
+                profile_id=profile_id,
+                tool_access_mode=tool_access_mode,
+                memory_references=memory_references,
+            ),
         )
 
         def persist_event(event: AgentEvent) -> AgentEvent:
@@ -1003,6 +1146,7 @@ class AgentRunner:
                 session_id=session_id,
                 step=event_data.get("step"),
                 content=event_data.get("content"),
+                tool_call_id=event_data.get("tool_call_id"),
                 tool_name=event_data.get("tool_name"),
                 arguments=event_data.get("arguments"),
                 result=event_data.get("result"),
@@ -1010,6 +1154,7 @@ class AgentRunner:
                 error=event_data.get("error"),
                 status=event_data.get("status"),
                 max_steps=event_data.get("max_steps"),
+                elapsed=event_data.get("elapsed"),
             )
             await event_queue.put(event)
 

@@ -601,11 +601,13 @@ Requirements:
                 tool_call_id = tool_call.id
                 function_name = tool_call.function.name
                 arguments = tool_call.function.arguments
+                tool_start_time = perf_counter()
 
                 # 发送工具调用状态
                 self.current_status = "tool_call"
                 self.current_tool_call = {"name": function_name, "arguments": arguments}
                 self._emit_status("tool_call", {
+                    "tool_call_id": tool_call_id,
                     "tool_name": function_name,
                     "arguments": arguments
                 })
@@ -679,10 +681,12 @@ Requirements:
                 
                 # 发送工具结果状态
                 self._emit_status("tool_result", {
+                    "tool_call_id": tool_call_id,
                     "tool_name": function_name,
                     "success": result.success,
                     "content": result.content[:500] if result.success and result.content else None,
-                    "error": result.error if not result.success else None
+                    "error": result.error if not result.success else None,
+                    "elapsed": perf_counter() - tool_start_time,
                 })
 
                 # Submit tool call to log memory

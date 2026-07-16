@@ -159,6 +159,7 @@ export interface AgentEvent {
   created_at?: string
   status?: string
   content?: string
+  tool_call_id?: string
   step?: number
   max_steps?: number
   tool_name?: string
@@ -191,6 +192,7 @@ export interface RuntimeThread {
   created_at: string
   updated_at: string
   metadata?: Record<string, any>
+  latest_turn_status?: string
 }
 
 export interface RuntimeTurn {
@@ -224,6 +226,7 @@ export interface TaskDiffFile {
   staged: boolean
   unstaged: boolean
   diff: string
+  modified_at: number
 }
 
 export interface TaskDiffResponse {
@@ -340,6 +343,19 @@ export interface AgentConfig {
   enabled?: boolean
   created_at: string
   updated_at: string
+}
+
+export interface AgentTaskSummary {
+  task_id: string
+  session_id: string
+  profile_id: string
+  parent_session_id?: string | null
+  instruction: string
+  status: string
+  result?: unknown
+  error?: string | null
+  created_at?: string
+  updated_at?: string
 }
 
 // Agent 类型别名，用于视图组件

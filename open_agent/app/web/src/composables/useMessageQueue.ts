@@ -1,112 +1,117 @@
 import { ref } from 'vue'
 import type { ChatAttachment } from '@/types'
+import {
+  createQueueItem,
+  markQueueItemFailed,
+  markQueueItemSending,
+  parseStoredQueue,
+  retryQueueItem,
+  selectNextQueueItem,
+  serializeQueue,
+  type MessageQueueScope,
+  type QueueMessageKind,
+  type QueuedComposerMessage,
+} from '@/models/messageQueue'
 
-const STORAGE_PREFIX = 'open_agent_seal_message_queue_v1'
+const STORAGE_PREFIX = 'open_agent_seal_message_queue_v2'
+const LEGACY_STORAGE_PREFIX = 'open_agent_seal_message_queue_v1'
 
-export interface QueuedComposerMessage {
-  id: string
-  content: string
-  draftContent: string
-  attachments: ChatAttachment[]
-  editing: boolean
-  createdAt: string
-}
-
-interface StoredQueuedComposerMessage {
-  id?: string
-  content?: string
-  draftContent?: string
-  attachments?: ChatAttachment[]
-  createdAt?: string
-}
+export type { QueuedComposerMessage } from '@/models/messageQueue'
 
 function cloneAttachments(attachments: ChatAttachment[]): ChatAttachment[] {
   return attachments.map((attachment) => ({ ...attachment }))
 }
 
-function generateQueueId(): string {
-  return `queue_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+function safeStorageKey(scope: MessageQueueScope): string {
+  return `${STORAGE_PREFIX}:${encodeURIComponent(scope.agentId || 'main')}:${encodeURIComponent(scope.sessionId || '')}`
 }
 
-function safeStorageKey(scopeId: string): string {
-  return `${STORAGE_PREFIX}:${scopeId || 'main'}`
-}
-
-function normalizeStoredItem(item: StoredQueuedComposerMessage): QueuedComposerMessage | null {
-  const content = String(item.content || '').trim()
-  const attachments = Array.isArray(item.attachments) ? cloneAttachments(item.attachments) : []
-  if (!content && attachments.length === 0) return null
-
+function normalizeScope(scope: MessageQueueScope): MessageQueueScope {
   return {
-    id: item.id || generateQueueId(),
-    content,
-    draftContent: String(item.draftContent || content),
-    attachments,
-    editing: false,
-    createdAt: item.createdAt || new Date().toISOString(),
+    agentId: scope.agentId || 'main',
+    sessionId: scope.sessionId || '',
   }
 }
 
 export function useMessageQueue() {
   const queuedMessages = ref<QueuedComposerMessage[]>([])
-  const queueScopeId = ref('main')
+  const queueScope = ref<MessageQueueScope>({ agentId: 'main', sessionId: '' })
 
-  function persist() {
-    if (typeof localStorage === 'undefined') return
-    const storageItems = queuedMessages.value.map((item) => ({
-      id: item.id,
-      content: item.content,
-      draftContent: item.draftContent,
-      attachments: cloneAttachments(item.attachments),
-      createdAt: item.createdAt,
-    }))
-    const key = safeStorageKey(queueScopeId.value)
-    if (storageItems.length === 0) {
-      localStorage.removeItem(key)
-      return
-    }
-    localStorage.setItem(key, JSON.stringify(storageItems))
+  function isCurrentScope(scope: MessageQueueScope): boolean {
+    const normalized = normalizeScope(scope)
+    return normalized.agentId === queueScope.value.agentId
+      && normalized.sessionId === queueScope.value.sessionId
   }
 
-  function load(scopeId = queueScopeId.value) {
-    queueScopeId.value = scopeId || 'main'
+  function persistItems(scope: MessageQueueScope, items: QueuedComposerMessage[]) {
+    if (typeof localStorage === 'undefined') return
+    const key = safeStorageKey(normalizeScope(scope))
+    if (items.length === 0) {
+      localStorage.removeItem(key)
+    } else {
+      localStorage.setItem(key, serializeQueue(items))
+    }
+  }
+
+  function persist() {
+    persistItems(queueScope.value, queuedMessages.value)
+  }
+
+  function load(scope = queueScope.value) {
+    queueScope.value = normalizeScope(scope)
     if (typeof localStorage === 'undefined') {
       queuedMessages.value = []
       return
     }
 
-    try {
-      const raw = localStorage.getItem(safeStorageKey(queueScopeId.value))
-      const parsed = raw ? JSON.parse(raw) : []
-      queuedMessages.value = Array.isArray(parsed)
-        ? parsed.map(normalizeStoredItem).filter((item): item is QueuedComposerMessage => Boolean(item))
-        : []
-    } catch (error) {
-      console.error('Failed to load queued messages:', error)
-      queuedMessages.value = []
+    const key = safeStorageKey(queueScope.value)
+    const stored = localStorage.getItem(key)
+    queuedMessages.value = parseStoredQueue(stored, queueScope.value)
+
+    if (!stored && queueScope.value.sessionId) {
+      const unscoped = { agentId: queueScope.value.agentId, sessionId: '' }
+      const unscopedKey = safeStorageKey(unscoped)
+      const restored = parseStoredQueue(localStorage.getItem(unscopedKey), unscoped)
+      if (restored.length > 0) {
+        queuedMessages.value = restored.map(item => ({ ...item, sessionId: queueScope.value.sessionId }))
+        persist()
+        localStorage.removeItem(unscopedKey)
+      }
+    } else if (!stored && !queueScope.value.sessionId) {
+      const legacyKey = `${LEGACY_STORAGE_PREFIX}:${queueScope.value.agentId}`
+      queuedMessages.value = parseStoredQueue(localStorage.getItem(legacyKey), queueScope.value)
+      if (queuedMessages.value.length > 0) {
+        persist()
+        localStorage.removeItem(legacyKey)
+      }
     }
   }
 
-  function setQueueScope(scopeId: string) {
-    const nextScope = scopeId || 'main'
-    if (nextScope === queueScopeId.value) return
+  function setQueueScope(agentId: string, sessionId = '') {
+    const nextScope = { agentId: agentId || 'main', sessionId: sessionId || '' }
+    if (
+      nextScope.agentId === queueScope.value.agentId
+      && nextScope.sessionId === queueScope.value.sessionId
+    ) return
     persist()
     load(nextScope)
   }
 
-  function queueMessage(content: string, attachments: ChatAttachment[] = []): boolean {
+  function queueMessage(
+    content: string,
+    attachments: ChatAttachment[] = [],
+    kind: QueueMessageKind = 'normal',
+  ): boolean {
     const nextContent = content.trim()
     const nextAttachments = cloneAttachments(attachments)
     if (!nextContent && nextAttachments.length === 0) return false
 
-    queuedMessages.value.push({
-      id: generateQueueId(),
+    queuedMessages.value.push(createQueueItem({
       content: nextContent,
-      draftContent: nextContent,
       attachments: nextAttachments,
-      editing: false,
-      createdAt: new Date().toISOString(),
-    })
+      kind,
+      scope: queueScope.value,
+    }))
     persist()
     return true
   }
@@ -135,9 +140,16 @@ export function useMessageQueue() {
     persist()
   }
 
-  function removeQueuedMessage(id: string) {
-    queuedMessages.value = queuedMessages.value.filter((item) => item.id !== id)
-    persist()
+  function removeQueuedMessage(id: string, scope = queueScope.value) {
+    const normalized = normalizeScope(scope)
+    if (isCurrentScope(normalized)) {
+      queuedMessages.value = queuedMessages.value.filter((item) => item.id !== id)
+      persist()
+      return
+    }
+    if (typeof localStorage === 'undefined') return
+    const items = parseStoredQueue(localStorage.getItem(safeStorageKey(normalized)), normalized)
+    persistItems(normalized, items.filter(item => item.id !== id))
   }
 
   function takeQueuedMessage(id: string): QueuedComposerMessage | null {
@@ -152,7 +164,40 @@ export function useMessageQueue() {
   }
 
   function nextQueuedMessage(): QueuedComposerMessage | null {
-    return queuedMessages.value.find((item) => !item.editing) || null
+    return selectNextQueueItem(queuedMessages.value)
+  }
+
+  function markQueuedMessageSending(id: string): QueuedComposerMessage | null {
+    const index = queuedMessages.value.findIndex(item => item.id === id)
+    if (index < 0) return null
+    const next = markQueueItemSending(queuedMessages.value[index])
+    queuedMessages.value[index] = next
+    persist()
+    return { ...next, attachments: cloneAttachments(next.attachments) }
+  }
+
+  function markQueuedMessageFailed(id: string, error: string, scope = queueScope.value) {
+    const normalized = normalizeScope(scope)
+    if (isCurrentScope(normalized)) {
+      const index = queuedMessages.value.findIndex(item => item.id === id)
+      if (index < 0) return
+      queuedMessages.value[index] = markQueueItemFailed(queuedMessages.value[index], error)
+      persist()
+      return
+    }
+    if (typeof localStorage === 'undefined') return
+    const items = parseStoredQueue(localStorage.getItem(safeStorageKey(normalized)), normalized)
+    const index = items.findIndex(item => item.id === id)
+    if (index < 0) return
+    items[index] = markQueueItemFailed(items[index], error)
+    persistItems(normalized, items)
+  }
+
+  function retryQueuedMessage(id: string) {
+    const index = queuedMessages.value.findIndex(item => item.id === id)
+    if (index < 0) return
+    queuedMessages.value[index] = retryQueueItem(queuedMessages.value[index])
+    persist()
   }
 
   function clearQueue() {
@@ -160,11 +205,11 @@ export function useMessageQueue() {
     persist()
   }
 
-  load(queueScopeId.value)
+  load(queueScope.value)
 
   return {
     queuedMessages,
-    queueScopeId,
+    queueScope,
     setQueueScope,
     queueMessage,
     editQueuedMessage,
@@ -173,6 +218,9 @@ export function useMessageQueue() {
     removeQueuedMessage,
     takeQueuedMessage,
     nextQueuedMessage,
+    markQueuedMessageSending,
+    markQueuedMessageFailed,
+    retryQueuedMessage,
     clearQueue,
   }
 }

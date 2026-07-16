@@ -374,13 +374,6 @@ fn open_backend_log_file() -> Result<(), String> {
     open_target(path.to_string_lossy().as_ref())
 }
 
-fn current_user_label() -> String {
-    let username = env::var("USERNAME")
-        .or_else(|_| env::var("USER"))
-        .unwrap_or_else(|_| "Unknown".to_string());
-    format!("User  {username}")
-}
-
 fn open_target(target: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut command = {
@@ -458,17 +451,9 @@ fn format_cli_command_line(program: &Path, args: &[String], cwd: &Path) -> Strin
     command.extend(args.iter().map(|arg| quote_display_arg(arg)));
 
     if cfg!(target_os = "windows") {
-        format!(
-            "cd /d {} && {}",
-            quote_display_path(cwd),
-            command.join(" ")
-        )
+        format!("cd /d {} && {}", quote_display_path(cwd), command.join(" "))
     } else {
-        format!(
-            "cd {} && {}",
-            quote_display_path(cwd),
-            command.join(" ")
-        )
+        format!("cd {} && {}", quote_display_path(cwd), command.join(" "))
     }
 }
 
@@ -511,6 +496,9 @@ fn write_cli_cmd_script(program: &Path, args: &[String], cwd: &Path) -> Result<P
          set \"PYTHONUTF8=1\"\r\n\
          set \"PYTHONIOENCODING=utf-8\"\r\n\
          set \"TERM=\"\r\n\
+         set \"OPEN_AGENT_LAUNCH_SOURCE=desktop-tray\"\r\n\
+         set \"OPEN_AGENT_SESSION_ID=cli-{timestamp}\"\r\n\
+         set \"OPEN_AGENT_PROFILE_ID=main\"\r\n\
          set \"OPEN_AGENT_CLI_TEMP={runtime_temp}\"\r\n\
          if not exist \"%OPEN_AGENT_CLI_TEMP%\" mkdir \"%OPEN_AGENT_CLI_TEMP%\"\r\n\
          set \"TEMP=%OPEN_AGENT_CLI_TEMP%\"\r\n\
@@ -539,28 +527,73 @@ fn write_cli_cmd_script(program: &Path, args: &[String], cwd: &Path) -> Result<P
 }
 
 #[cfg(target_os = "windows")]
-fn write_cli_launcher_script(cli_script_path: &Path) -> Result<PathBuf, String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("Failed to generate CLI launcher name: {error}"))?
-        .as_millis();
-    let launcher_path = env::temp_dir().join(format!(
-        "open-agent-seal-cli-launcher-{}-{timestamp}.cmd",
-        std::process::id()
-    ));
-    let cli_script = quote_cmd_script_arg(&cli_script_path.to_string_lossy())?;
-    let launcher = format!(
-        "@echo off\r\n\
-         start \"\" cmd.exe /D /V:OFF /K {cli_script}\r\n"
-    );
+fn quote_powershell_literal(value: &str) -> Result<String, String> {
+    if value.contains(['\0', '\r', '\n']) {
+        return Err("CLI command contains a control character".to_string());
+    }
+    Ok(format!("'{}'", value.replace('\'', "''")))
+}
 
-    std::fs::write(&launcher_path, launcher)
-        .map_err(|error| format!("Failed to write CLI launcher script: {error}"))?;
-    append_desktop_log(&format!(
-        "Wrote CLI launcher script: {}",
-        launcher_path.to_string_lossy()
-    ));
-    Ok(launcher_path)
+#[cfg(target_os = "windows")]
+fn spawn_windows_cli_terminal(script_path: &Path, cwd: &Path) -> Result<String, String> {
+    let script = script_path.to_string_lossy().into_owned();
+    let powershell_command = format!("& {}", quote_powershell_literal(&script)?);
+    let candidates = [
+        (
+            "Windows Terminal",
+            "wt.exe",
+            vec![
+                "new-tab".to_string(),
+                "--title".to_string(),
+                "OpenAgentSeal CLI".to_string(),
+                "cmd.exe".to_string(),
+                "/D".to_string(),
+                "/V:OFF".to_string(),
+                "/K".to_string(),
+                script.clone(),
+            ],
+        ),
+        (
+            "PowerShell",
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                powershell_command,
+            ],
+        ),
+        (
+            "Command Prompt",
+            "cmd.exe",
+            vec![
+                "/D".to_string(),
+                "/V:OFF".to_string(),
+                "/K".to_string(),
+                script,
+            ],
+        ),
+    ];
+
+    let mut errors = Vec::new();
+    for (label, program, args) in candidates {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
+            .env_remove("TERM");
+        match command.spawn() {
+            Ok(_) => return Ok(label.to_string()),
+            Err(error) => errors.push(format!("{label}: {error}")),
+        }
+    }
+
+    Err(format!(
+        "No supported terminal could be started. {}",
+        errors.join("; ")
+    ))
 }
 
 fn write_cli_command_info(command_config: &BackendCommand) -> Result<PathBuf, String> {
@@ -568,7 +601,7 @@ fn write_cli_command_info(command_config: &BackendCommand) -> Result<PathBuf, St
 
     #[cfg(target_os = "windows")]
     {
-        return write_cli_cmd_script(&program, &args, &cwd);
+        write_cli_cmd_script(&program, &args, &cwd)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -590,7 +623,10 @@ fn write_cli_command_info(command_config: &BackendCommand) -> Result<PathBuf, St
 
 fn open_cli_command_script(command_config: &BackendCommand) -> Result<(), String> {
     let path = write_cli_command_info(command_config)?;
-    append_desktop_log(&format!("CLI command: {}", cli_command_line(command_config)));
+    append_desktop_log(&format!(
+        "CLI command: {}",
+        cli_command_line(command_config)
+    ));
     append_desktop_log(&format!(
         "Opening CLI command script: {}",
         path.to_string_lossy()
@@ -666,26 +702,23 @@ fn open_cli_terminal(command_config: &BackendCommand) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let script_path = write_cli_cmd_script(&program, &args, &cwd)?;
-        let launcher_path = write_cli_launcher_script(&script_path)?;
         append_desktop_log(&format!(
-            "Opening CLI terminal via launcher: {}",
-            launcher_path.to_string_lossy()
+            "CLI command: {}",
+            cli_command_line(command_config)
         ));
-
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/D")
-            .arg("/C")
-            .arg(&launcher_path)
-            .current_dir(&cwd)
-            .env("PYTHONUTF8", "1")
-            .env("PYTHONIOENCODING", "utf-8")
-            .env_remove("TERM");
-
-        cmd.spawn()
-            .map(|_| {
-                append_desktop_log("CLI launcher process spawned");
-            })
-            .map_err(|error| format!("Failed to open CLI terminal: {error}"))
+        match spawn_windows_cli_terminal(&script_path, &cwd) {
+            Ok(terminal) => {
+                append_desktop_log(&format!("CLI opened in {terminal}"));
+                Ok(())
+            }
+            Err(error) => {
+                append_desktop_log(&format!(
+                    "CLI launch failed; command script remains at {}",
+                    script_path.to_string_lossy()
+                ));
+                Err(error)
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -816,43 +849,20 @@ fn main() {
                 finish_startup(&app_handle);
             });
 
-            let frontend_header = MenuItemBuilder::new("Frontend").enabled(false).build(app)?;
             let open = MenuItemBuilder::with_id("open", "Open Window").build(app)?;
             let browser = MenuItemBuilder::with_id("browser", "Open in Browser").build(app)?;
-
-            let backend_header = MenuItemBuilder::new("Backend").enabled(false).build(app)?;
             let cli = MenuItemBuilder::with_id("cli", "Open CLI").build(app)?;
-            let cli_script =
-                MenuItemBuilder::with_id("cli_script", "Open CLI Script").build(app)?;
+            let cli_script = MenuItemBuilder::with_id("cli_script", "CLI Command").build(app)?;
             let restart = MenuItemBuilder::with_id("restart", "Restart Backend").build(app)?;
-            let logs = MenuItemBuilder::with_id("logs", "Open Backend Log").build(app)?;
-
-            let account_header = MenuItemBuilder::new("Account").enabled(false).build(app)?;
-            let user = MenuItemBuilder::new(current_user_label())
-                .enabled(false)
-                .build(app)?;
-
-            let info_header = MenuItemBuilder::new("Info").enabled(false).build(app)?;
-            let version = MenuItemBuilder::new(format!("Version  v{}", env!("CARGO_PKG_VERSION")))
-                .enabled(false)
-                .build(app)?;
-            let about = MenuItemBuilder::with_id("about", "About Us").build(app)?;
-
+            let logs = MenuItemBuilder::with_id("logs", "Backend Log").build(app)?;
+            let about = MenuItemBuilder::with_id("about", "About").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
-                .item(&frontend_header)
                 .items(&[&open, &browser])
                 .separator()
-                .item(&backend_header)
                 .items(&[&cli, &cli_script, &restart, &logs])
                 .separator()
-                .item(&account_header)
-                .item(&user)
-                .separator()
-                .item(&info_header)
-                .items(&[&version, &about])
-                .separator()
-                .item(&quit)
+                .items(&[&about, &quit])
                 .build()?;
 
             TrayIconBuilder::new()
@@ -908,7 +918,7 @@ fn main() {
                         ..
                     } = event
                     {
-                        show_main_window(&tray.app_handle());
+                        show_main_window(tray.app_handle());
                     }
                 })
                 .build(app)?;
@@ -961,5 +971,31 @@ mod tests {
         assert!(command.contains("--cli-only"));
         assert!(command.contains("--workspace"));
         assert!(command.contains("D:\\git-workspace\\AI\\Agent\\OpenAgentSeal"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cli_script_includes_launch_metadata() {
+        let path = write_cli_cmd_script(
+            Path::new("python.exe"),
+            &["-m".to_string(), "open_agent".to_string()],
+            Path::new("D:\\workspace"),
+        )
+        .expect("script should be created");
+        let script = std::fs::read_to_string(&path).expect("script should be readable");
+        let _ = std::fs::remove_file(path);
+
+        assert!(script.contains("OPEN_AGENT_LAUNCH_SOURCE=desktop-tray"));
+        assert!(script.contains("OPEN_AGENT_SESSION_ID=cli-"));
+        assert!(script.contains("OPEN_AGENT_PROFILE_ID=main"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_literal_escapes_single_quotes() {
+        assert_eq!(
+            quote_powershell_literal("C:\\User's Files\\cli.cmd").unwrap(),
+            "'C:\\User''s Files\\cli.cmd'"
+        );
     }
 }
