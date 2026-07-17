@@ -168,9 +168,9 @@
             </div>
           </div>
           <div class="form-group">
-            <label>{{ t('最大步骤数', 'Max Steps') }}</label>
-            <input v-model.number="editingAgent.max_steps" type="number" min="1" max="500" :placeholder="t('默认 100', 'Default 100')" />
-            <small class="form-hint">{{ t('设置智能体单次任务的最大步骤数', 'Set maximum steps for single task') }}</small>
+            <label>{{ t('最大执行迭代数', 'Max Execution Iterations') }}</label>
+            <input v-model.number="editingAgent.max_steps" type="number" min="1" max="1000" :placeholder="t('默认 100', 'Default 100')" />
+            <small class="form-hint">{{ t('单次任务的安全上限；达到后会生成收尾报告，可继续追问', 'Per-task safety limit; a final report is generated when reached') }}</small>
           </div>
           <div class="form-group">
             <label>{{ t('温度参数', 'Temperature') }}</label>

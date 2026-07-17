@@ -81,7 +81,7 @@ class Agent:
         self.tools = {tool.name: tool for tool in tools}
         self.tool_registry = build_tool_registry(tools)
         self.tool_access_mode = "full" if tool_access_mode == "full" else "default"
-        self.max_steps = max_steps
+        self.max_steps = max(1, int(max_steps))
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
         self.interactive = interactive
@@ -130,8 +130,12 @@ class Agent:
         # Initialize log memory worker for automatic step log compression
         self._log_memory_worker: Optional[LogMemoryWorker] = None
 
-        # Token usage from last API response (updated after each LLM call)
+        # The latest response usage drives context compaction checks. Session
+        # counters are cumulative and back the CLI's token-usage display.
         self.api_total_tokens: int = 0
+        self.session_prompt_tokens: int = 0
+        self.session_completion_tokens: int = 0
+        self.session_total_tokens: int = 0
         # Flag to skip token check right after summary (avoid consecutive triggers)
         self._skip_next_token_check: bool = False
 
@@ -172,6 +176,82 @@ class Agent:
     def add_user_message(self, content: str | list[dict[str, Any]]):
         """Add a user message to history."""
         self.messages.append(Message(role="user", content=content))
+
+    def estimate_context_tokens(self) -> int:
+        """Return the estimated token count for the active message context."""
+        return self._estimate_tokens()
+
+    def reset_session_usage(self) -> None:
+        """Reset API usage counters for a newly started conversation."""
+        self.api_total_tokens = 0
+        self.session_prompt_tokens = 0
+        self.session_completion_tokens = 0
+        self.session_total_tokens = 0
+
+    def _record_token_usage(self, usage: Any) -> None:
+        prompt_tokens = max(0, int(getattr(usage, "prompt_tokens", 0) or 0))
+        completion_tokens = max(0, int(getattr(usage, "completion_tokens", 0) or 0))
+        reported_total = max(0, int(getattr(usage, "total_tokens", 0) or 0))
+        total_tokens = reported_total or (prompt_tokens + completion_tokens)
+
+        self.api_total_tokens = total_tokens
+        self.session_prompt_tokens += prompt_tokens
+        self.session_completion_tokens += completion_tokens
+        self.session_total_tokens += total_tokens
+
+    async def _finalize_at_iteration_limit(self) -> str:
+        """Ask for one tool-free final response when the safety limit is reached."""
+        limit_message = (
+            f"Execution reached the configured safety limit of {self.max_steps} iterations. "
+            "Give the user a concise final response that summarizes what was completed, "
+            "what remains, and any blocker. Do not call tools."
+        )
+        self.current_status = "finalizing"
+        self._emit_status("iteration_limit", {"max_steps": self.max_steps})
+
+        try:
+            response = await self.llm.generate(
+                messages=[*self.messages, Message(role="user", content=limit_message)],
+                tools=None,
+            )
+            if response.usage:
+                self._record_token_usage(response.usage)
+            final_content = response.content.strip()
+            if not final_content:
+                raise ValueError("The model returned an empty final response")
+
+            self.logger.log_response(
+                content=response.content,
+                thinking=response.thinking,
+                tool_calls=None,
+                finish_reason=response.finish_reason,
+            )
+            self.messages.append(
+                Message(
+                    role="assistant",
+                    content=final_content,
+                    thinking=response.thinking,
+                )
+            )
+            if self.terminal_ui:
+                print(render_assistant(final_content))
+            else:
+                print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}Assistant:{Colors.RESET}")
+                print(final_content)
+            self.current_status = "completed"
+            return final_content
+        except Exception as exc:
+            fallback = (
+                f"Execution stopped at the safety limit of {self.max_steps} iterations. "
+                "The task may be incomplete; send a follow-up message to continue."
+            )
+            print(f"\n{Colors.BRIGHT_YELLOW}{fallback}{Colors.RESET}")
+            self.current_status = "limit_reached"
+            self._emit_status(
+                "iteration_limit_error",
+                {"message": fallback, "error": str(exc), "max_steps": self.max_steps},
+            )
+            return fallback
 
     def _emit_status(self, event_type: str, data: dict = None):
         """发送状态更新回调
@@ -547,9 +627,9 @@ Requirements:
                 heartbeat_stop.set()
                 heartbeat_thread.join(timeout=0.5)
 
-            # Accumulate API reported token usage
+            # Record both latest-request context usage and cumulative session usage.
             if response.usage:
-                self.api_total_tokens = response.usage.total_tokens
+                self._record_token_usage(response.usage)
 
             # Log LLM response
             self.logger.log_response(
@@ -805,12 +885,9 @@ Requirements:
 
             step += 1
 
-        # Max steps reached
-        error_msg = f"Task couldn't be completed after {self.max_steps} steps."
-        print(f"\n{Colors.BRIGHT_YELLOW}⚠️  {error_msg}{Colors.RESET}")
-        self.current_status = "error"
-        self._emit_status("error", {"message": error_msg})
-        return error_msg
+        # Match Hermes' behavior: preserve the safety budget, then make one
+        # tool-free call so the user receives useful partial results.
+        return await self._finalize_at_iteration_limit()
 
     def get_history(self) -> list[Message]:
         """Get message history."""

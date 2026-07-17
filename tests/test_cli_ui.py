@@ -84,6 +84,9 @@ def test_status_bar_adapts_to_available_width():
         tool_count=31,
         running_tasks=1,
         pending_tasks=2,
+        session_tokens=12345,
+        context_tokens=32000,
+        context_window=128000,
         started_at=datetime.now() - timedelta(seconds=65),
     )
 
@@ -92,14 +95,31 @@ def test_status_bar_adapts_to_available_width():
 
     assert "OAS" in wide and "READY" in wide
     assert "1 running" in wide and "2 queued" in wide
-    assert "OpenAgentSeal" in wide and "9 msg" in wide
+    assert "9 msg" in wide and "31 tools" in wide
+    assert "TOK 12.3K" in wide and "CTX 25%" in wide
     assert "OpenAgentSeal" not in narrow and "9 msg" not in narrow
     assert calculate_display_width(wide) <= 120
     assert calculate_display_width(narrow) <= 50
 
 
+def test_context_usage_percent_is_clamped():
+    base = dict(
+        model="model",
+        workspace=Path("/tmp/project"),
+        message_count=1,
+        tool_count=1,
+        started_at=datetime.now(),
+    )
+
+    assert RuntimeStatus(**base, context_tokens=500, context_window=2000).context_usage_percent == 25
+    assert RuntimeStatus(**base, context_tokens=3000, context_window=2000).context_usage_percent == 100
+    assert RuntimeStatus(**base, context_tokens=500, context_window=0).context_usage_percent == 0
+
+
 def test_execution_blocks_have_distinct_visual_hierarchy():
-    assert "STEP 03" in render_step_header(3, 50, 12000, color=False)
+    step_header = render_step_header(3, 50, 12000, color=False)
+    assert "ITERATION 03" in step_header
+    assert "/50" not in step_header
     assert "◆ OPENAGENTSEAL" in render_assistant("hello\nworld", color=False)
     tool = render_tool_call("shell_command", '{\n  "command": "dir"\n}', color=False)
     assert "▸ TOOL" in tool

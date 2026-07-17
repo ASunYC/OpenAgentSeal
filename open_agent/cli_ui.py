@@ -50,6 +50,15 @@ class RuntimeStatus:
     started_at: datetime
     running_tasks: int = 0
     pending_tasks: int = 0
+    session_tokens: int = 0
+    context_tokens: int = 0
+    context_window: int = 0
+
+    @property
+    def context_usage_percent(self) -> int:
+        if self.context_window <= 0:
+            return 0
+        return min(100, max(0, round(self.context_tokens / self.context_window * 100)))
 
 
 def color_enabled(stream: TextIO | None = None) -> bool:
@@ -239,49 +248,78 @@ def _format_duration(started_at: datetime) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
+def _format_token_count(tokens: int) -> str:
+    tokens = max(0, int(tokens))
+    if tokens < 1_000:
+        return str(tokens)
+    if tokens < 1_000_000:
+        return f"{tokens / 1_000:.1f}K".replace(".0K", "K")
+    return f"{tokens / 1_000_000:.1f}M".replace(".0M", "M")
+
+
 def build_status_fragments(status: RuntimeStatus, *, width: int | None = None):
     width = max(32, width or shutil.get_terminal_size((100, 24)).columns)
     model = _clip(status.model.split("/")[-1], 24 if width >= 90 else 14)
     workspace = _clip(status.workspace.name or str(status.workspace), 18)
 
-    fragments = [
+    base = [
         ("class:status-brand", " OAS "),
         ("class:status-online", "● READY "),
         ("class:status-dim", "│ "),
         ("class:status-value", model),
     ]
-    if width >= 96:
-        fragments.extend(
-            [
-                ("class:status-dim", " │ "),
-                ("class:status-dim", workspace),
-            ]
-        )
-    if width >= 72:
-        fragments.extend(
-            [
-                ("class:status-dim", " │ "),
-                ("class:status-value", f"{status.message_count} msg"),
-                ("class:status-dim", " · "),
-                ("class:status-value", f"{status.tool_count} tools"),
-            ]
-        )
-    if width >= 120 and (status.running_tasks or status.pending_tasks):
-        fragments.extend(
-            [
-                ("class:status-dim", " │ "),
-                ("class:status-warn", f"{status.running_tasks} running"),
-                ("class:status-dim", " · "),
-                ("class:status-dim", f"{status.pending_tasks} queued"),
-            ]
-        )
-    fragments.extend(
-        [
+    duration = [
+        ("class:status-dim", " │ "),
+        ("class:status-dim", _format_duration(status.started_at)),
+    ]
+    groups = {
+        "workspace": [
             ("class:status-dim", " │ "),
-            ("class:status-dim", _format_duration(status.started_at)),
-            ("class:status-bar", " "),
-        ]
-    )
+            ("class:status-dim", workspace),
+        ],
+        "messages": [
+            ("class:status-dim", " │ "),
+            ("class:status-value", f"{status.message_count} msg"),
+            ("class:status-dim", " · "),
+            ("class:status-value", f"{status.tool_count} tools"),
+        ],
+        "tasks": [
+            ("class:status-dim", " │ "),
+            ("class:status-warn", f"{status.running_tasks} running"),
+            ("class:status-dim", " · "),
+            ("class:status-dim", f"{status.pending_tasks} queued"),
+        ],
+        "tokens": [
+            ("class:status-dim", " │ "),
+            ("class:status-token", f"TOK {_format_token_count(status.session_tokens)}"),
+        ],
+        "context": [
+            ("class:status-dim", " │ "),
+            ("class:status-context", f"CTX {status.context_usage_percent}%"),
+        ],
+    }
+
+    def fragment_width(items) -> int:
+        return sum(calculate_display_width(text) for _, text in items)
+
+    # Token and context metrics are the most useful live signals, so they win
+    # space over workspace and queue details on narrower terminals.
+    selected: set[str] = set()
+    used = fragment_width(base) + fragment_width(duration) + 1
+    for name in ("tokens", "context", "messages", "tasks", "workspace"):
+        if name == "tasks" and not (status.running_tasks or status.pending_tasks):
+            continue
+        group_width = fragment_width(groups[name])
+        if used + group_width <= width:
+            selected.add(name)
+            used += group_width
+
+    fragments = list(base)
+    for name in ("workspace", "messages", "tasks", "tokens", "context"):
+        if name in selected:
+            fragments.extend(groups[name])
+    fragments.extend(duration)
+    fragments.append(("class:status-bar", " "))
     return fragments
 
 
@@ -293,6 +331,8 @@ PROMPT_STYLE = {
     "status-brand": "bg:#2ce1d2 #071014 bold",
     "status-online": "bg:#101923 #5ae095 bold",
     "status-value": "bg:#101923 #e8f0f7 bold",
+    "status-token": "bg:#101923 #53a0ff bold",
+    "status-context": "bg:#101923 #f6be4a bold",
     "status-dim": "bg:#101923 #7a8b99",
     "status-warn": "bg:#101923 #f6be4a bold",
     "completion-menu": "bg:#101923 #e8f0f7",
@@ -332,10 +372,9 @@ def render_heartbeat_line(spinner: str, elapsed: float, *, color: bool | None = 
 
 def render_step_header(step: int, max_steps: int, tokens: int, *, color: bool | None = None) -> str:
     enabled = color_enabled() if color is None else color
-    marker = _paint(f"STEP {step:02d}", AMBER, enabled, bold=True)
-    total = _paint(f"/{max_steps:02d}", MUTED, enabled)
+    marker = _paint(f"ITERATION {step:02d}", AMBER, enabled, bold=True)
     context = _paint(f"CONTEXT {tokens:,} TOKENS", MUTED, enabled)
-    return f"\n{_paint('┌─', CYAN, enabled)} {marker}{total}  {context}"
+    return f"\n{_paint('┌─', CYAN, enabled)} {marker}  {context}"
 
 
 def render_assistant(content: str, *, color: bool | None = None) -> str:
@@ -374,5 +413,5 @@ def render_tool_result(content: str, *, success: bool, color: bool | None = None
 def render_step_complete(step: int, elapsed: float, total: float, *, color: bool | None = None) -> str:
     enabled = color_enabled() if color is None else color
     rule = _paint("└─", CYAN, enabled)
-    timing = _paint(f"STEP {step:02d} COMPLETE  {elapsed:.2f}s  ·  TOTAL {total:.2f}s", MUTED, enabled)
+    timing = _paint(f"ITERATION {step:02d} COMPLETE  {elapsed:.2f}s  ·  TOTAL {total:.2f}s", MUTED, enabled)
     return f"\n{rule} {timing}"

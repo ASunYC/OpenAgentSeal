@@ -36,6 +36,7 @@ from open_agent.cli_commands import (
     iter_command_sections,
     parse_command,
 )
+from open_agent.cli_sessions import CliSessionController
 from open_agent.cli_ui import (
     PROMPT_STYLE,
     RuntimeStatus,
@@ -49,14 +50,16 @@ from open_agent.config import Config
 from open_agent.schema import LLMProvider
 from open_agent.memory_manager import get_memory_manager
 from open_agent.user_config import (
+    DEFAULT_CONTEXT_WINDOW,
     get_user_config,
     ModelConfig,
     ModelProvider,
+    resolve_model_context_window,
 )
 
 
 def _apply_cli_launch_context(agent: Agent, workspace_dir: Path) -> dict[str, str]:
-    session_id = os.environ.get("OPEN_AGENT_SESSION_ID", "").strip() or f"cli-{id(agent)}"
+    session_id = os.environ.get("OPEN_AGENT_SESSION_ID", "").strip()
     profile_id = os.environ.get("OPEN_AGENT_PROFILE_ID", "").strip() or "main"
     launch_source = os.environ.get("OPEN_AGENT_LAUNCH_SOURCE", "").strip() or "terminal"
     agent.session_id = session_id
@@ -74,6 +77,20 @@ def load_shared_model_config() -> ModelConfig | None:
     manager = get_user_config()
     manager.reload()
     return manager.get_default_model()
+
+
+def load_shared_agent_max_steps(fallback: int = 100) -> int:
+    """Load the desktop agent's iteration limit for the CLI runtime."""
+    try:
+        from open_agent.agent_profiles import get_agent_profile_manager
+
+        profile_id = os.environ.get("OPEN_AGENT_PROFILE_ID", "").strip() or "main"
+        profile = get_agent_profile_manager().get_agent_config(profile_id)
+        if profile is not None:
+            return max(1, int(profile.max_steps))
+    except (OSError, TypeError, ValueError):
+        pass
+    return max(1, int(fallback))
 
 
 # select_model function - defined below after all imports
@@ -893,9 +910,11 @@ def print_stats(agent: Agent, session_start: datetime):
     )
     print(f"    - Tool Calls: {Colors.BRIGHT_YELLOW}{tool_msgs}{Colors.RESET}")
     print(f"  Available Tools: {len(agent.tools)}")
-    if agent.api_total_tokens > 0:
+    if agent.session_total_tokens > 0:
         print(
-            f"  API Tokens Used: {Colors.BRIGHT_MAGENTA}{agent.api_total_tokens:,}{Colors.RESET}"
+            f"  Session Tokens: {Colors.BRIGHT_MAGENTA}{agent.session_total_tokens:,}{Colors.RESET} "
+            f"{Colors.DIM}(input {agent.session_prompt_tokens:,}, "
+            f"output {agent.session_completion_tokens:,}){Colors.RESET}"
         )
     print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}\n")
 
@@ -1406,11 +1425,28 @@ async def run_agent(
         llm_client=llm_client,
         system_prompt=system_prompt,
         tools=tools,
-        max_steps=config.agent.max_steps,
+        max_steps=load_shared_agent_max_steps(config.agent.max_steps),
         workspace_dir=str(workspace_dir),
         terminal_ui=not bool(task),
     )
     launch_metadata = _apply_cli_launch_context(agent, workspace_dir)
+    session_controller = CliSessionController(
+        profile_id=launch_metadata["profile_id"],
+        workspace=workspace_dir,
+        launch_source=launch_metadata["launch_source"],
+    )
+    restored_message_count = await session_controller.initialize(
+        agent,
+        requested_session_id=launch_metadata["session_id"],
+    )
+    launch_metadata["session_id"] = agent.session_id
+    if restored_message_count:
+        print(
+            f"{Colors.GREEN}Restored CLI session {agent.session_id} "
+            f"with {restored_message_count} message(s){Colors.RESET}"
+        )
+    else:
+        print(f"{Colors.GREEN}Created CLI session {agent.session_id}{Colors.RESET}")
 
     # 7.3 Register CLI Agent to AgentService (so Web UI can see it)
     cli_agent_id = f"cli_agent_{id(agent)}"
@@ -1563,7 +1599,7 @@ async def run_agent(
             mcp_tool_count=mcp_tool_count,
             skill_count=skill_count,
             memory_count=memory_count,
-            session_id=launch_metadata["session_id"],
+            session_id=agent.session_id,
             warnings=tuple(startup_warnings),
         )
 
@@ -1576,8 +1612,18 @@ async def run_agent(
             f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Executing task...{Colors.RESET}\n"
         )
         agent.add_user_message(task)
+        await session_controller.persist_user(task, agent)
         try:
             await agent.run()
+            last_assistant = next(
+                (
+                    message.content
+                    for message in reversed(agent.messages)
+                    if message.role == "assistant" and isinstance(message.content, str)
+                ),
+                "",
+            )
+            await session_controller.persist_assistant(last_assistant, agent)
         except Exception as e:
             print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
         finally:
@@ -1629,13 +1675,32 @@ async def run_agent(
         key_bindings=kb,
     )
 
+    context_cache_key: tuple[int, int, int] | None = None
+    context_cache_tokens = 0
+
     def runtime_status() -> RuntimeStatus:
+        nonlocal context_cache_key, context_cache_tokens
         try:
             running_tasks = len(task_dispatcher.get_running_tasks())
             pending_tasks = len(task_dispatcher.get_pending_tasks())
         except Exception:
             running_tasks = 0
             pending_tasks = 0
+
+        messages = agent.messages
+        last_message_id = id(messages[-1]) if messages else 0
+        cache_key = (id(messages), len(messages), last_message_id)
+        if cache_key != context_cache_key:
+            context_cache_tokens = agent.estimate_context_tokens()
+            context_cache_key = cache_key
+
+        config_manager = get_user_config()
+        active_model = config_manager.get_default_model()
+        settings = config_manager.get_settings()
+        context_window, _ = resolve_model_context_window(
+            active_model,
+            getattr(settings, "context_compaction_token_limit", DEFAULT_CONTEXT_WINDOW),
+        )
         return RuntimeStatus(
             model=llm_client.model,
             workspace=workspace_dir,
@@ -1644,6 +1709,9 @@ async def run_agent(
             started_at=session_start,
             running_tasks=running_tasks,
             pending_tasks=pending_tasks,
+            session_tokens=agent.session_total_tokens,
+            context_tokens=context_cache_tokens,
+            context_window=context_window,
         )
 
     # 10. Interactive loop
@@ -1738,11 +1806,45 @@ async def run_agent(
                     continue
 
                 elif command == "new":
-                    # Clear message history but keep system prompt
                     old_count = len(agent.messages)
-                    agent.messages = [agent.messages[0]]  # Keep only system message
+                    session_id = await session_controller.create_new(agent)
+                    launch_metadata["session_id"] = session_id
                     print(
-                        f"{Colors.GREEN}✅ Cleared {old_count - 1} messages, starting new session{Colors.RESET}\n"
+                        f"{Colors.GREEN}Started new session {session_id}; "
+                        f"the previous {old_count - 1} message(s) remain saved.{Colors.RESET}\n"
+                    )
+                    continue
+
+                elif command == "sessions":
+                    sessions = await session_controller.list_sessions()
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Saved CLI Sessions{Colors.RESET}")
+                    print(f"{Colors.DIM}{'─' * 72}{Colors.RESET}")
+                    if not sessions:
+                        print(f"  {Colors.DIM}No saved CLI sessions in this workspace.{Colors.RESET}")
+                    for item in sessions:
+                        marker = "*" if item.session_id == agent.session_id else " "
+                        updated = item.updated_at.replace("T", " ")[:19]
+                        print(
+                            f" {marker} {Colors.BRIGHT_CYAN}{item.id:<8}{Colors.RESET} "
+                            f"{item.name}  {Colors.DIM}{updated}{Colors.RESET}"
+                        )
+                        print(f"    {Colors.DIM}{item.session_id}{Colors.RESET}")
+                    print(f"\n  {Colors.DIM}Use /resume <id> to switch sessions.{Colors.RESET}\n")
+                    continue
+
+                elif command == "resume":
+                    if not command_args:
+                        print(f"\n{Colors.RED}Usage: /resume <id>{Colors.RESET}\n")
+                        continue
+                    try:
+                        restored = await session_controller.resume(agent, command_args)
+                    except ValueError as exc:
+                        print(f"\n{Colors.RED}{exc}{Colors.RESET}\n")
+                        continue
+                    launch_metadata["session_id"] = agent.session_id
+                    print(
+                        f"\n{Colors.GREEN}Resumed {agent.session_id} "
+                        f"with {restored} message(s).{Colors.RESET}\n"
                     )
                     continue
 
@@ -1782,6 +1884,7 @@ async def run_agent(
                     retry_content = agent.messages[retry_index].content
                     user_input = retry_content if isinstance(retry_content, str) else str(retry_content)
                     agent.messages = agent.messages[:retry_index]
+                    await session_controller.replace_from_agent(agent)
                     print(f"\n{Colors.BRIGHT_CYAN}Retrying the last user message...{Colors.RESET}")
 
                 elif command == "undo":
@@ -1802,6 +1905,7 @@ async def run_agent(
                         continue
                     actual_count = min(turn_count, len(user_indexes))
                     agent.messages = agent.messages[: user_indexes[-actual_count]]
+                    await session_controller.replace_from_agent(agent)
                     print(
                         f"\n{Colors.GREEN}Removed {actual_count} conversation turn"
                         f"{'s' if actual_count != 1 else ''}.{Colors.RESET}\n"
@@ -2308,6 +2412,8 @@ async def run_agent(
 
             print(render_execution_header(llm_client.model, current_provider))
             agent.add_user_message(user_input)
+            await session_controller.persist_user(user_input, agent)
+            turn_message_start = len(agent.messages)
 
             # Create cancellation event
             cancel_event = asyncio.Event()
@@ -2381,6 +2487,15 @@ async def run_agent(
 
                 # Get result
                 _ = agent_task.result()
+                last_assistant = next(
+                    (
+                        message.content
+                        for message in reversed(agent.messages[turn_message_start:])
+                        if message.role == "assistant" and isinstance(message.content, str)
+                    ),
+                    "",
+                )
+                await session_controller.persist_assistant(last_assistant, agent)
 
             except asyncio.CancelledError:
                 print(

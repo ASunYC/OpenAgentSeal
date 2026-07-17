@@ -561,7 +561,6 @@ fn write_cli_cmd_script(program: &Path, args: &[String], cwd: &Path) -> Result<P
          set \"PYTHONIOENCODING=utf-8\"\r\n\
          set \"TERM=\"\r\n\
          set \"OPEN_AGENT_LAUNCH_SOURCE=desktop-tray\"\r\n\
-         set \"OPEN_AGENT_SESSION_ID=cli-{timestamp}\"\r\n\
          set \"OPEN_AGENT_PROFILE_ID=main\"\r\n\
          set \"OPEN_AGENT_CLI_TEMP={runtime_temp}\"\r\n\
          if not exist \"%OPEN_AGENT_CLI_TEMP%\" mkdir \"%OPEN_AGENT_CLI_TEMP%\"\r\n\
@@ -1050,7 +1049,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
 
         assert!(script.contains("OPEN_AGENT_LAUNCH_SOURCE=desktop-tray"));
-        assert!(script.contains("OPEN_AGENT_SESSION_ID=cli-"));
+        assert!(!script.contains("OPEN_AGENT_SESSION_ID="));
         assert!(script.contains("OPEN_AGENT_PROFILE_ID=main"));
     }
 

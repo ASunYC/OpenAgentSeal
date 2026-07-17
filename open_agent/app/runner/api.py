@@ -45,6 +45,9 @@ class CreateChatRequest(BaseModel):
     name: str = "New Chat"
     user_id: str = "default"
     channel: str = "web"
+    session_id: Optional[str] = None
+    profile_id: Optional[str] = None
+    meta: dict = Field(default_factory=dict)
 
 
 class DeleteChatsRequest(BaseModel):
@@ -135,6 +138,7 @@ class TaskDiffResponse(BaseModel):
 
 class PersistMessagesRequest(BaseModel):
     messages: List[dict] = []
+    meta: dict = Field(default_factory=dict)
 
 
 def _get_control_plane():
@@ -353,9 +357,12 @@ def _write_workspace_source_state(state: WorkspaceSourceState) -> WorkspaceSourc
 
 # Chat endpoints
 @router.get("/chats")
-async def list_chats(user_id: str = Query(None)) -> List[dict]:
+async def list_chats(
+    user_id: str = Query(None),
+    profile_id: str = Query(None),
+) -> List[dict]:
     """List all chats"""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(profile_id)
     chats = await manager.list_chats(user_id)
     return [
         {
@@ -375,12 +382,16 @@ async def list_chats(user_id: str = Query(None)) -> List[dict]:
 @router.post("/chats")
 async def create_chat(request: CreateChatRequest) -> dict:
     """Create a new chat"""
-    manager = get_chat_manager()
+    manager = _chat_manager_for_profile(request.profile_id)
     chat = await manager.create_chat(
         name=request.name,
         user_id=request.user_id,
         channel=request.channel,
+        session_id=request.session_id,
     )
+    if request.meta:
+        chat.meta.update(request.meta)
+        await manager.update_chat(chat)
     return {
         "id": chat.id,
         "name": chat.name,
@@ -640,6 +651,8 @@ async def persist_chat_messages(
     messages = [Message.model_validate(message) for message in request.messages]
     manager.replace_messages(session_id, messages)
     chat.meta.pop("context_compaction", None)
+    if request.meta:
+        chat.meta.update(request.meta)
     try:
         get_context_block_store().delete_session(session_id)
     except Exception:

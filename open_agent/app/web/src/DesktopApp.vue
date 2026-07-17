@@ -3186,7 +3186,7 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
           assistantMessage.thinking.steps.push({
             id: generateId(),
             type: 'thinking',
-            content: `开始步骤${event.step}/${event.max_steps}`,
+            content: `开始第 ${event.step} 次执行迭代`,
             timestamp: new Date().toISOString()
           })
         }
@@ -3232,7 +3232,7 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
         
         // 鐩戝惉 step_end 浜嬩欢
         if (event.event === 'step_end') {
-          const stepInfo = `步骤 ${event.step} 完成，耗时 ${event.elapsed?.toFixed(2) || 0}s`
+          const stepInfo = `执行迭代 ${event.step} 完成，耗时 ${event.elapsed?.toFixed(2) || 0}s`
           // 鏇存柊鏈€鍚庝竴涓楠ゆ垨娣诲姞鏂版楠?
           const lastStep = assistantMessage.thinking.steps[assistantMessage.thinking.steps.length - 1]
           if (lastStep && lastStep.type === 'thinking') {

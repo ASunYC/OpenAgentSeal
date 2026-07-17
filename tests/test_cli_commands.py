@@ -20,7 +20,17 @@ def completion_names(text: str) -> list[str]:
 def test_bare_slash_lists_every_canonical_command():
     names = completion_names("/")
     assert names == [spec.name for spec in COMMAND_SPECS]
-    assert {"new", "status", "model", "tools", "mcp", "help", "quit"} <= set(names)
+    assert {
+        "new",
+        "sessions",
+        "resume",
+        "status",
+        "model",
+        "tools",
+        "mcp",
+        "help",
+        "quit",
+    } <= set(names)
 
 
 def test_prefix_completion_supports_commands_and_legacy_aliases():

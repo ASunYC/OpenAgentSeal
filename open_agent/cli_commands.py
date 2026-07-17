@@ -30,6 +30,8 @@ class ParsedCommand:
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
     # Session
     CommandSpec("new", "Start a fresh conversation", "Session", aliases=("clear", "reset")),
+    CommandSpec("sessions", "List saved CLI conversations", "Session"),
+    CommandSpec("resume", "Resume a saved CLI conversation", "Session", args_hint="<id>"),
     CommandSpec("history", "Show the current conversation history", "Session"),
     CommandSpec("retry", "Retry the most recent user message", "Session"),
     CommandSpec("undo", "Remove the last N user turns", "Session", args_hint="[N]"),

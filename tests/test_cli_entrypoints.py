@@ -2,7 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tomllib
 
-from open_agent.cli import _apply_cli_launch_context
+from open_agent.cli import _apply_cli_launch_context, load_shared_agent_max_steps
 
 
 def test_cli_entrypoints_are_exposed():
@@ -32,3 +32,26 @@ def test_cli_launch_context_applies_desktop_metadata(monkeypatch, tmp_path):
         "workspace_dir": str(tmp_path),
         "launch_source": "desktop-tray",
     }
+
+
+def test_cli_launch_context_allows_session_controller_to_restore_latest(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPEN_AGENT_SESSION_ID", raising=False)
+    monkeypatch.setenv("OPEN_AGENT_PROFILE_ID", "main")
+    agent = SimpleNamespace(session_id="", profile_id="")
+
+    metadata = _apply_cli_launch_context(agent, tmp_path)
+
+    assert agent.session_id == ""
+    assert metadata["session_id"] == ""
+
+
+def test_cli_uses_desktop_agent_iteration_limit(monkeypatch):
+    import open_agent.agent_profiles as agent_profiles
+
+    manager = SimpleNamespace(
+        get_agent_config=lambda profile_id: SimpleNamespace(max_steps=275)
+    )
+    monkeypatch.setattr(agent_profiles, "get_agent_profile_manager", lambda: manager)
+    monkeypatch.setenv("OPEN_AGENT_PROFILE_ID", "main")
+
+    assert load_shared_agent_max_steps(50) == 275
