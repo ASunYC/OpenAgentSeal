@@ -1,4 +1,4 @@
-import type { FileEntry, WorkspaceSourceNode } from '@/types'
+import type { FileEntry, Workspace, WorkspaceSource, WorkspaceSourceNode } from '@/types'
 
 export type WorkspaceSelectionState = 'checked' | 'mixed' | 'unchecked'
 export type WorkspaceFileCache = Record<string, FileEntry[]>
@@ -243,4 +243,57 @@ export function compactWorkspaceSourceSelection(
 
   sources.forEach(source => visit(source))
   return compacted
+}
+
+export function externalWorkspaceSources(sources: WorkspaceSource[]): WorkspaceSource[] {
+  return sources.filter(source => source.type === 'web')
+}
+
+export function buildWorkspaceContextSources(
+  persistedSources: WorkspaceSource[],
+  workspaces: Workspace[],
+  discoveredSources: WorkspaceSource[] = [],
+): WorkspaceSource[] {
+  const sources = [...externalWorkspaceSources(persistedSources)]
+  const discoveredByPath = new Map(
+    discoveredSources.map(source => [normalizeComparablePath(source.path), source]),
+  )
+  const existing = new Set(sources.map(source => normalizeComparablePath(source.path)))
+
+  for (const workspace of workspaces) {
+    const normalizedPath = normalizeComparablePath(workspace.path)
+    if (!normalizedPath || existing.has(normalizedPath)) continue
+    const discovered = discoveredByPath.get(normalizedPath)
+    sources.push({
+      ...discovered,
+      id: `managed_${workspace.id}`,
+      name: workspace.name,
+      path: workspace.path,
+      type: 'directory',
+      mime_type: null,
+      size: null,
+      modified_at: workspace.updated
+        ? Date.parse(workspace.updated) / 1000
+        : discovered?.modified_at || Date.now() / 1000,
+      children: discovered?.children || [],
+      children_count: discovered?.children_count,
+    })
+    existing.add(normalizedPath)
+  }
+
+  return sources
+}
+
+export function buildWorkspaceContextSelection(
+  persistedSources: WorkspaceSource[],
+  persistedSelection: Iterable<string>,
+  managedSelection: Iterable<string>,
+): string[] {
+  const externalPaths = new Set(
+    externalWorkspaceSources(persistedSources).map(source => normalizeComparablePath(source.path)),
+  )
+  const selected = Array.from(persistedSelection).filter(path =>
+    externalPaths.has(normalizeComparablePath(path)),
+  )
+  return Array.from(new Set([...selected, ...managedSelection]))
 }

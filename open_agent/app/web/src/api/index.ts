@@ -1108,7 +1108,7 @@ export const workspaceApi = {
     })
   },
 
-  async deleteFile(wsId: string, path: string): Promise<{ ok: boolean; path: string }> {
+  async deleteFile(wsId: string, path: string): Promise<{ ok: boolean; path: string; trashed: boolean }> {
     return request(`/workspace/${wsId}/delete`, {
       method: 'POST',
       body: JSON.stringify({ path }),
@@ -1139,6 +1139,20 @@ export const workspaceApi = {
     })
     if (!res.ok) throw new Error(`Upload failed: ${res.statusText}`)
     return res.json()
+  },
+
+  async importLocalFiles(
+    wsId: string,
+    paths: string[],
+    destPath = '',
+  ): Promise<{
+    imported: Array<{ source: string; path: string; size: number }>
+    rejected: Array<{ path: string; reason: string }>
+  }> {
+    return request(`/workspace/${wsId}/import-local`, {
+      method: 'POST',
+      body: JSON.stringify({ paths, dest_path: destPath }),
+    })
   },
 
   // Search
@@ -1267,6 +1281,7 @@ export const api = {
   createWorkspaceFolder: workspaceApi.mkdir,
   renameWorkspaceItem: workspaceApi.rename,
   uploadWorkspaceFile: workspaceApi.upload,
+  importLocalWorkspaceFiles: workspaceApi.importLocalFiles,
   searchWorkspace: workspaceApi.search,
   globWorkspace: workspaceApi.glob,
   searchAllWorkspaces: workspaceApi.searchAll,

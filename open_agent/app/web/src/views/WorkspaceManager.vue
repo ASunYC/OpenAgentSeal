@@ -67,20 +67,20 @@
     <!-- Toolbar -->
     <div class="wm-toolbar">
       <div class="wm-toolbar-left">
-        <button class="wm-toolbar-btn" @click="$emit('choose-files')" title="选择文件">
+        <button type="button" class="wm-toolbar-btn" @click="emit('choose-files')" title="选择文件">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
             <polyline points="14 2 14 8 20 8"/>
           </svg>
           <span>文件</span>
         </button>
-        <button class="wm-toolbar-btn" @click="$emit('choose-directory')" title="选择目录">
+        <button type="button" class="wm-toolbar-btn" @click="emit('choose-directory')" title="选择目录">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
           </svg>
           <span>目录</span>
         </button>
-        <button class="wm-toolbar-btn" @click="$emit('add-web-url')" title="添加 Web 地址">
+        <button type="button" class="wm-toolbar-btn" @click="emit('add-web-url')" title="添加 Web 地址">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/>
             <line x1="2" y1="12" x2="22" y2="12"/>
@@ -88,7 +88,7 @@
           </svg>
           <span>Web</span>
         </button>
-        <button class="wm-toolbar-btn" @click="$emit('add-server-path')" title="添加服务器路径">
+        <button type="button" class="wm-toolbar-btn" @click="emit('add-server-path')" title="添加服务器路径">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
             <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
@@ -127,7 +127,7 @@
             <rect x="3" y="14" width="7" height="7"/>
           </svg>
         </button>
-        <button class="wm-toolbar-btn" @click="$emit('refresh')" title="刷新">
+        <button type="button" class="wm-toolbar-btn" @click="refreshAllWorkspaces" title="刷新">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="23 4 23 10 17 10"/>
             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
@@ -232,6 +232,18 @@
             </span>
             <span class="wm-file-name" :title="item.file.path">{{ item.file.name }}</span>
             <span class="wm-file-size">{{ formatFileSize(item.file.size) }}</span>
+            <button
+              class="wm-file-delete"
+              type="button"
+              title="移入回收站"
+              aria-label="移入回收站"
+              @click.stop="onDeleteWorkspaceItem(ws.id, item.file)"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+            </button>
           </div>
           <div v-if="!visibleWorkspaceFiles(ws.id).length" class="wm-empty-state">
             空目录
@@ -271,6 +283,30 @@
       </div>
     </div>
 
+    <div
+      v-if="trashDialog.file"
+      class="wm-dialog-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="wm-trash-title"
+      @click.self="closeTrashDialog"
+    >
+      <div class="wm-dialog wm-trash-dialog">
+        <h3 id="wm-trash-title">移入回收站</h3>
+        <p class="wm-trash-message">确定将“{{ trashDialog.file.name }}”移入系统回收站吗？</p>
+        <p class="wm-trash-hint">
+          {{ trashDialog.file.is_dir ? '该目录及其全部内容' : '该文件' }}不会被永久删除，可从系统回收站恢复。
+        </p>
+        <p v-if="trashError" class="wm-trash-error">{{ trashError }}</p>
+        <div class="wm-dialog-actions">
+          <button class="wm-dialog-cancel" :disabled="trashing" @click="closeTrashDialog">取消</button>
+          <button class="wm-dialog-ok wm-dialog-trash" :disabled="trashing" @click="confirmTrashItem">
+            {{ trashing ? '正在移动…' : '移入回收站' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Context menu -->
     <div
       v-if="contextMenu.visible"
@@ -279,7 +315,7 @@
     >
       <button v-if="contextMenu.file?.is_dir" @click="onContextAction('open')">打开</button>
       <button @click="onContextAction('rename')">重命名</button>
-      <button @click="onContextAction('delete')" class="danger">删除</button>
+      <button @click="onContextAction('delete')" class="danger">移入回收站</button>
     </div>
 
     <!-- Hidden file input for upload -->
@@ -306,12 +342,11 @@ import {
   type WorkspaceSelectionState,
 } from '@/models/workspaceSelection'
 
-defineEmits<{
+const emit = defineEmits<{
   (event: 'choose-files'): void
   (event: 'choose-directory'): void
   (event: 'add-web-url'): void
   (event: 'add-server-path'): void
-  (event: 'refresh'): void
 }>()
 
 const {
@@ -323,6 +358,7 @@ const {
   searchQuery,
   selectedPaths,
   init,
+  loadWorkspaces,
   selectWorkspace,
   createWorkspace,
   deleteWorkspace,
@@ -343,6 +379,9 @@ const workspaceFiles = ref<Record<string, FileEntry[]>>({})
 const showNewWorkspaceDialog = ref(false)
 const newWsName = ref('')
 const newWsPath = ref('')
+const trashDialog = ref<{ wsId: string; file: FileEntry | null }>({ wsId: '', file: null })
+const trashing = ref(false)
+const trashError = ref('')
 
 // Context menu state
 const contextMenu = ref<{
@@ -398,6 +437,19 @@ async function loadWorkspaceFiles(wsId: string, path = '') {
     }
   }
 }
+
+async function refreshWorkspace(wsId = currentWorkspaceId.value) {
+  if (!wsId) return
+  expandedWorkspaces.value = new Set([...expandedWorkspaces.value, wsId])
+  await loadWorkspaceFiles(wsId)
+}
+
+async function refreshAllWorkspaces() {
+  await loadWorkspaces()
+  await Promise.all(Array.from(expandedWorkspaces.value).map(wsId => loadWorkspaceFiles(wsId)))
+}
+
+defineExpose({ refreshWorkspace })
 
 function onSetWorkspaceCurrent(wsId: string) {
   setCurrentWorkspace(wsId)
@@ -526,6 +578,49 @@ function onFileRowClick(wsId: string, file: FileEntry) {
   }
 }
 
+function onDeleteWorkspaceItem(wsId: string, file: FileEntry) {
+  trashError.value = ''
+  trashDialog.value = { wsId, file }
+}
+
+function closeTrashDialog() {
+  if (trashing.value) return
+  trashDialog.value = { wsId: '', file: null }
+  trashError.value = ''
+}
+
+async function confirmTrashItem() {
+  const { wsId, file } = trashDialog.value
+  if (!wsId || !file || trashing.value) return
+  trashing.value = true
+  trashError.value = ''
+  const deleted = await deleteItem(file.path, wsId)
+  if (!deleted) {
+    trashing.value = false
+    trashError.value = error.value || '无法移入系统回收站，文件未删除。'
+    return
+  }
+
+  const deletedKey = cacheKey(wsId, file.path)
+  const nextCache = { ...workspaceFiles.value }
+  for (const key of Object.keys(nextCache)) {
+    if (key === deletedKey || key.startsWith(`${deletedKey}/`)) {
+      delete nextCache[key]
+    }
+  }
+  workspaceFiles.value = nextCache
+  expandedDirectories.value = new Set(
+    Array.from(expandedDirectories.value).filter(
+      key => key !== deletedKey && !key.startsWith(`${deletedKey}/`),
+    ),
+  )
+
+  const parentPath = file.path.replace(/\\/g, '/').split('/').slice(0, -1).join('/')
+  await loadWorkspaceFiles(wsId, parentPath)
+  trashing.value = false
+  trashDialog.value = { wsId: '', file: null }
+}
+
 function openContextMenu(mouseEvent: MouseEvent, wsId: string, file: FileEntry) {
   contextMenu.value = {
     visible: true,
@@ -600,9 +695,7 @@ async function onContextAction(action: string) {
       break
     }
     case 'delete':
-      if (confirm(`确定删除 "${file.name}"？`)) {
-        await deleteItem(file.path)
-      }
+      await onDeleteWorkspaceItem(wsId, file)
       break
   }
 }
@@ -875,6 +968,44 @@ async function onContextAction(action: string) {
   background: var(--primary-color);
   color: white;
   border-color: var(--primary-color);
+}
+
+.wm-trash-dialog {
+  width: min(380px, calc(100vw - 32px));
+  min-width: 0;
+  border-radius: 8px;
+}
+
+.wm-trash-message {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.wm-trash-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.wm-trash-error {
+  margin: 10px 0 0;
+  color: var(--danger-color, #e53e3e);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.wm-dialog-trash {
+  background: var(--danger-color, #e53e3e);
+  border-color: var(--danger-color, #e53e3e);
+}
+
+.wm-dialog-actions button:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 /* ── Context menu ── */
@@ -1160,6 +1291,32 @@ async function onContextAction(action: string) {
   flex-shrink: 0;
   min-width: 50px;
   text-align: right;
+}
+
+.wm-file-delete {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.wm-file-delete:hover,
+.wm-file-delete:focus-visible {
+  border-color: color-mix(in srgb, var(--danger-color, #e53e3e) 35%, var(--border-color));
+  background: color-mix(in srgb, var(--danger-color, #e53e3e) 8%, transparent);
+  color: var(--danger-color, #e53e3e);
+}
+
+.wm-file-delete svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* ── Empty States ── */

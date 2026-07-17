@@ -140,11 +140,11 @@
 
           <section class="source-list">
             <WorkspaceManager
+              ref="workspaceManagerRef"
               @choose-files="chooseWorkspaceFiles"
               @choose-directory="chooseWorkspaceDirectory"
               @add-web-url="openWebSourceInput"
               @add-server-path="openServerPathInput"
-              @refresh="loadWorkspaceSourceState"
             />
             <!-- Web URL form -->
             <form v-if="showWebSourceInput" class="source-web-form-inline" @submit.prevent="addWebSource">
@@ -1299,9 +1299,11 @@ import SandboxPanel from '@/components/SandboxPanel.vue'
 import { useWorkspaceManager } from '@/composables/useWorkspaceManager'
 import { useMessageQueue, type QueuedComposerMessage } from '@/composables/useMessageQueue'
 import {
+  buildWorkspaceContextSelection,
+  buildWorkspaceContextSources,
   collectWorkspaceSourcePaths,
   compactWorkspaceSourceSelection,
-  isSameOrDescendantPath,
+  externalWorkspaceSources,
   normalizeWorkspaceSourceSelection as normalizeWorkspaceSourceSelectionModel,
 } from '@/models/workspaceSelection'
 import { buildRuntimeTaskProjection, type RuntimeToolActivity } from '@/models/runtimeTask'
@@ -1316,6 +1318,7 @@ const agentStore = useAgentStore()
 const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
 const managedWorkspace = useWorkspaceManager()
+const workspaceManagerRef = ref<{ refreshWorkspace: (wsId?: string) => Promise<void> } | null>(null)
 const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
 // 褰撳墠瑙嗗浘
@@ -2747,12 +2750,16 @@ function workspaceSourceState(): WorkspaceSourceState {
 async function loadWorkspaceSourceState() {
   try {
     const state = await api.getWorkspaceSourcesState()
-    workspaceSources.value = state.sources || []
+    const persistedSources = state.sources || []
+    workspaceSources.value = externalWorkspaceSources(persistedSources)
     const availablePaths = collectWorkspaceSourcePaths(workspaceSources.value)
     selectedWorkspacePaths.value = normalizeWorkspaceSourceSelection(
       (state.selected_paths || []).filter(path => availablePaths.has(path)),
     )
-    expandedWorkspacePaths.value = Array.from(new Set(state.expanded_paths || []))
+    expandedWorkspacePaths.value = []
+    if (workspaceSources.value.length !== persistedSources.length) {
+      await api.saveWorkspaceSourcesState(workspaceSourceState())
+    }
   } catch (error) {
     console.error('Failed to load library sources:', error)
   } finally {
@@ -2777,27 +2784,57 @@ function toggleSourceWorkspace() {
   syncPanelWidths()
 }
 
-async function addWorkspaceSourcePaths(paths: string[]) {
+async function importFilesIntoCurrentWorkspace(paths: string[]) {
   if (!paths.length) return
-  try {
-    const result = await api.createWorkspaceSources(paths)
-    const existing = new Set(workspaceSources.value.map(source => source.path))
-    const incoming = (result.sources || []).filter(source => !existing.has(source.path))
-    workspaceSources.value.push(...incoming)
-    const incomingDirectories = incoming.filter(source => source.type === 'directory').map(source => source.path)
-    if (incomingDirectories.length) {
-      expandedWorkspacePaths.value = Array.from(new Set([...expandedWorkspacePaths.value, ...incomingDirectories]))
+  await managedWorkspace.init()
+  const workspaceId = managedWorkspace.currentWorkspaceId.value
+  if (!workspaceId) {
+    alert(t('请先创建或选择一个工作区。', 'Create or select a workspace first.'))
+    return
+  }
+
+  const result = await api.importLocalWorkspaceFiles(
+    workspaceId,
+    paths,
+    managedWorkspace.currentPath.value,
+  )
+  await workspaceManagerRef.value?.refreshWorkspace(workspaceId)
+  if (result.rejected?.length) {
+    const first = result.rejected[0]
+    alert(t(`部分文件未导入：${first.reason}`, `Some files were not imported: ${first.reason}`))
+  }
+}
+
+async function addDirectoriesAsWorkspaces(paths: string[]) {
+  if (!paths.length) return
+  await managedWorkspace.init()
+  const rejected: string[] = []
+
+  for (const path of paths) {
+    const name = path.split(/[\\/]/).filter(Boolean).pop() || path
+    const workspace = await managedWorkspace.createWorkspace(name, path)
+    if (!workspace) {
+      rejected.push(path)
+      continue
     }
-    if (incoming.length) {
-      saveWorkspaceSourceState()
-    }
-    if (result.rejected?.length) {
-      const first = result.rejected[0]
-      alert(t(`部分来源未添加：${first.reason}`, `Some sources were not added: ${first.reason}`))
-    }
-  } catch (error) {
-    console.error('Failed to add workspace sources:', error)
-    alert(t('添加工作区来源失败，请重试。', 'Failed to add workspace sources. Please try again.'))
+    await workspaceManagerRef.value?.refreshWorkspace(workspace.id)
+  }
+
+  if (rejected.length) {
+    alert(t('部分目录未能加入工作区。', 'Some folders could not be added as workspaces.'))
+  }
+}
+
+async function importDroppedWorkspacePaths(paths: string[]) {
+  if (!paths.length) return
+  const result = await api.createWorkspaceSources(paths)
+  const files = (result.sources || []).filter(source => source.type === 'file').map(source => source.path)
+  const directories = (result.sources || []).filter(source => source.type === 'directory').map(source => source.path)
+  await importFilesIntoCurrentWorkspace(files)
+  await addDirectoriesAsWorkspaces(directories)
+  if (result.rejected?.length) {
+    const first = result.rejected[0]
+    alert(t(`部分来源未添加：${first.reason}`, `Some sources were not added: ${first.reason}`))
   }
 }
 
@@ -2806,14 +2843,22 @@ async function chooseWorkspaceFiles() {
     openServerPathInput()
     return
   }
+  let paths: string[]
   try {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const selected = await open({ multiple: true, directory: false, title: t('选择文件', 'Select files') })
-    const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
-    await addWorkspaceSourcePaths(paths.map(String))
+    paths = (Array.isArray(selected) ? selected : selected ? [selected] : []).map(String)
   } catch (error) {
     console.error('Tauri file dialog is not available:', error)
     alert(t('当前环境不支持系统文件选择窗口。', 'System file dialog is not available in this environment.'))
+    return
+  }
+
+  try {
+    await importFilesIntoCurrentWorkspace(paths)
+  } catch (error) {
+    console.error('Failed to import files into the workspace:', error)
+    alert(t('文件导入工作区失败，请重试。', 'Failed to import files into the workspace.'))
   }
 }
 
@@ -2822,25 +2867,22 @@ async function chooseWorkspaceDirectory() {
     openServerPathInput()
     return
   }
+  let paths: string[]
   try {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const selected = await open({ multiple: true, directory: true, title: t('选择目录', 'Select folders') })
-    const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
-
-    // 为每个选择的目录创建一个工作区
-    for (const path of paths) {
-      const dirName = path.split(/[\\/]/).filter(Boolean).pop() || path
-      try {
-        await api.createWorkspace(dirName, path)
-        // 刷新工作区列表
-        await loadWorkspaceSourceState()
-      } catch (error) {
-        console.error(`Failed to create workspace for ${path}:`, error)
-      }
-    }
+    paths = (Array.isArray(selected) ? selected : selected ? [selected] : []).map(String)
   } catch (error) {
     console.error('Tauri directory dialog is not available:', error)
     alert(t('当前环境不支持目录选择窗口。', 'Folder picker is not available in this environment.'))
+    return
+  }
+
+  try {
+    await addDirectoriesAsWorkspaces(paths)
+  } catch (error) {
+    console.error('Failed to add folders as workspaces:', error)
+    alert(t('目录加入工作区失败，请重试。', 'Failed to add folders to the workspace.'))
   }
 }
 
@@ -2852,40 +2894,31 @@ function compactSelectedWorkspacePaths(): string[] {
   return compactWorkspaceSourceSelection(workspaceSources.value, selectedWorkspacePaths.value)
 }
 
-function mergedWorkspacePayload(): WorkspaceSource[] {
-  const sources = [...workspaceSources.value]
-  const existing = new Set(sources.map(source => source.path))
-  const managedSelectedPaths = Array.from(managedWorkspace.selectedPaths.value)
-
-  for (const ws of managedWorkspace.workspaces.value) {
-    const hasSelectedPath = managedSelectedPaths.some(path => isPathWithinRoot(path, ws.path))
-    if (!hasSelectedPath || existing.has(ws.path)) continue
-    sources.push({
-      id: `managed_${ws.id}`,
-      name: ws.name,
-      path: ws.path,
-      type: 'directory',
-      mime_type: null,
-      size: null,
-      modified_at: ws.updated ? Date.parse(ws.updated) / 1000 : Date.now() / 1000,
-      children: [],
-      children_count: undefined,
-    })
-    existing.add(ws.path)
+async function mergedWorkspacePayload(): Promise<WorkspaceSource[]> {
+  await managedWorkspace.init()
+  let discoveredSources: WorkspaceSource[] = []
+  const paths = managedWorkspace.workspaces.value.map(workspace => workspace.path)
+  if (paths.length) {
+    try {
+      const result = await api.createWorkspaceSources(paths)
+      discoveredSources = result.sources || []
+    } catch (error) {
+      console.warn('Failed to refresh workspace source metadata:', error)
+    }
   }
-
-  return sources
+  return buildWorkspaceContextSources(
+    workspaceSources.value,
+    managedWorkspace.workspaces.value,
+    discoveredSources,
+  )
 }
 
 function mergedSelectedWorkspacePaths(): string[] {
-  return Array.from(new Set([
-    ...compactSelectedWorkspacePaths(),
-    ...Array.from(managedWorkspace.selectedPaths.value),
-  ]))
-}
-
-function isPathWithinRoot(path: string, root: string): boolean {
-  return isSameOrDescendantPath(path, root)
+  return buildWorkspaceContextSelection(
+    workspaceSources.value,
+    compactSelectedWorkspacePaths(),
+    managedWorkspace.selectedPaths.value,
+  )
 }
 
 function openWebSourceInput() {
@@ -2906,7 +2939,13 @@ async function addServerPathSource() {
     alert(t('请输入服务器上的文件或目录路径。', 'Please enter a server file or folder path.'))
     return
   }
-  await addWorkspaceSourcePaths([path])
+  try {
+    await importDroppedWorkspacePaths([path])
+  } catch (error) {
+    console.error('Failed to add server workspace path:', error)
+    alert(t('路径加入工作区失败，请重试。', 'Failed to add the path to the workspace.'))
+    return
+  }
   serverPathValue.value = ''
   showServerPathInput.value = false
 }
@@ -3113,7 +3152,7 @@ async function sendMessage(queuedMessage?: QueuedComposerMessage) {
   }
   
   const userMessage = route.message
-  const workspacePayload = mergedWorkspacePayload()
+  const workspacePayload = await mergedWorkspacePayload()
   const selectedWorkspacePayload = mergedSelectedWorkspacePaths()
   if (!queuedMessage) {
     inputMessage.value = ''
@@ -3648,7 +3687,7 @@ async function listenForDesktopFileDrops() {
         composerDragDepth.value = 0
         sourceDragDepth.value = 0
         if (overSourceWorkspace) {
-          void addWorkspaceSourcePaths(event.payload.paths || [])
+          void importDroppedWorkspacePaths(event.payload.paths || [])
         } else {
           void addDroppedFilePaths(event.payload.paths || [])
         }

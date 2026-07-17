@@ -3,5 +3,8 @@
   "identifier": "default",
   "description": "Default permissions for the OpenAgentSeal desktop shell",
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:9998", "http://localhost:9998"]
+  },
   "permissions": ["core:default", "dialog:default"]
 }

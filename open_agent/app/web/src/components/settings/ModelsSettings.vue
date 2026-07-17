@@ -96,6 +96,20 @@
         </div>
         
         <div class="card-body">
+          <div
+            v-if="config.provider === 'custom' && (config.isNew || config.editing)"
+            class="form-group"
+          >
+            <label>{{ t('自定义名称', 'Custom Name') }}</label>
+            <input
+              v-model.trim="config.provider_display_name"
+              type="text"
+              class="model-name-input"
+              :placeholder="t('例如：公司网关、OpenRouter', 'For example: Company Gateway or OpenRouter')"
+              @input="clearDiagnostic(config)"
+            />
+          </div>
+
           <div class="form-group">
             <label>{{ t('API Key', 'API Key') }}</label>
             <div class="input-with-toggle">
@@ -510,7 +524,7 @@ async function onProviderChange(config: LocalModelConfig, provider: string) {
   const providerInfo = availableProviders.find(p => p.value === provider)
   if (providerInfo) {
     config.provider = provider
-    config.provider_display_name = providerInfo.label
+    config.provider_display_name = provider === 'custom' ? '' : providerInfo.label
     config.provider_type = providerInfo.apiProtocol || (provider === 'anthropic' ? 'anthropic' : 'openai')
     clearDiagnostic(config)
 
@@ -786,15 +800,25 @@ async function saveConfig(config: LocalModelConfig) {
     alert(t('请选择提供商', 'Please select a provider'))
     return
   }
+  if (config.provider === 'custom' && !config.provider_display_name.trim()) {
+    alert(t('请输入自定义名称', 'Please enter a custom name'))
+    return
+  }
   
   config.saving = true
   try {
     // 构造符合 ModelConfig 类型的对象
+    const generatedDisplayName = config.selectedModel
+      ? `${config.provider_display_name} (${config.selectedModel})`
+      : config.provider_display_name
     const modelConfig: ModelConfig = {
       id: config.isNew ? '' : config.id,  // 新建配置传空ID，后端会生成新ID
       name: config.selectedModel,
-      display_name: config.display_name || `${config.provider_display_name} (${config.selectedModel})`,
+      display_name: config.provider === 'custom'
+        ? generatedDisplayName
+        : config.display_name || generatedDisplayName,
       provider: config.provider,
+      provider_display_name: config.provider_display_name.trim(),
       api_key: config.apiKey,
       base_url: config.base_url,
       provider_type: config.provider_type || 'openai',
@@ -911,6 +935,7 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 16px;
   border-bottom: 1px solid var(--border-color);
 }
@@ -919,6 +944,8 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex: 1;
+  min-width: 0;
 }
 
 .provider-icon {
@@ -931,6 +958,12 @@ onMounted(async () => {
   color: white;
   font-weight: 700;
   font-size: 16px;
+  flex-shrink: 0;
+}
+
+.provider-name {
+  flex: 1;
+  min-width: 0;
 }
 
 .provider-name h4 {
@@ -938,6 +971,8 @@ onMounted(async () => {
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .model-count {
@@ -949,6 +984,7 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .status-badge {
@@ -956,6 +992,12 @@ onMounted(async () => {
   border-radius: 4px;
   font-size: 11px;
   font-weight: 500;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  min-width: max-content;
+  white-space: nowrap;
+  line-height: 1.2;
 }
 
 .status-badge.configured {
@@ -1343,6 +1385,7 @@ onMounted(async () => {
   font-weight: 600;
   cursor: pointer;
   outline: none;
+  min-width: 0;
 }
 
 .provider-select:focus {

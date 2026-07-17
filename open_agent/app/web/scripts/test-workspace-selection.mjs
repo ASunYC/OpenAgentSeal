@@ -65,6 +65,51 @@ try {
     model.compactWorkspaceSourceSelection(sources, ['C:\\repo', 'C:\\repo\\src']),
     ['C:\\repo'],
   )
+
+  const staleLocalSource = {
+    id: 'legacy-local',
+    name: 'old-repo',
+    path: 'C:\\old-repo',
+    type: 'directory',
+    children: [],
+  }
+  const webSource = {
+    id: 'web-1',
+    name: 'docs.example.com',
+    path: 'https://docs.example.com/',
+    type: 'web',
+    children: [],
+  }
+  const workspaces = [{
+    id: 'managed-1',
+    name: 'repo',
+    path: 'C:\\repo',
+    created: '2026-07-18T00:00:00Z',
+  }]
+  const discovered = [{
+    id: 'discovered-1',
+    name: 'repo',
+    path: 'C:\\repo',
+    type: 'directory',
+    children: [{ name: 'README.md', path: 'C:\\repo\\README.md', type: 'file' }],
+    children_count: 1,
+  }]
+  const payload = model.buildWorkspaceContextSources(
+    [staleLocalSource, webSource],
+    workspaces,
+    discovered,
+  )
+  assert.deepEqual(payload.map(source => source.path), ['https://docs.example.com/', 'C:\\repo'])
+  assert.equal(payload[1].children_count, 1)
+  assert.equal(payload[1].children[0].name, 'README.md')
+  assert.deepEqual(
+    model.buildWorkspaceContextSelection(
+      [staleLocalSource, webSource],
+      ['C:\\old-repo', 'https://docs.example.com/'],
+      ['C:\\repo\\src'],
+    ),
+    ['https://docs.example.com/', 'C:\\repo\\src'],
+  )
 } finally {
   await rm(tempDir, { recursive: true, force: true })
 }

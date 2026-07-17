@@ -71,7 +71,7 @@ CLAUDE.md
 
 node_modules/
 desktop/src-tauri/target/
-desktop/src-tauri/binaries/open-agent-backend-*
+desktop/src-tauri/binaries/
 build/pyinstaller/
 
 .agent_memory.json

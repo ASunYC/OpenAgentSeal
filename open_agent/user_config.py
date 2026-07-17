@@ -109,6 +109,7 @@ class ModelConfig:
 
     context_window: Optional[int] = None
     context_window_source: str = ""
+    provider_display_name: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -123,7 +124,7 @@ class ModelConfig:
     @classmethod
     def create(cls, name: str, display_name: str, provider: str, 
                api_key: str, base_url: str = None, provider_type: str = "openai",
-               is_default: bool = False) -> "ModelConfig":
+               is_default: bool = False, provider_display_name: str = "") -> "ModelConfig":
         """创建新的模型配置（自动生成 ID）"""
         return cls(
             id=f"model_{uuid.uuid4().hex[:8]}",
@@ -133,7 +134,8 @@ class ModelConfig:
             api_key=api_key,
             base_url=base_url,
             provider_type=provider_type,
-            is_default=is_default
+            is_default=is_default,
+            provider_display_name=provider_display_name,
         )
 
 

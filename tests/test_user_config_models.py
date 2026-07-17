@@ -87,3 +87,24 @@ def test_cli_reloads_the_desktop_shared_model_config(isolated_config):
 
     assert selected.id == second.id
     assert selected.name == second.name
+
+
+def test_custom_provider_display_name_is_persisted(isolated_config):
+    manager = UserConfigManager()
+    custom = ModelConfig(
+        id="model_custom",
+        name="custom-model",
+        display_name="Company Gateway (custom-model)",
+        provider="custom",
+        api_key="secret",
+        base_url="https://gateway.example.test/v1",
+        provider_type="openai",
+        provider_display_name="Company Gateway",
+    )
+
+    manager.add_model(custom)
+
+    persisted = json.loads(isolated_config.read_text(encoding="utf-8"))
+    assert persisted["models"][0]["provider_display_name"] == "Company Gateway"
+    restored = ModelConfig.from_dict(persisted["models"][0])
+    assert restored.provider_display_name == "Company Gateway"

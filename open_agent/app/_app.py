@@ -483,12 +483,14 @@ def _setup_app_routes(app: FastAPI):
                 # 获取提供商友好名称
                 provider_display_name = ""
                 if provider_enum:
-                    provider_display_name = ModelProvider.get_display_name(
-                        provider_enum
+                    provider_display_name = (
+                        m.provider_display_name
+                        if provider_enum == ModelProvider.CUSTOM and m.provider_display_name
+                        else ModelProvider.get_display_name(provider_enum)
                     )
                 else:
                     # 对于自定义提供商，使用原始值
-                    provider_display_name = m.provider
+                    provider_display_name = m.provider_display_name or m.provider
 
                 context_window, context_window_source = resolve_model_context_window(
                     m,
@@ -561,6 +563,9 @@ def _setup_app_routes(app: FastAPI):
                     is_default=data.get("is_default", existing_model.is_default),
                     context_window=context_window,
                     context_window_source=context_window_source,
+                    provider_display_name=data.get(
+                        "provider_display_name", existing_model.provider_display_name
+                    ),
                 )
                 manager.update_model(model)
             else:
@@ -573,6 +578,7 @@ def _setup_app_routes(app: FastAPI):
                     base_url=data.get("base_url"),
                     provider_type=data.get("provider_type", "openai"),
                     is_default=data.get("is_default", False),
+                    provider_display_name=data.get("provider_display_name", ""),
                 )
                 model.context_window = context_window
                 model.context_window_source = context_window_source

@@ -16,6 +16,7 @@ from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+from send2trash import send2trash
 
 from open_agent.utils.path_utils import get_data_dir
 from open_agent.utils.safe_join import PathTraversalError, safe_join
@@ -54,6 +55,11 @@ class MkdirRequest(BaseModel):
 class RenameRequest(BaseModel):
     path: str
     name: str
+
+
+class LocalImportRequest(BaseModel):
+    paths: list[str]
+    dest_path: str = ""
 
 
 class SearchRequest(BaseModel):
@@ -338,7 +344,7 @@ async def write_file(ws_id: str, req: WriteFileRequest):
 
 @router.post("/{ws_id}/delete")
 async def delete_file(ws_id: str, req: DeleteFileRequest):
-    """Delete a file or directory."""
+    """Move a file or directory to the operating system recycle bin."""
     ws = _find_workspace(ws_id)
     target = _resolve_workspace_path(ws, req.path)
 
@@ -350,12 +356,15 @@ async def delete_file(ws_id: str, req: DeleteFileRequest):
     if target.resolve() == ws_root:
         raise HTTPException(status_code=403, detail="不能删除工作区根目录")
 
-    if target.is_dir():
-        shutil.rmtree(target)
-    else:
-        target.unlink()
+    try:
+        send2trash(str(target))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"无法移入系统回收站，文件未删除: {exc}",
+        ) from exc
 
-    return {"ok": True, "path": req.path}
+    return {"ok": True, "path": req.path, "trashed": True}
 
 
 @router.post("/{ws_id}/mkdir")
@@ -428,6 +437,50 @@ async def upload_file(
         "path": rel,
         "size": len(content),
     }
+
+
+@router.post("/{ws_id}/import-local")
+async def import_local_files(ws_id: str, request: LocalImportRequest):
+    """Copy files selected by the desktop shell into a workspace."""
+    ws = _find_workspace(ws_id)
+    dest_dir = _resolve_workspace_path(ws, request.dest_path or ".")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if not dest_dir.is_dir():
+        raise HTTPException(status_code=400, detail="Destination is not a directory")
+
+    ws_root = Path(ws["path"]).resolve()
+    imported = []
+    rejected = []
+    for raw_path in request.paths[:100]:
+        source = Path(raw_path).expanduser()
+        try:
+            source = source.resolve(strict=True)
+            if not source.is_file():
+                rejected.append({"path": raw_path, "reason": "not a file"})
+                continue
+
+            filename = _validate_entry_name(source.name, "filename")
+            dest_rel = str(dest_dir.relative_to(ws_root)).replace("\\", "/")
+            target_rel = f"{dest_rel}/{filename}" if dest_rel != "." else filename
+            target = _resolve_workspace_path(ws, target_rel)
+            if target.is_dir():
+                rejected.append({"path": raw_path, "reason": "cannot overwrite a directory"})
+                continue
+
+            if source != target.resolve():
+                shutil.copy2(source, target)
+
+            imported.append(
+                {
+                    "source": str(source),
+                    "path": str(target.relative_to(ws_root)).replace("\\", "/"),
+                    "size": target.stat().st_size,
+                }
+            )
+        except (OSError, ValueError) as exc:
+            rejected.append({"path": raw_path, "reason": str(exc)})
+
+    return {"imported": imported, "rejected": rejected}
 
 
 # ── Search ──

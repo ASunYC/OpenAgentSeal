@@ -173,12 +173,83 @@ class TestFileOperations:
         assert resp.status_code == 400
         assert (workspace_dir.parent / "escaped_upload.txt").exists() is False
 
-    def test_delete_file(self, client, workspace_id):
+    def test_import_local_file(self, client, workspace_id, workspace_dir, tmp_path):
+        source = tmp_path / "selected.txt"
+        source.write_text("selected content", encoding="utf-8")
+
+        resp = client.post(
+            f"/api/workspace/{workspace_id}/import-local",
+            json={"paths": [str(source)]},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["rejected"] == []
+        assert resp.json()["imported"][0]["path"] == "selected.txt"
+        assert (
+            workspace_dir / "selected.txt"
+        ).read_text(encoding="utf-8") == "selected content"
+
+    def test_import_local_file_rejects_directory(self, client, workspace_id, tmp_path):
+        source_dir = tmp_path / "selected_dir"
+        source_dir.mkdir()
+
+        resp = client.post(
+            f"/api/workspace/{workspace_id}/import-local",
+            json={"paths": [str(source_dir)]},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["imported"] == []
+        assert resp.json()["rejected"][0]["reason"] == "not a file"
+
+    def test_import_local_file_blocks_destination_traversal(
+        self, client, workspace_id, tmp_path
+    ):
+        source = tmp_path / "selected.txt"
+        source.write_text("selected content", encoding="utf-8")
+
+        resp = client.post(
+            f"/api/workspace/{workspace_id}/import-local",
+            json={"paths": [str(source)], "dest_path": "../outside"},
+        )
+
+        assert resp.status_code == 403
+
+    def test_delete_file_moves_it_to_recycle_bin(
+        self, client, workspace_id, workspace_dir, monkeypatch
+    ):
+        trashed = []
+        monkeypatch.setattr(
+            "open_agent.app.runner.workspace_api.send2trash",
+            lambda path: trashed.append(path),
+        )
         resp = client.post(
             f"/api/workspace/{workspace_id}/delete",
             json={"path": "file_b.py"},
         )
         assert resp.status_code == 200
+        assert resp.json()["trashed"] is True
+        assert trashed == [str(workspace_dir / "file_b.py")]
+        assert (workspace_dir / "file_b.py").exists()
+
+    def test_recycle_bin_failure_keeps_the_file(
+        self, client, workspace_id, workspace_dir, monkeypatch
+    ):
+        def fail_to_trash(_path):
+            raise OSError("recycle bin unavailable")
+
+        monkeypatch.setattr(
+            "open_agent.app.runner.workspace_api.send2trash",
+            fail_to_trash,
+        )
+        resp = client.post(
+            f"/api/workspace/{workspace_id}/delete",
+            json={"path": "file_b.py"},
+        )
+
+        assert resp.status_code == 500
+        assert "文件未删除" in resp.json()["detail"]
+        assert (workspace_dir / "file_b.py").exists()
 
 
 class TestSearch:

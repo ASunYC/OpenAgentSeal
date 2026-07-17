@@ -7,6 +7,7 @@
 import { ref, computed } from 'vue'
 import type { Workspace, FileEntry } from '@/types'
 import { workspaceApi } from '@/api'
+import { absoluteWorkspacePath, isSameOrDescendantPath } from '@/models/workspaceSelection'
 
 // Singleton state shared across all component instances
 const workspaces = ref<Workspace[]>([])
@@ -19,7 +20,7 @@ const viewMode = ref<'list' | 'grid'>('list')
 const searchQuery = ref('')
 const selectedPaths = ref<Set<string>>(new Set())
 
-let initialized = false
+let initPromise: Promise<void> | null = null
 
 export function useWorkspaceManager() {
   const currentWorkspace = computed(() =>
@@ -52,13 +53,16 @@ export function useWorkspaceManager() {
   })
 
   async function init() {
-    if (initialized) return
-    initialized = true
-    await loadWorkspaces()
-    if (workspaces.value.length > 0 && !currentWorkspaceId.value) {
-      const current = workspaces.value.find(ws => ws.is_current) || workspaces.value[0]
-      await selectWorkspace(current.id)
+    if (!initPromise) {
+      initPromise = (async () => {
+        await loadWorkspaces()
+        if (workspaces.value.length > 0 && !currentWorkspaceId.value) {
+          const current = workspaces.value.find(ws => ws.is_current) || workspaces.value[0]
+          await selectWorkspace(current.id)
+        }
+      })()
     }
+    await initPromise
   }
 
   async function loadWorkspaces() {
@@ -100,13 +104,23 @@ export function useWorkspaceManager() {
     await loadFiles()
   }
 
-  async function createWorkspace(name: string, path: string) {
+  async function createWorkspace(name: string, path: string): Promise<Workspace | null> {
     try {
+      const normalizedPath = path.replace(/[\\/]+$/, '')
+      const existing = workspaces.value.find(
+        ws => ws.path.replace(/[\\/]+$/, '') === normalizedPath,
+      )
+      if (existing) {
+        await selectWorkspace(existing.id)
+        return existing
+      }
       const result = await workspaceApi.createWorkspace(name, path)
       workspaces.value.push(result.workspace)
       await selectWorkspace(result.workspace.id)
+      return result.workspace
     } catch (e: any) {
       error.value = `创建工作区失败: ${e.message}`
+      return null
     }
   }
 
@@ -151,14 +165,26 @@ export function useWorkspaceManager() {
     }
   }
 
-  async function deleteItem(path: string) {
-    if (!currentWorkspaceId.value) return
+  async function deleteItem(path: string, workspaceId = currentWorkspaceId.value): Promise<boolean> {
+    if (!workspaceId) return false
     try {
-      await workspaceApi.deleteFile(currentWorkspaceId.value, path)
-      selectedPaths.value.delete(path)
-      await loadFiles()
+      await workspaceApi.deleteFile(workspaceId, path)
+      const workspace = workspaces.value.find(item => item.id === workspaceId)
+      if (workspace) {
+        const deletedPath = absoluteWorkspacePath(workspace.path, path)
+        selectedPaths.value = new Set(
+          Array.from(selectedPaths.value).filter(selected =>
+            !isSameOrDescendantPath(selected, deletedPath),
+          ),
+        )
+      }
+      if (workspaceId === currentWorkspaceId.value) {
+        await loadFiles()
+      }
+      return true
     } catch (e: any) {
       error.value = `删除失败: ${e.message}`
+      return false
     }
   }
 
