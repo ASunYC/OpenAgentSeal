@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 
-import { runWithRetry } from '../build-linux-docker.mjs'
+import { createMobileBuildCommand, runWithRetry } from '../build-linux-docker.mjs'
 
 const root = path.resolve(import.meta.dirname, '..', '..')
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -35,11 +35,19 @@ test('Linux builder is pinned to the Ubuntu 22.04 amd64 image with Tauri depende
   assert.match(dockerfile, /__pycache__/)
   assert.doesNotMatch(dockerfile, /docker\/dockerfile:/)
   assert.match(dockerfile, /OpenAgentSeal-linux-x64/)
+  assert.match(dockerfile, /package-release\.mjs all --skip-mobile/)
 
   const dependencyCopy = dockerfile.indexOf('COPY desktop/package.json')
   const sourceCopy = dockerfile.indexOf('COPY . .')
   assert.notEqual(dependencyCopy, -1)
   assert.ok(dependencyCopy < sourceCopy)
+})
+
+test('Linux release builds Android on the host before entering Docker', () => {
+  const command = createMobileBuildCommand(root, 'node.exe')
+
+  assert.equal(command.command, 'node.exe')
+  assert.deepEqual(command.args, [path.join(root, 'scripts', 'package-release.mjs'), 'mobile'])
 })
 
 test('Docker build context excludes local build environments', () => {

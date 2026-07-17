@@ -154,7 +154,7 @@ cd desktop
 npm run build
 ```
 
-该命令会运行跨平台 Node 构建管线，同步版本、构建前端、用 PyInstaller 打包 Python 后端与独立 CLI，再执行 Tauri 打包并生成校验清单。
+该命令会运行跨平台 Node 构建管线，同步版本、构建前端、用 PyInstaller 打包 Python 后端与独立 CLI、执行 Tauri 打包，并同时生成 Android 移动端 APK 和各产物校验清单。
 
 默认构建会复用 PyInstaller、Tauri 和安装包缓存。仅在缓存异常或工具链变更后使用 `npm run build:clean` 全量重建。`npm run build:desktop` 与 `npm run build:cli` 可单独构建，并保留另一类已有产物。
 
@@ -165,14 +165,17 @@ dist/OpenAgentSeal-windows-x64/desktop/installers/OpenAgentSeal_0.1.0_x64-setup.
 dist/OpenAgentSeal-windows-x64/desktop/installers/OpenAgentSeal_0.1.0_x64_en-US.msi
 dist/OpenAgentSeal-windows-x64/desktop/portable/OpenAgentSeal.exe
 dist/OpenAgentSeal-windows-x64/cli/OpenAgentSeal-CLI-0.1.0-windows-x64.zip
+dist/mobile/android/OpenAgentSeal-Mobile-debug.apk
 ```
 
-在已安装 Docker Desktop 的 Windows 主机上构建 Linux x64 桌面版与 CLI：
+在已安装 Docker Desktop 的 Windows 主机上构建 Linux x64 桌面版与 CLI。该命令也会先在 Windows 主机上构建 Android APK：
 
 ```bash
 cd desktop
 npm run build:linux:docker
 ```
+
+当前 APK 使用 Android Debug 签名，可直接安装测试，但不是应用商店发布签名包。
 
 ### 托盘能力
 

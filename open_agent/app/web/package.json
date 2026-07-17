@@ -16,6 +16,8 @@
     "test:collaboration-state": "node scripts/test-collaboration-state.mjs",
     "preview": "vite preview",
     "mobile:sync": "npm run build && cap sync android",
+    "mobile:package": "cap sync android && cd android && gradlew.bat assembleDebug",
+    "mobile:package:clean": "cap sync android && cd android && gradlew.bat clean assembleDebug",
     "mobile:open": "cap open android",
     "mobile:build": "npm run mobile:sync && cd android && gradlew.bat assembleDebug"
   },

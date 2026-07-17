@@ -15,6 +15,19 @@ export function replaceFirstJsonVersion(content, version) {
   return content.replace(/("version"\s*:\s*")[^"]+(")/m, `$1${version}$2`)
 }
 
+export function androidVersionCode(version) {
+  if (!isValidVersion(version)) throw new Error(`Invalid Android version: ${version}`)
+  const [major, minor, patch] = version.split(/[.-]/, 3).map(Number)
+  if (minor > 999 || patch > 999) {
+    throw new Error(`Android version components must be below 1000: ${version}`)
+  }
+  const code = major * 1_000_000 + minor * 1_000 + patch
+  if (code <= 0 || code > 2_100_000_000) {
+    throw new Error(`Android versionCode is out of range: ${code}`)
+  }
+  return code
+}
+
 function replaceFirst(content, pattern, replacement, description) {
   if (!pattern.test(content)) throw new Error(`Version field not found in ${description}`)
   pattern.lastIndex = 0
@@ -39,7 +52,7 @@ function updateFile(root, relativePath, updater) {
   if (updated !== content) fs.writeFileSync(file, updated, 'utf8')
 }
 
-export function syncVersion(root = DEFAULT_ROOT) {
+export function syncVersion(root = DEFAULT_ROOT, { skipAndroid = false } = {}) {
   const versionFile = path.join(root, 'version.json')
   const version = JSON.parse(fs.readFileSync(versionFile, 'utf8')).version
   if (!isValidVersion(version)) throw new Error(`Invalid version in version.json: ${version}`)
@@ -51,6 +64,20 @@ export function syncVersion(root = DEFAULT_ROOT) {
     ['open_agent/acp/__init__.py', /version="[^"]+"\)/, `version="${version}")`],
     ['desktop/src-tauri/Cargo.toml', /^(version\s*=\s*)"[^"]+"/m, `$1"${version}"`],
   ]
+  if (!skipAndroid) {
+    textUpdates.push(
+      [
+        'open_agent/app/web/android/app/build.gradle',
+        /^(\s*versionCode\s+)\d+/m,
+        `$1${androidVersionCode(version)}`,
+      ],
+      [
+        'open_agent/app/web/android/app/build.gradle',
+        /^(\s*versionName\s+)"[^"]+"/m,
+        `$1"${version}"`,
+      ],
+    )
+  }
   for (const [relativePath, pattern, replacement] of textUpdates) {
     updateFile(root, relativePath, (content) =>
       replaceFirst(content, pattern, replacement, relativePath),

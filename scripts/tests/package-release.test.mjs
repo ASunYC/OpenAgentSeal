@@ -6,10 +6,12 @@ import test from 'node:test'
 
 import {
   buildPyInstallerPlan,
+  createMobileBuildArgs,
   createPyInstallerArgs,
   createTauriBundleArgs,
   createTauriCompileArgs,
   desktopBundlePlan,
+  mobileReleaseLayout,
   normalizePlatform,
   prepareSpawnCommand,
   releaseLayout,
@@ -34,6 +36,32 @@ test('creates separate desktop and CLI release locations', () => {
   assert.equal(layout.releaseDir, path.join(root, 'dist', 'OpenAgentSeal-linux-x64'))
   assert.equal(layout.desktopDir, path.join(layout.releaseDir, 'desktop'))
   assert.equal(layout.cliDir, path.join(layout.releaseDir, 'cli'))
+})
+
+test('creates a stable Android APK release location', () => {
+  const layout = mobileReleaseLayout(root)
+
+  assert.equal(layout.releaseDir, path.join(root, 'dist', 'mobile', 'android'))
+  assert.equal(
+    layout.sourceApk,
+    path.join(root, 'open_agent', 'app', 'web', 'android', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'),
+  )
+  assert.equal(layout.outputApk, path.join(layout.releaseDir, 'OpenAgentSeal-Mobile-debug.apk'))
+})
+
+test('packages Android from the already-built Web UI', () => {
+  assert.deepEqual(createMobileBuildArgs(root), [
+    '--prefix',
+    path.join(root, 'open_agent', 'app', 'web'),
+    'run',
+    'mobile:package',
+  ])
+  assert.deepEqual(createMobileBuildArgs(root, { clean: true }), [
+    '--prefix',
+    path.join(root, 'open_agent', 'app', 'web'),
+    'run',
+    'mobile:package:clean',
+  ])
 })
 
 test('filters Python bytecode caches from packaged data', () => {

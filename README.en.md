@@ -161,21 +161,23 @@ npm install
 npm run dev
 ```
 
-Build the Windows x64 desktop app and standalone CLI:
+Build the Windows x64 desktop app, standalone CLI, and Android companion APK:
 
 ```bash
 npm run build
 ```
 
-This runs the cross-platform Node build pipeline, synchronizes versions, packages the Python backend and standalone CLI with PyInstaller, builds the Tauri bundles, and writes checksums.
+This runs the cross-platform Node build pipeline, synchronizes versions, packages the Python backend and standalone CLI with PyInstaller, builds the Tauri bundles and Android APK, and writes checksums.
 
 The default build is incremental: PyInstaller, Tauri, and installer caches are reused. Run `npm run build:clean` only for a full rebuild after cache or toolchain problems. `npm run build:desktop` and `npm run build:cli` build one release type without deleting the other.
 
-Build Linux x64 desktop and CLI releases from a Docker-enabled Windows host:
+Build Linux x64 desktop and CLI releases from a Docker-enabled Windows host. The Android APK is built on the Windows host before Docker starts:
 
 ```bash
 npm run build:linux:docker
 ```
+
+The current APK uses the Android debug signing key. It is installable for testing but is not an app-store signed release.
 
 See [desktop/README.md](./desktop/README.md) for shell-specific notes.
 

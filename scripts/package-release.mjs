@@ -43,6 +43,27 @@ export function releaseLayout(root, platform, architecture) {
   }
 }
 
+export function mobileReleaseLayout(root = DEFAULT_ROOT) {
+  const releaseDir = path.join(root, 'dist', 'mobile', 'android')
+  return {
+    releaseDir,
+    sourceApk: path.join(
+      root,
+      'open_agent',
+      'app',
+      'web',
+      'android',
+      'app',
+      'build',
+      'outputs',
+      'apk',
+      'debug',
+      'app-debug.apk',
+    ),
+    outputApk: path.join(releaseDir, 'OpenAgentSeal-Mobile-debug.apk'),
+  }
+}
+
 function dataItem(root, source, destination) {
   return { source: path.join(root, source), destination }
 }
@@ -169,6 +190,15 @@ export function createTauriCompileArgs(root = DEFAULT_ROOT) {
     'tauri:compile',
     '--',
     '--no-bundle',
+  ]
+}
+
+export function createMobileBuildArgs(root = DEFAULT_ROOT, { clean = false } = {}) {
+  return [
+    '--prefix',
+    path.join(root, 'open_agent', 'app', 'web'),
+    'run',
+    clean ? 'mobile:package:clean' : 'mobile:package',
   ]
 }
 
@@ -444,12 +474,6 @@ function writeChecksums(releaseDir) {
   fs.writeFileSync(checksumPath, `${lines.join('\n')}\n`, 'utf8')
 }
 
-function readVersion(root) {
-  const value = JSON.parse(fs.readFileSync(path.join(root, 'version.json'), 'utf8')).version
-  if (!value) throw new Error('version.json does not contain a version')
-  return value
-}
-
 function buildFrozenTarget({ kind, platform, targetTriple, root, python, clean = false }) {
   const base = path.join(root, 'build', 'pyinstaller', platform, kind)
   const distPath =
@@ -482,6 +506,46 @@ function buildFrozenTarget({ kind, platform, targetTriple, root, python, clean =
   )
   run(python, createPyInstallerArgs(plan, { root, distPath, workPath, specPath, clean }))
   return { plan, distPath }
+}
+
+export function buildMobileRelease({
+  root = DEFAULT_ROOT,
+  version,
+  clean = false,
+  webBuilt = false,
+} = {}) {
+  const releaseVersion = version || syncVersion(root)
+  const layout = mobileReleaseLayout(root)
+  process.stdout.write('[mobile] Building Android companion APK...\n')
+  if (!webBuilt) buildWebUi({ root, clean })
+  run('npm', createMobileBuildArgs(root, { clean }))
+  const legacyReleaseDir = path.join(root, 'dist', 'mobile')
+  for (const legacyName of [
+    'OpenAgentSeal-Mobile-debug.apk',
+    'release-manifest.json',
+    'SHA256SUMS',
+  ]) {
+    fs.rmSync(path.join(legacyReleaseDir, legacyName), { force: true })
+  }
+  recreateDirectory(layout.releaseDir)
+  fs.copyFileSync(requirePath(layout.sourceApk, 'Android debug APK'), layout.outputApk)
+  fs.writeFileSync(
+    path.join(layout.releaseDir, 'release-manifest.json'),
+    `${JSON.stringify(
+      {
+        version: releaseVersion,
+        platform: 'android',
+        buildType: 'debug',
+        appId: 'com.openagentseal.mobile',
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  )
+  writeChecksums(layout.releaseDir)
+  process.stdout.write(`[mobile] Android release artifact: ${layout.outputApk}\n`)
+  return layout
 }
 
 function collectCli({ root, layout, platform, architecture, version, cliBuild }) {
@@ -530,19 +594,25 @@ function collectDesktop({ root, layout, platform, sidecarBuild }) {
   copyDirectory(path.join(root, 'open_agent', 'config'), path.join(portableDir, 'config'))
 }
 
-export function runReleaseBuild(requestedTarget = 'all', root = DEFAULT_ROOT, { clean = false } = {}) {
-  if (!['all', 'desktop', 'cli'].includes(requestedTarget)) {
+export function runReleaseBuild(
+  requestedTarget = 'all',
+  root = DEFAULT_ROOT,
+  { clean = false, skipMobile = false } = {},
+) {
+  if (!['all', 'desktop', 'cli', 'mobile'].includes(requestedTarget)) {
     throw new Error(`Unknown build target: ${requestedTarget}`)
   }
+  const version = syncVersion(root, { skipAndroid: skipMobile })
+  if (requestedTarget === 'mobile') return buildMobileRelease({ root, version, clean })
+
   const platform = normalizePlatform()
   const architecture = normalizeArchitecture()
   const targetTriple = rustTargetTriple()
   const python = findPython(root, platform)
   if (!python) throw new Error('No Python interpreter was found for packaging')
 
-  syncVersion(root)
-  const version = readVersion(root)
   const layout = releaseLayout(root, platform, architecture)
+  const totalSteps = requestedTarget === 'all' && !skipMobile ? 5 : 4
   if (requestedTarget === 'all') recreateDirectory(layout.releaseDir)
   else fs.mkdirSync(layout.releaseDir, { recursive: true })
   if (requestedTarget === 'all' || requestedTarget === 'desktop') {
@@ -557,12 +627,12 @@ export function runReleaseBuild(requestedTarget = 'all', root = DEFAULT_ROOT, { 
   let cliBuild
   let sidecarBuild
   if (requestedTarget === 'all' || requestedTarget === 'cli') {
-    process.stdout.write(`[1/4] Building ${platform} CLI...\n`)
+    process.stdout.write(`[1/${totalSteps}] Building ${platform} CLI...\n`)
     cliBuild = buildFrozenTarget({ kind: 'cli', platform, targetTriple, root, python, clean })
     collectCli({ root, layout, platform, architecture, version, cliBuild })
   }
   if (requestedTarget === 'all' || requestedTarget === 'desktop') {
-    process.stdout.write(`[2/4] Building Web UI and ${platform} desktop backend...\n`)
+    process.stdout.write(`[2/${totalSteps}] Building Web UI and ${platform} desktop backend...\n`)
     buildWebUi({ root, clean })
     sidecarBuild = buildFrozenTarget({
       kind: 'backend',
@@ -582,7 +652,7 @@ export function runReleaseBuild(requestedTarget = 'all', root = DEFAULT_ROOT, { 
       })
     }
     clearBundleArtifacts(root, platform)
-    process.stdout.write('[3/4] Compiling Web UI and Tauri app once...\n')
+    process.stdout.write(`[3/${totalSteps}] Compiling Web UI and Tauri app once...\n`)
     run('npm', createTauriCompileArgs(root), tauriBuildOptions)
     for (const { bundle, attempts } of desktopBundlePlan(platform)) {
       runWithRetry(
@@ -601,20 +671,28 @@ export function runReleaseBuild(requestedTarget = 'all', root = DEFAULT_ROOT, { 
     collectDesktop({ root, layout, platform, sidecarBuild })
   }
 
+  if (requestedTarget === 'all' && !skipMobile) {
+    process.stdout.write(`[4/${totalSteps}] Packaging Android companion app...\n`)
+    buildMobileRelease({ root, version, clean, webBuilt: true })
+  }
+
   fs.writeFileSync(
     path.join(layout.releaseDir, 'release-manifest.json'),
     `${JSON.stringify({ version, platform, architecture, targetTriple }, null, 2)}\n`,
     'utf8',
   )
   writeChecksums(layout.releaseDir)
-  process.stdout.write(`[4/4] Release artifacts: ${layout.releaseDir}\n`)
+  process.stdout.write(`[${totalSteps}/${totalSteps}] Release artifacts: ${layout.releaseDir}\n`)
   return layout
 }
 
 function main() {
   const args = process.argv.slice(2)
   const requestedTarget = args.find((arg) => !arg.startsWith('--')) || 'all'
-  runReleaseBuild(requestedTarget, DEFAULT_ROOT, { clean: args.includes('--clean') })
+  runReleaseBuild(requestedTarget, DEFAULT_ROOT, {
+    clean: args.includes('--clean'),
+    skipMobile: args.includes('--skip-mobile'),
+  })
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : ''

@@ -72,7 +72,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/workspace/desktop/src-tauri/target \
     --mount=type=cache,target=/workspace/.venv,sharing=locked \
     --mount=type=cache,target=/workspace/build/pyinstaller,sharing=locked \
-    npm --prefix desktop run build \
+    node scripts/package-release.mjs all --skip-mobile \
     && .venv/bin/python scripts/packaging/open_agent_cli.py --version \
     && test -x dist/OpenAgentSeal-linux-x64/cli/portable/openagentseal-cli \
     && dist/OpenAgentSeal-linux-x64/cli/portable/openagentseal-cli --version \

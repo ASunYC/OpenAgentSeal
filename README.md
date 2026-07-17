@@ -98,8 +98,9 @@ npm install
 npm run dev
 ```
 
-Build Windows x64 desktop and CLI releases incrementally with `npm run build`, or
-build Linux x64 desktop and CLI releases in Docker with `npm run build:linux:docker`.
+Build Windows x64 desktop, CLI, and the Android companion APK incrementally with
+`npm run build`, or build Linux x64 desktop and CLI plus the host-built Android APK
+with `npm run build:linux:docker`.
 Use `npm run build:clean` only when a full local rebuild is required.
 
 ## Links

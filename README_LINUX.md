@@ -17,6 +17,8 @@ cd desktop
 npm run build:linux:docker
 ```
 
+该命令会先使用 Windows 主机上的 JDK 和 Android SDK 构建 `dist/mobile/android/OpenAgentSeal-Mobile-debug.apk`，随后进入 Ubuntu Docker 构建 Linux 桌面版与 CLI。容器内不会重复安装 Android SDK。
+
 首次构建会在 Docker 中安装 Tauri、Rust、Node.js、Python 和 WebKitGTK 工具链，耗时会比较长；后续构建会复用 npm、Python 虚拟环境、PyInstaller、Cargo 和 Tauri 编译缓存。只要依赖清单和 Dockerfile 没有变化，修改业务源码不会重新安装依赖。
 
 产物目录：

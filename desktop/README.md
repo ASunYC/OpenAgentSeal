@@ -27,7 +27,7 @@ npm run build
 
 The cross-platform Node build pipeline synchronizes versions, builds the Vue UI,
 packages the Python backend and standalone CLI with PyInstaller, builds the Tauri
-desktop bundles, and writes checksums.
+desktop bundles and Android companion APK, and writes checksums.
 
 Builds are incremental by default. PyInstaller reuses its analysis cache, and the
 Tauri application is compiled once before the native installers are bundled.
@@ -41,12 +41,18 @@ dist/OpenAgentSeal-windows-x64/
 ├── cli/OpenAgentSeal-CLI-0.1.0-windows-x64.zip
 ├── release-manifest.json
 └── SHA256SUMS
+
+dist/mobile/android/
+├── OpenAgentSeal-Mobile-debug.apk
+├── release-manifest.json
+└── SHA256SUMS
 ```
 
 ## Linux x64 release
 
 Linux releases are built in the pinned Ubuntu 22.04 Docker environment, so the
-Windows host does not need a local Linux toolchain:
+Windows host does not need a local Linux toolchain. The Android APK is built on
+the Windows host before Docker starts:
 
 ```powershell
 npm run build:linux:docker
@@ -69,12 +75,14 @@ See [README_LINUX.md](../README_LINUX.md) for installation and execution notes.
 npm run build:clean
 npm run build:desktop
 npm run build:cli
+npm run build:mobile
 npm run test:packaging
 ```
 
-`build:desktop` and `build:cli` target the current host platform and preserve the
-other release type. macOS packaging is intentionally outside the current release
-scope.
+`build` and `build:linux:docker` always include the Android companion APK.
+`build:desktop`, `build:cli`, and `build:mobile` are focused developer commands.
+The current APK uses the Android debug signing key and is not app-store signed.
+macOS packaging is intentionally outside the current release scope.
 
 Backend logs are written to `%LOCALAPPDATA%\OpenAgentSeal` on Windows and
 `$XDG_STATE_HOME/OpenAgentSeal` or `~/.local/state/OpenAgentSeal` on Linux.

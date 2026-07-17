@@ -9,6 +9,7 @@
     "build:clean": "node ../scripts/package-release.mjs all --clean",
     "build:desktop": "node ../scripts/package-release.mjs desktop",
     "build:cli": "node ../scripts/package-release.mjs cli",
+    "build:mobile": "node ../scripts/package-release.mjs mobile",
     "build:linux:docker": "node ../scripts/build-linux-docker.mjs",
     "test:packaging": "node --test ../scripts/tests/package-release.test.mjs ../scripts/tests/sync-version.test.mjs ../scripts/tests/linux-docker.test.mjs",
     "tauri:build": "npm run web:build && tauri build",

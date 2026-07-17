@@ -41,13 +41,15 @@ Debug APK 输出到：
 open_agent/app/web/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-当前工作区还会把测试 APK 复制到：
+完整发布命令 `desktop/npm run build`、Linux 发布命令 `desktop/npm run build:linux:docker`，以及独立命令 `desktop/npm run build:mobile` 都会把 APK 和校验清单输出到：
 
 ```text
-dist/mobile/OpenAgentSeal-Mobile-debug.apk
+dist/mobile/android/OpenAgentSeal-Mobile-debug.apk
+dist/mobile/android/release-manifest.json
+dist/mobile/android/SHA256SUMS
 ```
 
-Android 工程使用 Capacitor，应用 ID 为 `com.openagentseal.mobile`。本机需安装 JDK 21、Android SDK Platform 36 和对应 Build Tools。
+Android 工程使用 Capacitor，应用 ID 为 `com.openagentseal.mobile`。本机需安装 JDK 21、Android SDK Platform 36 和对应 Build Tools。当前 APK 使用 Android Debug 签名，可用于直接安装测试；应用商店发布仍需配置独立的 Release keystore。
 
 ## 当前边界
 

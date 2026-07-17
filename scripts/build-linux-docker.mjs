@@ -30,6 +30,18 @@ export async function runWithRetry(
   return result
 }
 
+export function createMobileBuildCommand(rootDir = root, nodeExecutable = process.execPath) {
+  return {
+    command: nodeExecutable,
+    args: [path.join(rootDir, 'scripts', 'package-release.mjs'), 'mobile'],
+  }
+}
+
+function runMobileBuild() {
+  const command = createMobileBuildCommand()
+  return spawnSync(command.command, command.args, { cwd: root, stdio: 'inherit' })
+}
+
 function runDockerBuild() {
   return spawnSync(
     'docker',
@@ -51,6 +63,13 @@ function runDockerBuild() {
 }
 
 async function main() {
+  if (!process.argv.includes('--skip-mobile')) {
+    process.stdout.write('Building Android companion app on the host...\n')
+    const mobileResult = runMobileBuild()
+    if (mobileResult.error) throw mobileResult.error
+    if (mobileResult.status !== 0) process.exit(mobileResult.status ?? 1)
+  }
+
   fs.rmSync(output, { recursive: true, force: true })
   fs.mkdirSync(output, { recursive: true })
 
