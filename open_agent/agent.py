@@ -14,6 +14,15 @@ from typing import Any, Optional
 import tiktoken
 
 from .llm import LLMClient
+from .cli_ui import (
+    render_assistant,
+    render_heartbeat_line,
+    render_step_complete,
+    render_step_header,
+    render_thinking,
+    render_tool_call,
+    render_tool_result,
+)
 from .logger import AgentLogger
 from .log_memory_worker import get_log_memory_worker, LogMemoryWorker
 from .schema import Message
@@ -66,6 +75,7 @@ class Agent:
         status_callback: Optional[Callable] = None,  # 状态回调函数，用于实时报告状态
         tool_access_mode: str = "default",
         auto_compaction_enabled: bool = True,
+        terminal_ui: bool = False,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
@@ -76,6 +86,7 @@ class Agent:
         self.workspace_dir = Path(workspace_dir)
         self.interactive = interactive
         self.auto_compaction_enabled = auto_compaction_enabled
+        self.terminal_ui = terminal_ui
         # Cancellation event for interrupting agent execution (set externally, e.g., by Esc key)
         self.cancel_event: Optional[asyncio.Event] = None
         # User input callback for interactive mode
@@ -437,7 +448,8 @@ Requirements:
 
         # Start new run, initialize log file
         self.logger.start_new_run()
-        print(f"{Colors.DIM}📝 Log file: {self.logger.get_log_file_path()}{Colors.RESET}")
+        if not self.terminal_ui:
+            print(f"{Colors.DIM}📝 Log file: {self.logger.get_log_file_path()}{Colors.RESET}")
 
         step = 0
         run_start_time = perf_counter()
@@ -472,26 +484,27 @@ Requirements:
             # Calculate current token count for display
             current_tokens = self._estimate_tokens()
             
-            # Step header with proper width calculation
-            BOX_WIDTH = 58
-            step_text = f"{Colors.BOLD}{Colors.BRIGHT_CYAN}💭 Step {step + 1}/{self.max_steps}{Colors.RESET}"
-            token_text = f"{Colors.DIM}token: {current_tokens}{Colors.RESET}"
-            step_display_width = calculate_display_width(step_text)
-            token_display_width = calculate_display_width(token_text)
-            
-            # Calculate padding to fit both step text and token info
-            total_content_width = step_display_width + 1 + token_display_width  # +1 for space separator
-            if total_content_width < BOX_WIDTH - 1:
-                padding = BOX_WIDTH - 1 - total_content_width
-                line_content = f"{step_text}{' ' * padding} {token_text}"
+            if self.terminal_ui:
+                print(render_step_header(step + 1, self.max_steps, current_tokens))
             else:
-                # If too long, just show step text
-                padding = max(0, BOX_WIDTH - 1 - step_display_width)
-                line_content = f"{step_text}{' ' * padding}"
+                # Step header with proper width calculation
+                BOX_WIDTH = 58
+                step_text = f"{Colors.BOLD}{Colors.BRIGHT_CYAN}💭 Step {step + 1}/{self.max_steps}{Colors.RESET}"
+                token_text = f"{Colors.DIM}token: {current_tokens}{Colors.RESET}"
+                step_display_width = calculate_display_width(step_text)
+                token_display_width = calculate_display_width(token_text)
 
-            print(f"\n{Colors.DIM}╭{'─' * BOX_WIDTH}╮{Colors.RESET}")
-            print(f"{Colors.DIM}│{Colors.RESET} {line_content}{Colors.DIM}│{Colors.RESET}")
-            print(f"{Colors.DIM}╰{'─' * BOX_WIDTH}╯{Colors.RESET}")
+                total_content_width = step_display_width + 1 + token_display_width
+                if total_content_width < BOX_WIDTH - 1:
+                    padding = BOX_WIDTH - 1 - total_content_width
+                    line_content = f"{step_text}{' ' * padding} {token_text}"
+                else:
+                    padding = max(0, BOX_WIDTH - 1 - step_display_width)
+                    line_content = f"{step_text}{' ' * padding}"
+
+                print(f"\n{Colors.DIM}╭{'─' * BOX_WIDTH}╮{Colors.RESET}")
+                print(f"{Colors.DIM}│{Colors.RESET} {line_content}{Colors.DIM}│{Colors.RESET}")
+                print(f"{Colors.DIM}╰{'─' * BOX_WIDTH}╯{Colors.RESET}")
 
             # Notify log memory worker of step start
             if self._log_memory_worker:
@@ -560,8 +573,11 @@ Requirements:
                 self.current_thinking = response.thinking
                 self.current_status = "thinking"
                 self._emit_status("thinking", {"content": response.thinking})
-                print(f"\n{Colors.BOLD}{Colors.MAGENTA}🧠 Thinking:{Colors.RESET}")
-                print(f"{Colors.DIM}{response.thinking}{Colors.RESET}")
+                if self.terminal_ui:
+                    print(render_thinking(response.thinking))
+                else:
+                    print(f"\n{Colors.BOLD}{Colors.MAGENTA}🧠 Thinking:{Colors.RESET}")
+                    print(f"{Colors.DIM}{response.thinking}{Colors.RESET}")
                 # Submit thinking to log memory
                 if self._log_memory_worker:
                     self._log_memory_worker.submit_log_entry(
@@ -572,8 +588,11 @@ Requirements:
 
             # Print assistant response
             if response.content:
-                print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")
-                print(f"{response.content}")
+                if self.terminal_ui:
+                    print(render_assistant(response.content))
+                else:
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")
+                    print(f"{response.content}")
                 # Submit assistant response to log memory
                 if self._log_memory_worker:
                     self._log_memory_worker.submit_log_entry(
@@ -586,7 +605,10 @@ Requirements:
             if not response.tool_calls:
                 step_elapsed = perf_counter() - step_start_time
                 total_elapsed = perf_counter() - run_start_time
-                print(f"\n{Colors.DIM}⏱️  Step {step + 1} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
+                if self.terminal_ui:
+                    print(render_step_complete(step + 1, step_elapsed, total_elapsed))
+                else:
+                    print(f"\n{Colors.DIM}⏱️  Step {step + 1} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
                 return response.content
 
             # Check for cancellation before executing tools
@@ -612,11 +634,7 @@ Requirements:
                     "arguments": arguments
                 })
 
-                # Tool call header
-                print(f"\n{Colors.BRIGHT_YELLOW}🔧 Tool Call:{Colors.RESET} {Colors.BOLD}{Colors.CYAN}{function_name}{Colors.RESET}")
-
                 # Arguments (formatted display)
-                print(f"{Colors.DIM}   Arguments:{Colors.RESET}")
                 # Truncate each argument value to avoid overly long output
                 truncated_args = {}
                 for key, value in arguments.items():
@@ -626,8 +644,13 @@ Requirements:
                     else:
                         truncated_args[key] = value
                 args_json = json.dumps(truncated_args, indent=2, ensure_ascii=False)
-                for line in args_json.split("\n"):
-                    print(f"   {Colors.DIM}{line}{Colors.RESET}")
+                if self.terminal_ui:
+                    print(render_tool_call(function_name, args_json))
+                else:
+                    print(f"\n{Colors.BRIGHT_YELLOW}🔧 Tool Call:{Colors.RESET} {Colors.BOLD}{Colors.CYAN}{function_name}{Colors.RESET}")
+                    print(f"{Colors.DIM}   Arguments:{Colors.RESET}")
+                    for line in args_json.split("\n"):
+                        print(f"   {Colors.DIM}{line}{Colors.RESET}")
 
                 # Execute tool
                 if function_name not in self.tools:
@@ -675,9 +698,15 @@ Requirements:
                     result_text = result.content
                     if len(result_text) > 300:
                         result_text = result_text[:300] + f"{Colors.DIM}...{Colors.RESET}"
-                    print(f"{Colors.BRIGHT_GREEN}✓ Result:{Colors.RESET} {result_text}")
+                    if self.terminal_ui:
+                        print(render_tool_result(result_text, success=True))
+                    else:
+                        print(f"{Colors.BRIGHT_GREEN}✓ Result:{Colors.RESET} {result_text}")
                 else:
-                    print(f"{Colors.BRIGHT_RED}✗ Error:{Colors.RESET} {Colors.RED}{result.error}{Colors.RESET}")
+                    if self.terminal_ui:
+                        print(render_tool_result(result.error or "Unknown tool error", success=False))
+                    else:
+                        print(f"{Colors.BRIGHT_RED}✗ Error:{Colors.RESET} {Colors.RED}{result.error}{Colors.RESET}")
                 
                 # 发送工具结果状态
                 self._emit_status("tool_result", {
@@ -754,7 +783,10 @@ Requirements:
 
             step_elapsed = perf_counter() - step_start_time
             total_elapsed = perf_counter() - run_start_time
-            print(f"\n{Colors.DIM}⏱️  Step {step + 1} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
+            if self.terminal_ui:
+                print(render_step_complete(step + 1, step_elapsed, total_elapsed))
+            else:
+                print(f"\n{Colors.DIM}⏱️  Step {step + 1} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
 
             # 发送步骤结束状态
             self._emit_status("step_end", {
@@ -886,6 +918,13 @@ Requirements:
         while not stop_event.is_set():
             elapsed = perf_counter() - start_time
             spinner = spinner_chars[idx % len(spinner_chars)]
+
+            if self.terminal_ui:
+                sys.stdout.write(f"\r{render_heartbeat_line(spinner, elapsed)}")
+                sys.stdout.flush()
+                stop_event.wait(0.15)
+                idx += 1
+                continue
             
             # Build status message based on elapsed time
             if elapsed < 10:

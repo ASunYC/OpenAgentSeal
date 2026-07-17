@@ -23,22 +23,35 @@ from typing import List
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style
 
-from open_agent import LLMClient
+from open_agent import LLMClient, __version__
 from open_agent.agent import Agent
+from open_agent.cli_commands import (
+    SlashCommandCompleter,
+    command_alias_label,
+    iter_command_sections,
+    parse_command,
+)
+from open_agent.cli_ui import (
+    PROMPT_STYLE,
+    RuntimeStatus,
+    SessionOverview,
+    build_prompt_fragments,
+    build_status_fragments,
+    print_welcome,
+    render_execution_header,
+)
 from open_agent.config import Config
 from open_agent.schema import LLMProvider
-from open_agent.memory_manager import MemoryManager, get_memory_manager
+from open_agent.memory_manager import get_memory_manager
 from open_agent.user_config import (
     get_user_config,
     ModelConfig,
     ModelProvider,
-    get_default_model,
-    ModelConfigManager,
 )
 
 
@@ -56,6 +69,13 @@ def _apply_cli_launch_context(agent: Agent, workspace_dir: Path) -> dict[str, st
     }
 
 
+def load_shared_model_config() -> ModelConfig | None:
+    """Load the desktop and CLI model selection from the shared user config."""
+    manager = get_user_config()
+    manager.reload()
+    return manager.get_default_model()
+
+
 # select_model function - defined below after all imports
 def select_model():
     """Interactive model selection wizard.
@@ -66,7 +86,7 @@ def select_model():
     print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}🚀 Model Selection Wizard{Colors.RESET}")
     print(f"{Colors.DIM}{'─' * 50}{Colors.RESET}")
 
-    manager = ModelConfigManager()
+    manager = get_user_config()
 
     # Check for saved models
     saved_models = manager.get_all_models()
@@ -283,15 +303,12 @@ from open_agent.tools.web_search import (
     WebBrowseTool,
     WebSearchReportTool,
 )
-from open_agent.utils import calculate_display_width
 from open_agent.utils.path_utils import (
     get_external_skills_dir,
     get_user_app_dir,
     is_frozen,
 )
 from open_agent.task_queue import (
-    TaskDispatcher,
-    Task,
     TaskStatus,
     create_task_dispatcher,
 )
@@ -470,107 +487,52 @@ def read_log_file(filename: str) -> None:
         print(f"\n{Colors.RED}❌ Error reading file: {e}{Colors.RESET}\n")
 
 
-def print_banner():
-    """Print welcome banner with proper alignment"""
-    BOX_WIDTH = 58
-    banner_text = (
-        f"{Colors.BOLD}🤖 OpenAgentSeal - Multi-turn Interactive Session{Colors.RESET}"
-    )
-    banner_width = calculate_display_width(banner_text)
-
-    # Center the text with proper padding
-    total_padding = BOX_WIDTH - banner_width
-    left_padding = total_padding // 2
-    right_padding = total_padding - left_padding
-
-    print()
-    print(f"{Colors.BOLD}{Colors.BRIGHT_CYAN}╔{'═' * BOX_WIDTH}╗{Colors.RESET}")
-    print(
-        f"{Colors.BOLD}{Colors.BRIGHT_CYAN}║{Colors.RESET}{' ' * left_padding}{banner_text}{' ' * right_padding}{Colors.BOLD}{Colors.BRIGHT_CYAN}║{Colors.RESET}"
-    )
-    print(f"{Colors.BOLD}{Colors.BRIGHT_CYAN}╚{'═' * BOX_WIDTH}╝{Colors.RESET}")
-    print()
-
-
 def print_help():
-    """Print help information"""
-    help_text = f"""
-{Colors.BOLD}{Colors.BRIGHT_YELLOW}Available Commands:{Colors.RESET}
-  {Colors.BRIGHT_GREEN}/help{Colors.RESET}             - Show this help message
-  {Colors.BRIGHT_GREEN}/clear{Colors.RESET}            - Clear session history (keep system prompt)
-  {Colors.BRIGHT_GREEN}/history{Colors.RESET}          - Show current session message count
-  {Colors.BRIGHT_GREEN}/stats{Colors.RESET}            - Show session statistics
-  {Colors.BRIGHT_GREEN}/log{Colors.RESET}              - Show log directory and recent files
-  {Colors.BRIGHT_GREEN}/log <file>{Colors.RESET}        - Read a specific log file
-  {Colors.BRIGHT_GREEN}/switch{Colors.RESET}           - Switch model provider or model
-  {Colors.BRIGHT_GREEN}/reload{Colors.RESET}           - Reload MCP and Skills configuration
-  {Colors.BRIGHT_GREEN}/exit{Colors.RESET}             - Exit program (also: exit, quit, q)
-
-{Colors.BOLD}{Colors.BRIGHT_YELLOW}Task Queue Commands:{Colors.RESET}
-  {Colors.BRIGHT_GREEN}/tasks{Colors.RESET}            - Show task queue status
-  {Colors.BRIGHT_GREEN}/task <id>{Colors.RESET}        - Show specific task details
-  {Colors.BRIGHT_GREEN}/cancel <id>{Colors.RESET}      - Cancel a running task
-  {Colors.BRIGHT_GREEN}/async{Colors.RESET}            - Show async mode info
-
-{Colors.BOLD}{Colors.BRIGHT_YELLOW}Keyboard Shortcuts:{Colors.RESET}
-  {Colors.BRIGHT_CYAN}Esc{Colors.RESET}          - Cancel current agent execution
-  {Colors.BRIGHT_CYAN}Ctrl+C{Colors.RESET}       - Exit program
-  {Colors.BRIGHT_CYAN}Ctrl+U{Colors.RESET}       - Clear current input line
-  {Colors.BRIGHT_CYAN}Ctrl+L{Colors.RESET}       - Clear screen
-  {Colors.BRIGHT_CYAN}Ctrl+J{Colors.RESET}       - Insert newline (also Ctrl+Enter)
-  {Colors.BRIGHT_CYAN}↑/↓{Colors.RESET}          - Browse command history
-  {Colors.BRIGHT_CYAN}→{Colors.RESET}            - Accept auto-suggestion
-
-{Colors.BOLD}{Colors.BRIGHT_YELLOW}Usage:{Colors.RESET}
-  - Enter your task directly, Agent will help you complete it
-  - Agent remembers all conversation content in this session
-  - Use {Colors.BRIGHT_GREEN}/clear{Colors.RESET} to start a new session
-"""
-    print(help_text)
+    """Print help from the same catalog used by slash completion."""
+    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}OPENAGENTSEAL COMMAND INDEX{Colors.RESET}")
+    print(f"{Colors.DIM}{'─' * 72}{Colors.RESET}")
+    for category, specs in iter_command_sections():
+        print(f"\n{Colors.BOLD}{Colors.BRIGHT_YELLOW}{category.upper()}{Colors.RESET}")
+        for spec in specs:
+            usage = spec.command
+            if spec.args_hint:
+                usage += f" {spec.args_hint}"
+            alias_label = command_alias_label(spec)
+            alias_text = f"  {Colors.DIM}{alias_label}{Colors.RESET}" if alias_label else ""
+            print(
+                f"  {Colors.BRIGHT_CYAN}{usage:<24}{Colors.RESET}"
+                f"{spec.description}{alias_text}"
+            )
+    print(f"\n{Colors.DIM}Type / to browse commands · Esc aborts a running turn · Ctrl+J inserts a newline{Colors.RESET}\n")
 
 
-def print_session_info(agent: Agent, workspace_dir: Path, model: str):
-    """Print session information with proper alignment"""
-    BOX_WIDTH = 58
-
-    def print_info_line(text: str):
-        """Print a single info line with proper padding"""
-        # Account for leading space
-        text_width = calculate_display_width(text)
-        padding = max(0, BOX_WIDTH - 1 - text_width)
-        print(
-            f"{Colors.DIM}│{Colors.RESET} {text}{' ' * padding}{Colors.DIM}│{Colors.RESET}"
-        )
-
-    # Top border
-    print(f"{Colors.DIM}┌{'─' * BOX_WIDTH}┐{Colors.RESET}")
-
-    # Header (centered)
-    header_text = f"{Colors.BRIGHT_CYAN}Session Info{Colors.RESET}"
-    header_width = calculate_display_width(header_text)
-    header_padding_total = BOX_WIDTH - 1 - header_width  # -1 for leading space
-    header_padding_left = header_padding_total // 2
-    header_padding_right = header_padding_total - header_padding_left
-    print(
-        f"{Colors.DIM}│{Colors.RESET} {' ' * header_padding_left}{header_text}{' ' * header_padding_right}{Colors.DIM}│{Colors.RESET}"
-    )
-
-    # Divider
-    print(f"{Colors.DIM}├{'─' * BOX_WIDTH}┤{Colors.RESET}")
-
-    # Info lines
-    print_info_line(f"Model: {model}")
-    print_info_line(f"Workspace: {workspace_dir}")
-    print_info_line(f"Message History: {len(agent.messages)} messages")
-    print_info_line(f"Available Tools: {len(agent.tools)} tools")
-
-    # Bottom border
-    print(f"{Colors.DIM}└{'─' * BOX_WIDTH}┘{Colors.RESET}")
-    print()
-    print(
-        f"{Colors.DIM}Type {Colors.BRIGHT_GREEN}/help{Colors.DIM} for help, {Colors.BRIGHT_GREEN}/switch{Colors.DIM} to change model, {Colors.BRIGHT_GREEN}/exit{Colors.DIM} to quit{Colors.RESET}"
-    )
-    print()
+def create_cli_prompt_session(
+    *,
+    history_file: Path,
+    completer,
+    style: Style,
+    key_bindings: KeyBindings,
+    input_stream=None,
+    output_stream=None,
+) -> PromptSession:
+    """Create a CLI prompt where live slash completion remains enabled."""
+    session_options = {
+        "history": FileHistory(str(history_file)),
+        "auto_suggest": AutoSuggestFromHistory(),
+        "completer": completer,
+        "style": style,
+        "key_bindings": key_bindings,
+        "complete_while_typing": True,
+        # prompt_toolkit disables live completion when history search is enabled.
+        "enable_history_search": False,
+        "complete_style": CompleteStyle.COLUMN,
+        "reserve_space_for_menu": 12,
+    }
+    if input_stream is not None:
+        session_options["input"] = input_stream
+    if output_stream is not None:
+        session_options["output"] = output_stream
+    return PromptSession(**session_options)
 
 
 async def handle_switch_model(agent: Agent, llm_client: LLMClient, config: Config):
@@ -584,7 +546,7 @@ async def handle_switch_model(agent: Agent, llm_client: LLMClient, config: Confi
     print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}🔄 Switch Model{Colors.RESET}")
     print(f"{Colors.DIM}{'─' * 50}{Colors.RESET}")
 
-    manager = ModelConfigManager()
+    manager = get_user_config()
 
     # Show current model info
     current_model = manager.get_default_model()
@@ -798,7 +760,7 @@ async def handle_switch_model(agent: Agent, llm_client: LLMClient, config: Confi
 
                 # Save the configuration
                 manager.add_model(new_config)
-                manager.set_default_model(model_name)
+                manager.set_default_model(new_config.id)
 
                 # Update LLM client
                 llm_client.api_key = api_key
@@ -843,7 +805,7 @@ async def handle_switch_model(agent: Agent, llm_client: LLMClient, config: Confi
                 llm_client.provider = provider_type
 
                 # Set as default
-                manager.set_default_model(selected.name)
+                manager.set_default_model(selected.id)
 
                 # Update Agent's system prompt to reflect new provider
                 _update_agent_system_prompt(agent, selected.provider, selected.name)
@@ -981,7 +943,7 @@ Examples:
         "--config",
         "-c",
         action="store_true",
-        help="Use config file instead of interactive model selection",
+        help="Compatibility flag; shared desktop configuration is always used",
     )
     parser.add_argument(
         "--cli-only",
@@ -1246,38 +1208,28 @@ async def _quiet_cleanup():
 async def run_agent(
     workspace_dir: Path,
     task: str = None,
-    skip_model_selection: bool = False,
 ):
     """Run Agent in interactive or non-interactive mode.
 
     Args:
         workspace_dir: Workspace directory path
         task: If provided, execute this task and exit (non-interactive mode)
-        skip_model_selection: If True, skip model selection and use config file
     """
     session_start = datetime.now()
+    startup_warnings: list[str] = []
+    memory_count = 0
 
-    # 1. Model selection - interactive model configuration
-    model_config = None
-
-    # Check if there's a default model configured
-    default_model = get_default_model()
-
-    if skip_model_selection and default_model is None:
-        # No default model configured, need to show configuration wizard
+    # 1. Desktop and CLI share the same model configuration file.
+    model_config = load_shared_model_config()
+    if model_config is None:
         print(f"\n{Colors.BRIGHT_YELLOW}⚠️  未检测到默认模型配置{Colors.RESET}")
-        print(f"{Colors.DIM}   请先配置大模型才能使用 Agent{Colors.RESET}")
+        print(
+            f"{Colors.DIM}   桌面端和 CLI 共用 {get_user_config().CONFIG_FILE}{Colors.RESET}"
+        )
         print()
-        # Force show model selection
         model_config = select_model()
         if model_config is None:
             print(f"{Colors.RED}❌ 未选择模型，无法启动 Agent{Colors.RESET}")
-            return
-    elif not skip_model_selection:
-        # User requested interactive selection
-        model_config = select_model()
-        if model_config is None:
-            print(f"{Colors.RED}❌ No model selected, cannot start Agent{Colors.RESET}")
             return
 
     # 2. Initialize memory system (check database exists, create if not)
@@ -1296,10 +1248,11 @@ async def run_agent(
             )
         else:
             stats = memory_manager.get_stats()
-            total = stats.get("total_memories", 0)
+            memory_count = stats.get("total_memories", 0)
             print(f"{Colors.GREEN}✅ Memory database found: {db_path}{Colors.RESET}")
-            print(f"   {Colors.DIM}Total memories: {total}{Colors.RESET}")
+            print(f"   {Colors.DIM}Total memories: {memory_count}{Colors.RESET}")
     except Exception as e:
+        startup_warnings.append(f"Memory initialization degraded: {e}")
         print(
             f"{Colors.YELLOW}⚠️  Failed to initialize memory system: {e}{Colors.RESET}"
         )
@@ -1382,60 +1335,22 @@ async def run_agent(
             f"{Colors.DIM}   Retrying in {next_delay:.1f}s (attempt {attempt + 1})...{Colors.RESET}"
         )
 
-    # Determine LLM settings from model selection or config file
-    if model_config:
-        # Use settings from model selection
-        api_key = model_config.api_key
-        api_base = model_config.base_url or ""
-        model = model_config.name
-        provider = (
-            LLMProvider.ANTHROPIC
-            if model_config.provider_type.lower() == "anthropic"
-            else LLMProvider.OPENAI
-        )
+    api_key = model_config.api_key
+    api_base = model_config.base_url or ""
+    model = model_config.name
+    provider = (
+        LLMProvider.ANTHROPIC
+        if model_config.provider_type.lower() == "anthropic"
+        else LLMProvider.OPENAI
+    )
+    provider_display = model_config.provider
 
-        print(f"\n{Colors.GREEN}✅ Using model from selection:{Colors.RESET}")
-        print(f"   {Colors.DIM}Provider: {model_config.provider}{Colors.RESET}")
-        print(f"   {Colors.DIM}Model: {model}{Colors.RESET}")
-        if api_base:
-            print(f"   {Colors.DIM}Base URL: {api_base}{Colors.RESET}")
-    else:
-        # Try to get default model from open_agent.json first
-        default_model_config = get_default_model()
-
-        if default_model_config:
-            # Use settings from open_agent.json
-            api_key = default_model_config.api_key
-            api_base = default_model_config.base_url or ""
-            model = default_model_config.name
-            provider = (
-                LLMProvider.ANTHROPIC
-                if default_model_config.provider_type.lower() == "anthropic"
-                else LLMProvider.OPENAI
-            )
-
-            print(
-                f"\n{Colors.GREEN}✅ Using default model from open_agent.json:{Colors.RESET}"
-            )
-            print(
-                f"   {Colors.DIM}Provider: {default_model_config.provider}{Colors.RESET}"
-            )
-            print(f"   {Colors.DIM}Model: {model}{Colors.RESET}")
-            if api_base:
-                print(f"   {Colors.DIM}Base URL: {api_base}{Colors.RESET}")
-        else:
-            # Fallback: Use settings from config.yaml
-            api_key = config.llm.api_key
-            api_base = config.llm.api_base
-            model = config.llm.model
-            provider = (
-                LLMProvider.ANTHROPIC
-                if config.llm.provider.lower() == "anthropic"
-                else LLMProvider.OPENAI
-            )
-
-            print(f"\n{Colors.GREEN}✅ Using model from config.yaml:{Colors.RESET}")
-            print(f"   {Colors.DIM}Model: {model}{Colors.RESET}")
+    print(f"\n{Colors.GREEN}✅ Using shared desktop model configuration:{Colors.RESET}")
+    print(f"   {Colors.DIM}Config: {get_user_config().CONFIG_FILE}{Colors.RESET}")
+    print(f"   {Colors.DIM}Provider: {model_config.provider}{Colors.RESET}")
+    print(f"   {Colors.DIM}Model: {model}{Colors.RESET}")
+    if api_base:
+        print(f"   {Colors.DIM}Base URL: {api_base}{Colors.RESET}")
 
     llm_client = LLMClient(
         api_key=api_key,
@@ -1467,6 +1382,7 @@ async def run_agent(
         )
     else:
         system_prompt = "You are open-agent, an intelligent assistant powered by MiniMax M2.5 that can help users complete various tasks."
+        startup_warnings.append("System prompt missing; built-in fallback is active")
         print(f"{Colors.YELLOW}⚠️  System prompt not found, using default{Colors.RESET}")
 
     # 6. Inject Skills Metadata into System Prompt (Progressive Disclosure - Level 1)
@@ -1492,6 +1408,7 @@ async def run_agent(
         tools=tools,
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
+        terminal_ui=not bool(task),
     )
     launch_metadata = _apply_cli_launch_context(agent, workspace_dir)
 
@@ -1547,6 +1464,7 @@ async def run_agent(
             f"{Colors.GREEN}✅ Registered CLI Agent to AgentService (ID: {cli_agent_id}){Colors.RESET}"
         )
     except Exception as e:
+        startup_warnings.append(f"Desktop agent registry unavailable: {e}")
         print(
             f"{Colors.YELLOW}⚠️  Failed to register CLI Agent to AgentService: {e}{Colors.RESET}"
         )
@@ -1569,6 +1487,7 @@ async def run_agent(
 
         # Get recent memories (last 7 days)
         recent_memories = memory_manager.recall(time_range="week", limit=20)
+        memory_count = max(memory_count, len(recent_memories))
 
         if recent_memories:
             # Build memory context
@@ -1600,6 +1519,7 @@ async def run_agent(
             )
 
     except Exception as e:
+        startup_warnings.append(f"Recent memory recall unavailable: {e}")
         print(f"{Colors.YELLOW}⚠️  Failed to load memories: {e}{Colors.RESET}")
 
     # 8. Initialize config watcher for auto-reload detection
@@ -1627,27 +1547,30 @@ async def run_agent(
     config_watcher.initialize(mcp_config_path, skills_dir)
 
     # 9. Display welcome information
+    def session_overview() -> SessionOverview:
+        mcp_tool_count = sum(
+            1
+            for tool in agent.tools.values()
+            if "mcp" in tool.__class__.__module__.lower()
+        )
+        skill_count = len(skill_loader.loaded_skills) if skill_loader else 0
+        active_model = get_user_config().get_default_model()
+        return SessionOverview(
+            model=llm_client.model,
+            provider=active_model.provider if active_model else provider_display,
+            workspace=workspace_dir,
+            tool_count=len(agent.tools),
+            mcp_tool_count=mcp_tool_count,
+            skill_count=skill_count,
+            memory_count=memory_count,
+            session_id=launch_metadata["session_id"],
+            warnings=tuple(startup_warnings),
+        )
+
     if not task:
-        print_banner()
-        print_session_info(agent, workspace_dir, model)
+        print_welcome(session_overview())
 
-    # 8.5 First-time greeting: if using default config and no task, say hello
-    # Disabled: User reported duplicate outputs issue
-    # The greeting causes the agent to respond twice (once here, once when user sends first message)
-    is_first_start = not task and skip_model_selection
-
-    # Skip automatic greeting to avoid duplicate responses
-    # User can start conversation by typing their own message
-    # if is_first_start:
-    #     print(f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Initializing...{Colors.RESET}\n")
-    #     agent.add_user_message("hello")
-    #     try:
-    #         await agent.run()
-    #     except Exception as e:
-    #         print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
-    #     print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
-
-    # 8.6 Non-interactive mode: execute task and exit
+    # 8.5 Non-interactive mode: execute task and exit
     if task:
         print(
             f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Executing task...{Colors.RESET}\n"
@@ -1665,64 +1588,9 @@ async def run_agent(
         return
 
     # 9. Setup prompt_toolkit session
-    # Command completer with sub-agent commands
-    # These commands will be shown when pressing Tab with Chinese descriptions
-    from prompt_toolkit.completion import Completer, Completion
+    command_completer = SlashCommandCompleter()
 
-    class CommandCompleter(Completer):
-        """Custom command completer with Chinese descriptions."""
-
-        def __init__(self):
-            # Command list with descriptions (command, description)
-            # Commands are organized by category
-            self.commands = [
-                # Basic commands
-                ("/help", "查看帮助"),
-                ("/clear", "清除会话历史"),
-                ("/history", "显示消息数量"),
-                ("/stats", "显示会话统计"),
-                ("/log", "日志管理"),
-                ("/switch", "切换模型"),
-                # Task queue commands
-                ("/tasks", "查看任务队列"),
-                ("/task", "查看任务详情"),
-                ("/cancel", "取消任务"),
-                ("/async", "异步模式信息"),
-                # Exit commands at the end
-                ("/exit", "退出程序"),
-                ("/quit", "退出程序"),
-                ("/q", "退出程序"),
-            ]
-            # Calculate max display width for alignment (using display width for Chinese support)
-            self.max_display_width = max(
-                calculate_display_width(cmd) for cmd, _ in self.commands
-            )
-
-        def get_completions(self, document, complete_event):
-            text = document.get_word_before_cursor()
-
-            for cmd, desc in self.commands:
-                if cmd.startswith(text) or cmd.startswith(text.lower()):
-                    # Calculate display width and pad for alignment
-                    cmd_display_width = calculate_display_width(cmd)
-                    padding = self.max_display_width - cmd_display_width
-                    # Use spaces to align descriptions (2 spaces gap)
-                    display_text = f"{cmd}{' ' * (padding + 2)}{desc}"
-                    yield Completion(
-                        cmd,  # The actual text to insert
-                        start_position=-len(text),
-                        display=display_text,
-                    )
-
-    command_completer = CommandCompleter()
-
-    # Custom style for prompt
-    prompt_style = Style.from_dict(
-        {
-            "prompt": "#00ff00 bold",  # Green and bold
-            "separator": "#666666",  # Gray
-        }
-    )
+    prompt_style = Style.from_dict(PROMPT_STYLE)
 
     # Custom key bindings
     kb = KeyBindings()
@@ -1742,17 +1610,41 @@ async def run_agent(
         """Insert a newline"""
         event.current_buffer.insert_text("\n")
 
+    @kb.add("/")
+    def _(event):
+        """Insert slash and immediately expose the command palette."""
+        buffer = event.current_buffer
+        buffer.insert_text("/")
+        if buffer.text.startswith("/"):
+            buffer.start_completion(select_first=False)
+
     # Create prompt session with history and auto-suggest
     # Use FileHistory for persistent history across sessions (stored in user's home directory)
     history_file = Path.home() / ".open-agent" / ".history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
-    session = PromptSession(
-        history=FileHistory(str(history_file)),
-        auto_suggest=AutoSuggestFromHistory(),
+    session = create_cli_prompt_session(
+        history_file=history_file,
         completer=command_completer,
         style=prompt_style,
         key_bindings=kb,
     )
+
+    def runtime_status() -> RuntimeStatus:
+        try:
+            running_tasks = len(task_dispatcher.get_running_tasks())
+            pending_tasks = len(task_dispatcher.get_pending_tasks())
+        except Exception:
+            running_tasks = 0
+            pending_tasks = 0
+        return RuntimeStatus(
+            model=llm_client.model,
+            workspace=workspace_dir,
+            message_count=len(agent.messages),
+            tool_count=len(agent.tools),
+            started_at=session_start,
+            running_tasks=running_tasks,
+            pending_tasks=pending_tasks,
+        )
 
     # 10. Interactive loop
     while True:
@@ -1812,12 +1704,9 @@ async def run_agent(
 
             # Get user input using prompt_toolkit
             user_input = await session.prompt_async(
-                [
-                    ("class:prompt", "You"),
-                    ("", " › "),
-                ],
+                build_prompt_fragments(),
                 multiline=False,
-                enable_history_search=True,
+                bottom_toolbar=lambda: build_status_fragments(runtime_status()),
             )
             user_input = user_input.strip()
 
@@ -1826,20 +1715,29 @@ async def run_agent(
 
             # Handle commands
             if user_input.startswith("/"):
-                command = user_input.lower()
+                parsed_command = parse_command(user_input)
+                if parsed_command is None:
+                    print(f"{Colors.RED}❌ Unknown command: {user_input}{Colors.RESET}")
+                    print(
+                        f"{Colors.DIM}Type / to browse commands or /help for the full index{Colors.RESET}\n"
+                    )
+                    continue
 
-                if command in ["/exit", "/quit", "/q"]:
+                command = parsed_command.spec.name
+                command_args = parsed_command.args
+
+                if command == "quit":
                     print(
                         f"\n{Colors.BRIGHT_YELLOW}👋 Goodbye! Thanks for using Open Agent{Colors.RESET}\n"
                     )
                     print_stats(agent, session_start)
                     break
 
-                elif command == "/help":
+                elif command == "help":
                     print_help()
                     continue
 
-                elif command == "/clear":
+                elif command == "new":
                     # Clear message history but keep system prompt
                     old_count = len(agent.messages)
                     agent.messages = [agent.messages[0]]  # Keep only system message
@@ -1848,22 +1746,116 @@ async def run_agent(
                     )
                     continue
 
-                elif command == "/history":
+                elif command == "history":
+                    messages = [m for m in agent.messages if m.role != "system"]
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Conversation History{Colors.RESET}")
+                    print(f"{Colors.DIM}{'─' * 72}{Colors.RESET}")
+                    if not messages:
+                        print(f"  {Colors.DIM}No conversation messages yet.{Colors.RESET}")
+                    for message in messages[-20:]:
+                        content = message.content
+                        if not isinstance(content, str):
+                            content = str(content)
+                        preview = " ".join(content.split())
+                        if len(preview) > 100:
+                            preview = preview[:97] + "..."
+                        role = message.role.upper()
+                        role_color = (
+                            Colors.BRIGHT_BLUE if message.role == "user" else Colors.BRIGHT_GREEN
+                        )
+                        print(f"  {role_color}{role:<10}{Colors.RESET}{preview}")
+                    if len(messages) > 20:
+                        print(f"  {Colors.DIM}Showing the latest 20 of {len(messages)} messages.{Colors.RESET}")
+                    print()
+                    continue
+
+                elif command == "retry":
+                    user_indexes = [
+                        index
+                        for index, message in enumerate(agent.messages)
+                        if message.role == "user"
+                    ]
+                    if not user_indexes:
+                        print(f"\n{Colors.YELLOW}No user message is available to retry.{Colors.RESET}\n")
+                        continue
+                    retry_index = user_indexes[-1]
+                    retry_content = agent.messages[retry_index].content
+                    user_input = retry_content if isinstance(retry_content, str) else str(retry_content)
+                    agent.messages = agent.messages[:retry_index]
+                    print(f"\n{Colors.BRIGHT_CYAN}Retrying the last user message...{Colors.RESET}")
+
+                elif command == "undo":
+                    try:
+                        turn_count = int(command_args or "1")
+                        if turn_count < 1:
+                            raise ValueError
+                    except ValueError:
+                        print(f"\n{Colors.RED}Usage: /undo [positive number]{Colors.RESET}\n")
+                        continue
+                    user_indexes = [
+                        index
+                        for index, message in enumerate(agent.messages)
+                        if message.role == "user"
+                    ]
+                    if not user_indexes:
+                        print(f"\n{Colors.YELLOW}No user turns are available to undo.{Colors.RESET}\n")
+                        continue
+                    actual_count = min(turn_count, len(user_indexes))
+                    agent.messages = agent.messages[: user_indexes[-actual_count]]
                     print(
-                        f"\n{Colors.BRIGHT_CYAN}Current session message count: {len(agent.messages)}{Colors.RESET}\n"
+                        f"\n{Colors.GREEN}Removed {actual_count} conversation turn"
+                        f"{'s' if actual_count != 1 else ''}.{Colors.RESET}\n"
                     )
                     continue
 
-                elif command == "/stats":
-                    print_stats(agent, session_start)
+                elif command == "redraw":
+                    print_welcome(session_overview())
                     continue
 
-                elif command == "/reload":
+                elif command == "status":
+                    print_stats(agent, session_start)
+                    running_count = len(task_dispatcher.get_running_tasks())
+                    pending_count = len(task_dispatcher.get_pending_tasks())
+                    print(f"  {Colors.DIM}Workspace:{Colors.RESET} {workspace_dir}")
+                    print(
+                        f"  {Colors.DIM}Task queue:{Colors.RESET} "
+                        f"{running_count} running, {pending_count} pending\n"
+                    )
+                    continue
+
+                elif command == "reload":
                     # Reload MCP and Skills configuration
                     print(
                         f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}🔄 Reloading Configuration...{Colors.RESET}"
                     )
                     print(f"{Colors.DIM}{'─' * 50}{Colors.RESET}")
+
+                    shared_model = load_shared_model_config()
+                    model_changed = False
+                    if shared_model is not None:
+                        next_provider = (
+                            LLMProvider.ANTHROPIC
+                            if shared_model.provider_type.lower() == "anthropic"
+                            else LLMProvider.OPENAI
+                        )
+                        model_changed = any(
+                            (
+                                llm_client.model != shared_model.name,
+                                llm_client.api_base != (shared_model.base_url or ""),
+                                llm_client.provider != next_provider,
+                            )
+                        )
+                        llm_client.api_key = shared_model.api_key
+                        llm_client.api_base = shared_model.base_url or ""
+                        llm_client.model = shared_model.name
+                        llm_client.provider = next_provider
+                        model = shared_model.name
+                        provider_display = shared_model.provider
+                        _update_agent_system_prompt(
+                            agent,
+                            shared_model.provider,
+                            shared_model.name,
+                        )
 
                     # Get config paths
                     mcp_config_path = Config.find_config_file(
@@ -1932,26 +1924,175 @@ async def run_agent(
                     print(
                         f"{Colors.GREEN}✅ Reload complete! {reload_count} tools available.{Colors.RESET}\n"
                     )
+                    if model_changed:
+                        print(
+                            f"{Colors.GREEN}✅ Shared desktop model reloaded: "
+                            f"{shared_model.provider}/{shared_model.name}{Colors.RESET}\n"
+                        )
                     continue
 
-                elif command == "/switch":
+                elif command == "model":
                     # Switch model provider or model
                     await handle_switch_model(agent, llm_client, config)
                     continue
 
-                elif command == "/log" or command.startswith("/log "):
-                    # Parse /log command
-                    parts = user_input.split(maxsplit=1)
-                    if len(parts) == 1:
-                        # /log - show log directory
+                elif command == "config":
+                    active_model = get_user_config().get_default_model()
+                    resolved_mcp_path = Config.find_config_file(
+                        config.tools.mcp_config_path
+                    )
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Active Configuration{Colors.RESET}")
+                    print(f"{Colors.DIM}{'─' * 72}{Colors.RESET}")
+                    print(f"  Model       {llm_client.model}")
+                    print(
+                        f"  Provider    "
+                        f"{active_model.provider if active_model else provider_display}"
+                    )
+                    print(
+                        f"  API base    "
+                        f"{(active_model.base_url if active_model else llm_client.api_base) or '(SDK default)'}"
+                    )
+                    print(f"  Workspace   {workspace_dir}")
+                    print(f"  User config {get_user_config().CONFIG_FILE}")
+                    print(f"  MCP config  {resolved_mcp_path or '(not found)'}")
+                    print(
+                        f"  Features    MCP={'on' if config.tools.enable_mcp else 'off'}, "
+                        f"skills={'on' if config.tools.enable_skills else 'off'}\n"
+                    )
+                    continue
+
+                elif command == "doctor":
+                    active_model = get_user_config().get_default_model()
+                    if active_model is None:
+                        print(f"\n{Colors.RED}No default model is configured.{Colors.RESET}\n")
+                        continue
+                    from open_agent.provider_registry import get_provider_registry
+
+                    print(
+                        f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Provider Doctor{Colors.RESET} "
+                        f"{Colors.DIM}testing {active_model.provider}/{active_model.name}...{Colors.RESET}"
+                    )
+                    report = await get_provider_registry().test_model_config(active_model)
+                    for check_name, check in report.get("checks", {}).items():
+                        check_status = check.get("status", "warning")
+                        icon = "OK" if check_status == "ok" else "WARN" if check_status == "warning" else "FAIL"
+                        color = (
+                            Colors.GREEN
+                            if check_status == "ok"
+                            else Colors.YELLOW
+                            if check_status == "warning"
+                            else Colors.RED
+                        )
+                        print(
+                            f"  {color}{icon:<4}{Colors.RESET} "
+                            f"{check_name:<14}{check.get('message', '')}"
+                        )
+                    latency = report.get("latency_ms")
+                    if latency is not None:
+                        print(f"  {Colors.DIM}Latency: {latency} ms{Colors.RESET}")
+                    print()
+                    continue
+
+                elif command == "workspace":
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Workspace{Colors.RESET}")
+                    print(f"  Path     {workspace_dir}")
+                    print(f"  Session  {launch_metadata['session_id']}")
+                    print(f"  Profile  {launch_metadata['profile_id']}")
+                    print(f"  Source   {launch_metadata['launch_source']}\n")
+                    continue
+
+                elif command == "logs":
+                    if not command_args:
                         show_log_directory(open_file_manager=True)
                     else:
-                        # /log <filename> - read specific log file
-                        filename = parts[1].strip("\"'")
+                        filename = command_args.strip("\"'")
                         read_log_file(filename)
                     continue
 
-                elif command == "/tasks" or command == "/task":
+                elif command == "tools":
+                    filter_text = command_args.lower()
+                    tool_names = sorted(
+                        name
+                        for name in agent.tools
+                        if not filter_text or filter_text in name.lower()
+                    )
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Loaded Tools{Colors.RESET}")
+                    print(f"{Colors.DIM}{'─' * 72}{Colors.RESET}")
+                    for name in tool_names:
+                        tool = agent.tools[name]
+                        source = tool.__class__.__module__
+                        print(f"  {Colors.BRIGHT_GREEN}{name:<28}{Colors.RESET}{Colors.DIM}{source}{Colors.RESET}")
+                    if not tool_names:
+                        print(f"  {Colors.DIM}No tools match '{command_args}'.{Colors.RESET}")
+                    print(f"\n  {Colors.DIM}{len(tool_names)} tool(s) shown.{Colors.RESET}\n")
+                    continue
+
+                elif command == "skills":
+                    loaded_skills = skill_loader.loaded_skills if skill_loader else {}
+                    filter_text = command_args.lower()
+                    skill_names = sorted(
+                        name
+                        for name in loaded_skills
+                        if not filter_text or filter_text in name.lower()
+                    )
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Loaded Skills{Colors.RESET}")
+                    print(f"{Colors.DIM}{'─' * 72}{Colors.RESET}")
+                    for name in skill_names:
+                        skill = loaded_skills[name]
+                        description = " ".join((skill.description or "").split())
+                        if len(description) > 70:
+                            description = description[:67] + "..."
+                        print(f"  {Colors.BRIGHT_GREEN}{name}{Colors.RESET}")
+                        if description:
+                            print(f"    {Colors.DIM}{description}{Colors.RESET}")
+                    if not skill_names:
+                        suffix = f" matching '{command_args}'" if command_args else ""
+                        print(f"  {Colors.DIM}No loaded skills{suffix}.{Colors.RESET}")
+                    print(f"\n  {Colors.DIM}{len(skill_names)} skill(s) shown.{Colors.RESET}\n")
+                    continue
+
+                elif command == "mcp":
+                    resolved_mcp_path = Config.find_config_file(
+                        config.tools.mcp_config_path
+                    )
+                    mcp_tools = sorted(
+                        name
+                        for name, tool in agent.tools.items()
+                        if "mcp" in tool.__class__.__module__.lower()
+                    )
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}MCP Runtime{Colors.RESET}")
+                    print(f"  Config   {resolved_mcp_path or '(not found)'}")
+                    print(f"  Enabled  {'yes' if config.tools.enable_mcp else 'no'}")
+                    print(f"  Tools    {len(mcp_tools)}")
+                    for name in mcp_tools:
+                        print(f"    {Colors.BRIGHT_GREEN}{name}{Colors.RESET}")
+                    print()
+                    continue
+
+                elif command == "memory":
+                    try:
+                        memory_stats = get_memory_manager().get_stats()
+                    except Exception as exc:
+                        print(f"\n{Colors.RED}Unable to read memory statistics: {exc}{Colors.RESET}\n")
+                        continue
+                    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Memory Store{Colors.RESET}")
+                    print(f"  Database   {memory_stats.get('db_path', '(unknown)')}")
+                    print(f"  Memories   {memory_stats.get('total_memories', 0)}")
+                    print(f"  Keywords   {memory_stats.get('unique_keywords', 0)}")
+                    categories = memory_stats.get("by_category", {})
+                    if categories:
+                        summary = ", ".join(
+                            f"{name}: {count}" for name, count in sorted(categories.items())
+                        )
+                        print(f"  Categories {summary}")
+                    print()
+                    continue
+
+                elif command == "version":
+                    print(f"\n{Colors.BRIGHT_CYAN}OpenAgentSeal {__version__}{Colors.RESET}\n")
+                    continue
+
+                elif command == "agents":
                     # Show task queue status
                     tasks = task_dispatcher.get_all_tasks()
                     running = task_dispatcher.get_running_tasks()
@@ -2019,16 +2160,15 @@ async def run_agent(
                     print(f"  {Colors.DIM}使用 /cancel <id> 取消任务{Colors.RESET}\n")
                     continue
 
-                elif command.startswith("/task "):
+                elif command == "task":
                     # Show specific task details
-                    parts = user_input.split(maxsplit=1)
-                    if len(parts) < 2:
+                    if not command_args:
                         print(
                             f"\n{Colors.RED}❌ Usage: /task <task_id>{Colors.RESET}\n"
                         )
                         continue
 
-                    task_id = parts[1].strip()
+                    task_id = command_args
                     task = task_dispatcher.get_task(task_id)
 
                     if not task:
@@ -2104,16 +2244,15 @@ async def run_agent(
                     print(f"{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
                     continue
 
-                elif command.startswith("/cancel "):
+                elif command == "cancel":
                     # Cancel a task
-                    parts = user_input.split(maxsplit=1)
-                    if len(parts) < 2:
+                    if not command_args:
                         print(
                             f"\n{Colors.RED}❌ Usage: /cancel <task_id>{Colors.RESET}\n"
                         )
                         continue
 
-                    task_id = parts[1].strip()
+                    task_id = command_args
                     success = task_dispatcher.cancel_task(task_id, "Cancelled by user")
 
                     if success:
@@ -2126,7 +2265,7 @@ async def run_agent(
                         )
                     continue
 
-                elif command == "/async":
+                elif command == "async":
                     # Toggle async mode info
                     print(
                         f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}🔄 异步任务模式{Colors.RESET}"
@@ -2162,17 +2301,12 @@ async def run_agent(
                 current_provider = "Anthropic"
 
             # Try to get provider name from model config
-            manager = ModelConfigManager()
+            manager = get_user_config()
             default_model = manager.get_default_model()
             if default_model:
                 current_provider = default_model.provider
 
-            print(
-                f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}"
-            )
-            print(
-                f"{Colors.DIM}   Model: {llm_client.model} | Provider: {current_provider}{Colors.RESET}\n"
-            )
+            print(render_execution_header(llm_client.model, current_provider))
             agent.add_user_message(user_input)
 
             # Create cancellation event
@@ -2257,8 +2391,7 @@ async def run_agent(
                 esc_listener_stop.set()
                 esc_thread.join(timeout=0.2)
 
-            # Visual separation
-            print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
+            print()
 
         except KeyboardInterrupt:
             print(
@@ -2278,7 +2411,6 @@ async def run_agent(
 async def run_unified(
     workspace_dir: Path,
     task: str = None,
-    skip_model_selection: bool = False,
     open_browser: bool = True,
 ):
     """Run CLI and Web UI in the same process, sharing the same AgentService.
@@ -2288,7 +2420,6 @@ async def run_unified(
     Args:
         workspace_dir: Workspace directory path
         task: If provided, execute this task and exit (non-interactive mode)
-        skip_model_selection: If True, skip model selection and use config file
         open_browser: Whether to open browser automatically
     """
     import asyncio
@@ -2336,7 +2467,6 @@ async def run_unified(
     await run_agent(
         workspace_dir=workspace_dir,
         task=task,
-        skip_model_selection=skip_model_selection,
     )
 
     # Stop AgentService when CLI exits
@@ -2401,9 +2531,6 @@ def main():
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine if we should skip model selection (use --config flag)
-    skip_model_selection = args.config
-
     # Handle --web-only mode (使用新架构 app/runner)
     if args.web_only:
         from open_agent.agent_service import init_agent_service
@@ -2434,9 +2561,7 @@ def main():
 
     # Run the agent (config always loaded from package directory)
     asyncio.run(
-        run_agent(
-            workspace_dir, task=args.task, skip_model_selection=skip_model_selection
-        )
+        run_agent(workspace_dir, task=args.task)
     )
 
 

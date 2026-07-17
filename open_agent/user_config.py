@@ -395,6 +395,8 @@ class UserConfigManager:
         if self.CONFIG_FILE.exists():
             # 加载现有配置
             self._config = self._load_config()
+            if self._normalize_default_model_reference():
+                self._save_config()
         else:
             # 创建默认配置
             self._config = copy.deepcopy(self.DEFAULT_CONFIG)
@@ -460,6 +462,8 @@ class UserConfigManager:
     def reload(self) -> None:
         """强制重新加载配置文件"""
         self._config = self._load_config()
+        if self._normalize_default_model_reference():
+            self._save_config()
     
     # ==================== 模型管理 ====================
     
@@ -479,12 +483,51 @@ class UserConfigManager:
             if model.id == model_id:
                 return model
         return None
+
+    def _resolve_model_reference(self, reference: str) -> Optional[ModelConfig]:
+        """Resolve a canonical ID or a legacy model-name reference."""
+        reference = str(reference or "").strip()
+        if not reference:
+            return None
+        models = self.get_all_models()
+        for model in models:
+            if model.id == reference:
+                return model
+        name_matches = [model for model in models if model.name == reference]
+        return name_matches[0] if len(name_matches) == 1 else None
+
+    def _normalize_default_model_reference(self) -> bool:
+        """Migrate legacy default model names to canonical model IDs."""
+        models = self.get_all_models()
+        if not models:
+            return False
+
+        configured_reference = self._config.get("default_model_id")
+        selected = self._resolve_model_reference(configured_reference)
+        if selected is None:
+            defaults = [model for model in models if model.is_default]
+            selected = defaults[0] if len(defaults) == 1 else None
+        if selected is None:
+            return False
+
+        changed = configured_reference != selected.id
+        self._config["default_model_id"] = selected.id
+        for model_data in self._config.get("models", []):
+            is_default = model_data.get("id") == selected.id
+            if bool(model_data.get("is_default")) != is_default:
+                model_data["is_default"] = is_default
+                changed = True
+        return changed
     
     def get_default_model(self) -> Optional[ModelConfig]:
         """获取默认模型配置"""
         default_id = self._config.get("default_model_id")
         if default_id:
-            return self.get_model(default_id)
+            model = self._resolve_model_reference(default_id)
+            if model:
+                if default_id != model.id:
+                    self.set_default_model(model.id)
+                return model
         
         # 回退：查找 is_default=True 的模型
         for model in self.get_all_models():
@@ -554,12 +597,16 @@ class UserConfigManager:
     
     def set_default_model(self, model_id: str):
         """设置默认模型"""
-        self._config["default_model_id"] = model_id
-        
+        model = self._resolve_model_reference(model_id)
+        if model is None:
+            raise ValueError(f"Model configuration not found: {model_id}")
+        canonical_id = model.id
+        self._config["default_model_id"] = canonical_id
+
         # 更新 is_default 标志
         models = self._config.get("models", [])
         for m in models:
-            m["is_default"] = (m.get("id") == model_id)
+            m["is_default"] = (m.get("id") == canonical_id)
         
         self._save_config()
     
