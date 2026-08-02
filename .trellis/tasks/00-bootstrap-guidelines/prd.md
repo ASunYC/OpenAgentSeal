@@ -23,6 +23,10 @@ the rest conversationally.
 
 - [x] Fill guidelines for open_agent/skills
 - [x] Add code examples
+- [x] Correct the main package boundary
+- [x] Document project architecture and ownership
+- [x] Document configuration, security, contracts, and delivery
+- [x] Add domain-specific runtime and capability guides
 
 ---
 

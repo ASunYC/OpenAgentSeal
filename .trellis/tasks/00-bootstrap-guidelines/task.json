@@ -5,8 +5,8 @@
   "description": "Fill in project development guidelines for AI agents",
   "status": "in_progress",
   "dev_type": "docs",
-  "scope": null,
-  "package": null,
+  "scope": "repository-wide project specification",
+  "package": "open_agent",
   "priority": "P1",
   "creator": "asun",
   "assignee": "asun",
@@ -21,8 +21,9 @@
   "children": [],
   "parent": null,
   "relatedFiles": [
-    ".trellis/spec/open_agent/skills/"
+    ".trellis/spec/",
+    ".trellis/config.yaml"
   ],
-  "notes": "First-time setup task created by trellis init (backend project)",
+  "notes": "First-time setup task. The initial auto-detection selected the open_agent/skills submodule; bootstrap corrected the main package to the repository root and documented the complete application architecture.",
   "meta": {}
 }

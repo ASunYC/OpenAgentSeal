@@ -54,6 +54,8 @@ Thumbs.db
 # Config (contains API keys)
 config.yaml
 mcp.json
+# Trellis project configuration contains package topology, not runtime secrets.
+!.trellis/config.yaml
 
 # test file
 demo.py
