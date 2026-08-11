@@ -23,6 +23,13 @@ from open_agent.goal_runtime import (
 NOW = datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc)
 
 
+def criteria_evidence(*, complete: bool = False):
+    return {
+        "tests pass": {"satisfied": complete, "evidence": "tests evidence"},
+        "report exists": {"satisfied": complete, "evidence": "report evidence"},
+    }
+
+
 class FakeRunner:
     def __init__(self, events: list[AgentEvent]):
         self.events = events
@@ -127,7 +134,7 @@ async def test_runner_executes_one_authoritative_turn_and_hands_off(runtime):
     runner = FakeRunner([
         AgentEvent(event="complete", session_id="session-1", content="iteration output", status="idle", result={"usage": {"total_tokens": 25}})
     ])
-    judge = FakeJudge([JudgeResult(False, 0.9, "more", "write report", criterion_evidence={"tests pass": "ok", "report exists": "missing"})])
+    judge = FakeJudge([JudgeResult(False, 0.9, "more", "write report", criterion_evidence=criteria_evidence())])
     service = GoalRunner(repo, runner, judge, owner_id="worker", clock=lambda: NOW + timedelta(seconds=5))
 
     completed = await service.run_iteration(goal.goal_id)
@@ -170,7 +177,7 @@ async def test_budget_boundary_pauses_without_inventing_success(runtime):
         session_id="s", goal_text="Ship", configuration=config(max_tokens=10).to_record(), now=NOW
     )
     runner = FakeRunner([AgentEvent(event="complete", session_id="s", content="partial", result={"usage": {"total_tokens": 11}})])
-    judge = FakeJudge([JudgeResult(False, 0.2, "not done", "continue", criterion_evidence={"tests pass": "no", "report exists": "no"})])
+    judge = FakeJudge([JudgeResult(False, 0.2, "not done", "continue", criterion_evidence=criteria_evidence())])
     service = GoalRunner(repo, runner, judge, owner_id="worker", clock=lambda: NOW + timedelta(seconds=1))
 
     await service.run_iteration(goal.goal_id)
@@ -221,8 +228,10 @@ async def test_transient_failures_are_bounded_then_blocked(runtime):
     cp, repo = runtime
     goal = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
     failing = FakeRunner([AgentEvent(event="error", session_id="s", error="provider unavailable")])
-    service = GoalRunner(repo, failing, FakeJudge([]), owner_id="worker", clock=lambda: NOW, max_transient_failures=2)
+    current = [NOW]
+    service = GoalRunner(repo, failing, FakeJudge([]), owner_id="worker", clock=lambda: current[0], max_transient_failures=2)
     await service.run_iteration(goal.goal_id)
+    current[0] += timedelta(seconds=2)
     await service.run_iteration(goal.goal_id)
     assert cp.get_goal(goal.goal_id)["status"] == "blocked"
 
@@ -276,7 +285,7 @@ async def test_recovered_completed_turn_uses_persisted_content_and_usage_without
         status="completed", result={"content": "persisted", "usage": {"total_tokens": 7}},
     )
     runner = FakeRunner([])
-    judge = FakeJudge([JudgeResult(False, 0.5, "more", "next", criterion_evidence={"tests pass": "no", "report exists": "no"})])
+    judge = FakeJudge([JudgeResult(False, 0.5, "more", "next", criterion_evidence=criteria_evidence())])
     service = GoalRunner(repo, runner, judge, owner_id="new", clock=lambda: NOW + timedelta(seconds=2))
     await service.run_iteration(first.goal_id)
     assert runner.requests == []
@@ -298,7 +307,7 @@ async def test_stream_event_cannot_override_authoritative_persisted_result(runti
             )
             yield AgentEvent(event="complete", session_id="s", turn_id=runtime_turn["turn_id"], content="forged", result={"usage": {"total_tokens": 999}})
 
-    judge = FakeJudge([JudgeResult(False, 0.5, "more", "next", criterion_evidence={"tests pass": "no", "report exists": "no"})])
+    judge = FakeJudge([JudgeResult(False, 0.5, "more", "next", criterion_evidence=criteria_evidence())])
     await GoalRunner(repo, ForgingRunner([]), judge, owner_id="w", clock=lambda: NOW + timedelta(seconds=1)).run_iteration(first.goal_id)
     assert judge.calls[0][2] == "real"
     assert cp.get_goal(first.goal_id)["consumed_tokens"] == 3
@@ -309,7 +318,7 @@ async def test_budget_pause_uses_progress_obligation_and_later_completion_keeps_
     cp, repo = runtime
     first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config(max_tokens=10).to_record(), now=NOW)
     partial = FakeRunner([AgentEvent(event="complete", session_id="s", content="partial", result={"usage": {"total_tokens": 10}})])
-    judge = FakeJudge([JudgeResult(False, 0.1, "more", "next", criterion_evidence={"tests pass": "no", "report exists": "no"})])
+    judge = FakeJudge([JudgeResult(False, 0.1, "more", "next", criterion_evidence=criteria_evidence())])
     await GoalRunner(repo, partial, judge, owner_id="w", clock=lambda: NOW + timedelta(seconds=1)).run_iteration(first.goal_id)
     keys = [item.idempotency_key for item in repo.list_outbox()]
     assert keys == [f"goal:{first.goal_id}:progress:budget:1:v1"]
@@ -384,7 +393,8 @@ async def test_external_cancellation_cleans_judge_child(runtime):
 def test_blocked_resume_requires_explicit_operator_reset(runtime):
     cp, repo = runtime
     first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
-    cp._get_conn().execute("UPDATE goals SET status='blocked', transient_failure_count=3 WHERE goal_id=?", (first.goal_id,))
+    with cp._get_conn() as conn:
+        conn.execute("UPDATE goals SET status='blocked', transient_failure_count=3 WHERE goal_id=?", (first.goal_id,))
     with pytest.raises(Exception):
         repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="try")
     resumed = repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="operator", operator_decision="reset_failures")
@@ -394,7 +404,8 @@ def test_blocked_resume_requires_explicit_operator_reset(runtime):
 def test_budget_resume_requires_atomic_budget_increase(runtime):
     cp, repo = runtime
     first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config(max_tokens=10).to_record(), now=NOW)
-    cp._get_conn().execute("UPDATE goals SET status='paused', consumed_tokens=10, metadata=? WHERE goal_id=?", ('{"pause_kind":"budget"}', first.goal_id))
+    with cp._get_conn() as conn:
+        conn.execute("UPDATE goals SET status='paused', consumed_tokens=10, metadata=? WHERE goal_id=?", ('{"pause_kind":"budget"}', first.goal_id))
     with pytest.raises(Exception):
         repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="try")
     resumed = repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="operator", operator_decision="increase_budget", budget_updates={"max_tokens": 20})
@@ -416,10 +427,10 @@ def test_retry_persists_due_time_and_uses_latest_claim(runtime):
     first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
     claimed = repo.claim_next_goal_iteration("w", NOW, NOW + timedelta(seconds=30), goal_id=first.goal_id)
     latest = repo.renew_claim("goal_iteration", claimed.iteration_id, claimed.claim, NOW + timedelta(seconds=1), NOW + timedelta(seconds=40))
-    failed = repo.fail_goal_iteration(claimed.iteration_id, latest, error="transient", now=NOW + timedelta(seconds=2), max_transient_failures=3)
+    failed = repo.fail_goal_iteration(claimed.iteration_id, latest, error="transient", now=NOW + timedelta(seconds=2), max_transient_failures=3, expected_goal_version=0)
     row = cp._get_conn().execute("SELECT * FROM goal_iterations WHERE iteration_id=?", (failed.iteration_id,)).fetchone()
     assert row["next_attempt_at"] > (NOW + timedelta(seconds=2)).isoformat()
-    assert repo.claim_next_goal_iteration("early", NOW + timedelta(seconds=3), NOW + timedelta(seconds=30), goal_id=first.goal_id) is None
+    assert repo.claim_next_goal_iteration("early", NOW + timedelta(milliseconds=2500), NOW + timedelta(seconds=30), goal_id=first.goal_id) is None
 
 
 def test_failure_settlement_cannot_overwrite_concurrent_cancel(runtime):
@@ -432,11 +443,98 @@ def test_failure_settlement_cannot_overwrite_concurrent_cancel(runtime):
     assert cp.get_goal(first.goal_id)["status"] == "cancelled"
 
 
-def test_controller_start_is_atomic_with_start_message(runtime, monkeypatch):
+def test_controller_start_is_atomic_with_start_message(runtime):
     from open_agent.goal_mode import GoalController
     cp, repo = runtime
-    monkeypatch.setattr(cp, "append_message", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("disk full")))
-    with pytest.raises(RuntimeError):
+    cp._get_conn().execute("CREATE TRIGGER fail_goal_message BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'disk full'); END")
+    with pytest.raises(Exception):
         GoalController(cp).start_goal("s", "Ship", configuration=config())
     assert cp.list_goals() == []
     assert repo.list_goal_iterations() == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("goal_id", "g" * 300), ("goal_text", "x" * 100_001),
+    ("plan", "x" * 100_001),
+], ids=["goal-id", "goal-text", "plan"])
+def test_goal_start_bounds_fail_before_any_write(runtime, field, value):
+    cp, repo = runtime
+    kwargs = {"session_id": "s", "goal_text": "Ship", "configuration": config().to_record(), "now": NOW, field: value}
+    with pytest.raises(ValueError):
+        repo.create_goal_with_first_iteration(**kwargs)
+    assert cp.get_session("s") is None and cp.list_goals() == []
+
+
+def test_evidence_dto_rejects_unknown_fields_and_aggregate_overflow():
+    with pytest.raises(ValueError):
+        config().acceptance.validate_judge(JudgeResult(True, 1, "done", "", criterion_evidence={
+            "tests pass": {"satisfied": True, "evidence": "ok", "extra": "no"},
+            "report exists": {"satisfied": True, "evidence": "ok"},
+        }))
+    with pytest.raises(ValueError):
+        JudgeResult(False, 0, "x" * 20_000, "", criterion_evidence={})
+
+
+def test_terminal_outbox_identity_conflict_rolls_back_goal_settlement(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
+    claimed = repo.claim_next_goal_iteration("w", NOW, NOW + timedelta(seconds=30), goal_id=first.goal_id)
+    from open_agent.durable_runtime.models import OutboxObligation
+    repo.enqueue_outbox(OutboxObligation(
+        obligation_id=f"goal:{first.goal_id}:terminal:v1", idempotency_key=f"goal:{first.goal_id}:terminal:v1",
+        destination="local_session", payload={"conflict": True}, created_at=NOW, updated_at=NOW,
+    ))
+    obligation = GoalRunner._result_obligation(cp.get_goal(first.goal_id), "done", JudgeResult(True, 1, "done", "", criterion_evidence=satisfied()), NOW, status="completed", sequence=1)
+    with pytest.raises(Exception):
+        repo.finish_goal_iteration(claimed.iteration_id, claimed.claim, judge_result=JudgeResult(True, 1, "done", "", criterion_evidence=satisfied()).to_dict(), budget_delta={}, continue_running=False, goal_status="completed", expected_goal_version=0, terminal_obligation=obligation, now=NOW + timedelta(seconds=1))
+    assert repo.get_goal_iteration(first.iteration_id).state == "running"
+
+
+def test_destination_kind_is_validated_at_goal_creation(runtime):
+    cp, repo = runtime
+    with pytest.raises(ValueError):
+        repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW, destination="mystery:x")
+    with pytest.raises(ValueError):
+        repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW, destination="channel:a", metadata={})
+    assert cp.list_goals() == []
+
+
+def test_cancel_also_fences_retry_wait_iteration(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
+    cp._get_conn().execute("UPDATE goal_iterations SET state='retry_wait', next_attempt_at=? WHERE iteration_id=?", ((NOW + timedelta(seconds=5)).isoformat(), first.iteration_id))
+    repo.transition_goal(first.goal_id, expected_version=0, action="cancel", now=NOW, reason="stop")
+    assert repo.get_goal_iteration(first.iteration_id).state == "cancelled"
+
+
+def test_budget_updates_rejected_for_normal_pause(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
+    repo.transition_goal(first.goal_id, expected_version=0, action="pause", now=NOW, reason="user")
+    with pytest.raises(Exception):
+        repo.transition_goal(first.goal_id, expected_version=1, action="resume", now=NOW, reason="user", budget_updates={"max_tokens": 2000})
+
+
+@pytest.mark.parametrize("owner,lease", [("", timedelta(seconds=30)), ("w", timedelta(0)), ("w", timedelta(days=2))])
+def test_goal_runner_validates_worker_and_lease(runtime, owner, lease):
+    cp, repo = runtime
+    with pytest.raises(ValueError):
+        GoalRunner(repo, FakeRunner([]), FakeJudge([]), owner_id=owner, lease_duration=lease)
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_binding_metadata_is_verified(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
+    claimed = repo.claim_next_goal_iteration("dead", NOW, NOW + timedelta(seconds=1), goal_id=first.goal_id)
+    cp.complete_runtime_turn(claimed.turn_id, result={"content": "x", "usage": {"total_tokens": 1}}, metadata={"goal_id": "other", "goal_iteration": 99, "source_event_key": "other"})
+    with pytest.raises(Exception):
+        repo.claim_next_goal_iteration("new", NOW + timedelta(seconds=2), NOW + timedelta(seconds=30), goal_id=first.goal_id)
+
+
+def test_configured_transition_message_and_state_are_atomic(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
+    repo.transition_goal(first.goal_id, expected_version=0, action="pause", now=NOW, reason="review")
+    messages = cp.list_messages("s")
+    assert any(item["metadata"].get("goal_event") == "paused" for item in messages)
