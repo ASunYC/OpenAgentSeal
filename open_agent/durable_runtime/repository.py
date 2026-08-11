@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from math import isfinite
-from typing import Any, Mapping, TYPE_CHECKING
+from typing import Any, Iterable, Mapping, TYPE_CHECKING
 
 from .models import (
     ClaimToken,
@@ -277,6 +277,125 @@ class DurableRuntimeRepository:
             ).fetchone()
         return self._outbox(row)
 
+    def persist_agent_task_with_outbox(
+        self,
+        task: Mapping[str, Any],
+        obligation: OutboxObligation,
+        *,
+        now: datetime,
+    ) -> OutboxObligation:
+        """Atomically persist one terminal agent task and its delivery obligation."""
+        status = task.get("status")
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("agent task must be terminal before outbox production")
+        if obligation.state != "pending" or obligation.claim is not None:
+            raise ValueError("new outbox obligations must be pending and unclaimed")
+        identifiers = {
+            name: task.get(name) for name in ("task_id", "profile_id", "session_id")
+        }
+        for name, value in identifiers.items():
+            _require_identifier(value, name)
+        parent_session_id = task.get("parent_session_id")
+        if parent_session_id is not None:
+            _require_identifier(parent_session_id, "parent_session_id")
+        now_value = _iso(now)
+        metadata = to_json_value(task.get("metadata") or {})
+        events = to_json_value(task.get("events") or [])
+        conn = self._conn
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (
+                    session_id, channel, user_id, status, created_at, updated_at, metadata
+                ) VALUES (?, 'agent-task', 'default', 'active', ?, ?, ?)
+                ON CONFLICT(session_id) DO NOTHING
+                """,
+                (
+                    identifiers["session_id"],
+                    now_value,
+                    now_value,
+                    _json({"profile_id": identifiers["profile_id"]}),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO agent_tasks (
+                    task_id, profile_id, session_id, parent_session_id, status, instruction,
+                    result, error, events, created_at, updated_at, completed_at, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    profile_id=excluded.profile_id,
+                    session_id=excluded.session_id,
+                    parent_session_id=excluded.parent_session_id,
+                    status=excluded.status,
+                    instruction=excluded.instruction,
+                    result=excluded.result,
+                    error=excluded.error,
+                    events=excluded.events,
+                    updated_at=excluded.updated_at,
+                    completed_at=COALESCE(agent_tasks.completed_at, excluded.completed_at),
+                    metadata=excluded.metadata
+                """,
+                (
+                    identifiers["task_id"],
+                    identifiers["profile_id"],
+                    identifiers["session_id"],
+                    parent_session_id,
+                    status,
+                    str(task.get("instruction") or ""),
+                    task.get("result"),
+                    task.get("error"),
+                    _json(events),
+                    now_value,
+                    now_value,
+                    now_value,
+                    _json(metadata),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO outbox_obligations (
+                    obligation_id, idempotency_key, destination, payload, state,
+                    attempt, next_attempt_at, last_error, acknowledgement,
+                    claim_owner, claim_generation, claim_expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(destination, idempotency_key) DO NOTHING
+                """,
+                (
+                    obligation.obligation_id,
+                    obligation.idempotency_key,
+                    obligation.destination,
+                    _json(obligation.payload),
+                    obligation.state,
+                    obligation.attempt,
+                    None,
+                    obligation.last_error,
+                    None,
+                    None,
+                    0,
+                    None,
+                    _iso(obligation.created_at),
+                    _iso(obligation.updated_at),
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM outbox_obligations
+                WHERE destination = ? AND idempotency_key = ?
+                """,
+                (obligation.destination, obligation.idempotency_key),
+            ).fetchone()
+            if (
+                row["obligation_id"] != obligation.obligation_id
+                or row["destination"] != obligation.destination
+                or row["idempotency_key"] != obligation.idempotency_key
+                or row["payload"] != _json(obligation.payload)
+            ):
+                raise StateConflictError(
+                    "agent task delivery identity belongs to another obligation"
+                )
+        return self._outbox(row)
+
     def get_outbox(self, obligation_id: str) -> OutboxObligation | None:
         row = self._conn.execute(
             "SELECT * FROM outbox_obligations WHERE obligation_id = ?", (obligation_id,)
@@ -287,6 +406,187 @@ class DurableRuntimeRepository:
         rows = self._list_rows("outbox_obligations", "state", state, "created_at, obligation_id", limit)
         return [self._outbox(row) for row in rows]
 
+    def append_audit_event(
+        self,
+        *,
+        audit_id: str,
+        entity_kind: str,
+        entity_id: str,
+        action: str,
+        actor_id: str | None,
+        payload: Mapping[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        for value, name in (
+            (audit_id, "audit_id"),
+            (entity_kind, "entity_kind"),
+            (entity_id, "entity_id"),
+            (action, "action"),
+        ):
+            _require_identifier(value, name)
+        if actor_id is not None:
+            _require_identifier(actor_id, "actor_id")
+        payload_value = to_json_value(payload)
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO runtime_audit_events (
+                    audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit_id,
+                    entity_kind,
+                    entity_id,
+                    action,
+                    actor_id,
+                    _json(payload_value),
+                    _iso(now),
+                ),
+            )
+        return {
+            "audit_id": audit_id,
+            "entity_kind": entity_kind,
+            "entity_id": entity_id,
+            "action": action,
+            "actor_id": actor_id,
+            "payload": payload_value,
+            "created_at": datetime.fromisoformat(_iso(now)),
+        }
+
+    def list_audit_events(
+        self,
+        entity_kind: str,
+        entity_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        _require_identifier(entity_kind, "entity_kind")
+        _require_identifier(entity_id, "entity_id")
+        _require_limit(limit)
+        rows = self._conn.execute(
+            """
+            SELECT * FROM runtime_audit_events
+            WHERE entity_kind = ? AND entity_id = ?
+            ORDER BY created_at, audit_id
+            LIMIT ?
+            """,
+            (entity_kind, entity_id, limit),
+        ).fetchall()
+        return [
+            {
+                "audit_id": row["audit_id"],
+                "entity_kind": row["entity_kind"],
+                "entity_id": row["entity_id"],
+                "action": row["action"],
+                "actor_id": row["actor_id"],
+                "payload": json.loads(row["payload"]),
+                "created_at": datetime.fromisoformat(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def manual_resend_outbox(
+        self,
+        source_obligation_id: str,
+        resend: OutboxObligation,
+        *,
+        actor_id: str,
+        now: datetime,
+    ) -> OutboxObligation:
+        _require_identifier(source_obligation_id, "source_obligation_id")
+        _require_identifier(actor_id, "actor_id")
+        if resend.state != "pending" or resend.claim is not None:
+            raise ValueError("manual resend obligations must be pending and unclaimed")
+        now_value = _iso(now)
+        conn = self._conn
+        with conn:
+            source = conn.execute(
+                "SELECT * FROM outbox_obligations WHERE obligation_id = ?",
+                (source_obligation_id,),
+            ).fetchone()
+            if source is None:
+                raise StateConflictError(f"missing outbox obligation: {source_obligation_id}")
+            if source["state"] not in {"delivery_unknown", "dead_letter"}:
+                raise StateConflictError(
+                    f"outbox obligation is not eligible for manual resend: {source_obligation_id}"
+                )
+            expected_key = (
+                f"manual-resend:{source_obligation_id}:{resend.obligation_id}"
+            )
+            source_payload = json.loads(source["payload"])
+            resend_payload_value = to_json_value(resend.payload)
+            resend_payload = _json(resend_payload_value)
+            if (
+                resend.destination != source["destination"]
+                or resend.idempotency_key != expected_key
+                or resend_payload_value != source_payload
+            ):
+                raise ValueError("manual resend must clone the source destination and payload")
+            conn.execute(
+                """
+                INSERT INTO outbox_obligations (
+                    obligation_id, idempotency_key, destination, payload, state,
+                    attempt, next_attempt_at, last_error, acknowledgement,
+                    claim_owner, claim_generation, claim_expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)
+                ON CONFLICT(destination, idempotency_key) DO NOTHING
+                """,
+                (
+                    resend.obligation_id,
+                    resend.idempotency_key,
+                    resend.destination,
+                    resend_payload,
+                    _iso(resend.created_at),
+                    _iso(resend.updated_at),
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM outbox_obligations
+                WHERE destination = ? AND idempotency_key = ?
+                """,
+                (resend.destination, resend.idempotency_key),
+            ).fetchone()
+            if (
+                row["obligation_id"] != resend.obligation_id
+                or row["destination"] != source["destination"]
+                or row["idempotency_key"] != expected_key
+                or json.loads(row["payload"]) != source_payload
+            ):
+                raise StateConflictError(
+                    "manual resend identity belongs to another obligation"
+                )
+            audit_payload = _json({"resend_obligation_id": resend.obligation_id})
+            conn.execute(
+                """
+                INSERT INTO runtime_audit_events (
+                    audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
+                ) VALUES (?, 'outbox', ?, 'manual_resend', ?, ?, ?)
+                ON CONFLICT(audit_id) DO NOTHING
+                """,
+                (
+                    f"audit:{resend.obligation_id}",
+                    source_obligation_id,
+                    actor_id,
+                    audit_payload,
+                    now_value,
+                ),
+            )
+            audit = conn.execute(
+                "SELECT * FROM runtime_audit_events WHERE audit_id = ?",
+                (f"audit:{resend.obligation_id}",),
+            ).fetchone()
+            if (
+                audit["entity_kind"] != "outbox"
+                or audit["entity_id"] != source_obligation_id
+                or audit["action"] != "manual_resend"
+                or audit["actor_id"] != actor_id
+                or audit["payload"] != audit_payload
+            ):
+                raise StateConflictError("manual resend audit id belongs to another event")
+        return self._outbox(row)
+
     def claim_due_outbox(
         self,
         owner_id: str,
@@ -294,16 +594,26 @@ class DurableRuntimeRepository:
         expires_at: datetime,
         *,
         limit: int = 1,
+        destinations: Iterable[str] | None = None,
     ) -> list[OutboxObligation]:
         self._validate_lease_window(now, expires_at)
         _require_identifier(owner_id, "owner_id")
         _require_limit(limit)
+        destination_values = tuple(sorted(set(destinations or ())))
+        if destinations is not None and not destination_values:
+            return []
+        for destination in destination_values:
+            _require_identifier(destination, "destination")
+        destination_clause = ""
+        if destination_values:
+            placeholders = ", ".join("?" for _ in destination_values)
+            destination_clause = f"AND destination IN ({placeholders})"
         claimed: list[OutboxObligation] = []
         conn = self._conn
         with conn:
             for _ in range(limit):
                 row = conn.execute(
-                    """
+                    f"""
                     UPDATE outbox_obligations
                     SET state = 'claimed', claim_owner = ?,
                         claim_generation = claim_generation + 1, claim_expires_at = ?,
@@ -315,12 +625,20 @@ class DurableRuntimeRepository:
                             OR (state = 'claimed' AND claim_expires_at <= ?)
                         )
                         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                        {destination_clause}
                         ORDER BY COALESCE(next_attempt_at, created_at), created_at, obligation_id
                         LIMIT 1
                     )
                     RETURNING *
                     """,
-                    (owner_id, _iso(expires_at), _iso(now), _iso(now), _iso(now)),
+                    (
+                        owner_id,
+                        _iso(expires_at),
+                        _iso(now),
+                        _iso(now),
+                        _iso(now),
+                        *destination_values,
+                    ),
                 ).fetchone()
                 if row is None:
                     break

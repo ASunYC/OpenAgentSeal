@@ -331,6 +331,151 @@ def test_retry_and_delivery_unknown_are_fenced(repository):
     assert unknown.state == "delivery_unknown"
 
 
+def test_append_and_list_audit_events_are_parameterized_and_detached(repository):
+    control_plane, repo = repository
+    payload = {"value": "quote' ; DROP TABLE outbox_obligations; --", "nested": [1]}
+
+    event = repo.append_audit_event(
+        audit_id="audit-'",
+        entity_kind="outbox",
+        entity_id="delivery-'",
+        action="manual_resend",
+        actor_id="operator-'",
+        payload=payload,
+        now=NOW,
+    )
+    payload["nested"].append(2)
+
+    assert event["payload"] == {
+        "value": "quote' ; DROP TABLE outbox_obligations; --",
+        "nested": [1],
+    }
+    assert repo.list_audit_events("outbox", "delivery-'") == [event]
+    assert control_plane._get_conn().execute(
+        "SELECT 1 FROM outbox_obligations LIMIT 1"
+    ).fetchone() is None
+
+
+def test_append_audit_event_rolls_back_on_constraint_failure(repository):
+    _, repo = repository
+    repo.append_audit_event(
+        audit_id="audit-1",
+        entity_kind="outbox",
+        entity_id="delivery-1",
+        action="manual_resend",
+        actor_id=None,
+        payload={},
+        now=NOW,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.append_audit_event(
+            audit_id="audit-1",
+            entity_kind="outbox",
+            entity_id="delivery-2",
+            action="manual_resend",
+            actor_id=None,
+            payload={},
+            now=NOW,
+        )
+
+    assert repo.list_audit_events("outbox", "delivery-2") == []
+
+
+def test_manual_resend_rolls_back_if_audit_insert_fails(repository):
+    control_plane, repo = repository
+    repo.enqueue_outbox(OutboxObligation("source", "source-key", "local", {}))
+    claimed = repo.claim_due_outbox("worker", NOW, NOW + timedelta(seconds=30))[0]
+    repo.mark_delivery_unknown("source", claimed.claim, "ambiguous", NOW)
+    control_plane._get_conn().execute(
+        """
+        CREATE TRIGGER reject_resend_audit
+        BEFORE INSERT ON runtime_audit_events
+        WHEN NEW.action = 'manual_resend'
+        BEGIN
+            SELECT RAISE(ABORT, 'audit unavailable');
+        END
+        """
+    )
+    resend = OutboxObligation(
+        "resend", "manual-resend:source:resend", "local", {}, created_at=NOW, updated_at=NOW
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="audit unavailable"):
+        repo.manual_resend_outbox("source", resend, actor_id="operator", now=NOW)
+
+    assert repo.get_outbox("resend") is None
+    assert repo.list_audit_events("outbox", "source") == []
+
+
+def test_terminal_agent_task_and_outbox_roll_back_together(repository):
+    control_plane, repo = repository
+    control_plane.upsert_agent_task(
+        task_id="task-atomic",
+        profile_id="writer",
+        session_id="session-child",
+        parent_session_id="session-parent",
+        status="running",
+    )
+    control_plane._get_conn().execute(
+        """
+        CREATE TRIGGER reject_task_outbox
+        BEFORE INSERT ON outbox_obligations
+        WHEN NEW.obligation_id = 'delivery-atomic'
+        BEGIN
+            SELECT RAISE(ABORT, 'outbox unavailable');
+        END
+        """
+    )
+    obligation = OutboxObligation(
+        "delivery-atomic",
+        "agent-task:task-atomic:result",
+        "local_session",
+        {"content": "done"},
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    task = {
+        "task_id": "task-atomic",
+        "profile_id": "writer",
+        "session_id": "session-child",
+        "parent_session_id": "session-parent",
+        "status": "completed",
+        "result": "done",
+        "events": [],
+        "metadata": {},
+    }
+
+    with pytest.raises(sqlite3.IntegrityError, match="outbox unavailable"):
+        repo.persist_agent_task_with_outbox(task, obligation, now=NOW)
+
+    assert control_plane.get_agent_task("task-atomic")["status"] == "running"
+    assert repo.get_outbox("delivery-atomic") is None
+
+
+def test_manual_resend_must_clone_source_payload_and_destination(repository):
+    _, repo = repository
+    repo.enqueue_outbox(
+        OutboxObligation("source", "source-key", "local", {"content": "original"})
+    )
+    claimed = repo.claim_due_outbox("worker", NOW, NOW + timedelta(seconds=30))[0]
+    repo.mark_delivery_unknown("source", claimed.claim, "ambiguous", NOW)
+    changed = OutboxObligation(
+        "resend",
+        "manual-resend:source:resend",
+        "local",
+        {"content": "changed"},
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    with pytest.raises(ValueError, match="clone"):
+        repo.manual_resend_outbox("source", changed, actor_id="operator", now=NOW)
+
+    assert repo.get_outbox("resend") is None
+    assert repo.list_audit_events("outbox", "source") == []
+
+
 def test_scheduler_occurrence_and_cursor_advance_are_atomic(repository):
     control_plane, repo = repository
     scheduled_at = NOW - timedelta(minutes=1)

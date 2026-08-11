@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from open_agent.agent_profiles import MAIN_AGENT_ID, get_agent_profile_manager
 from open_agent.app.runner.manager import get_chat_manager
-from open_agent.app.runner.models import AgentRequest, Message
+from open_agent.app.runner.models import AgentRequest
 
 
 _agent_tasks: dict[str, dict[str, Any]] = {}
@@ -51,10 +52,9 @@ def _persist_task(task: dict[str, Any]) -> dict[str, Any]:
 async def _backfill_parent_session(task: dict[str, Any]) -> None:
     parent_session_id = task.get("parent_session_id")
     if not parent_session_id or task.get("metadata", {}).get("parent_backfilled"):
+        _persist_task(task)
         return
 
-    parent_profile_id = task.get("metadata", {}).get("parent_profile_id")
-    parent_key = None if not parent_profile_id or parent_profile_id == MAIN_AGENT_ID else parent_profile_id
     status = task.get("status")
     result = task.get("result") or ""
     error = task.get("error") or ""
@@ -84,23 +84,30 @@ async def _backfill_parent_session(task: dict[str, Any]) -> None:
     else:
         return
 
-    manager = get_chat_manager(parent_key)
-    chat = await manager.repo.find_by_session_id(parent_session_id)
-    if not chat:
-        return
-    manager.add_message(parent_session_id, Message(role="assistant", content=content))
-    chat.meta.setdefault("agent_task_results", [])
-    chat.meta["agent_task_results"].append(
-        {
-            "task_id": task_id,
-            "profile_id": profile_id,
-            "status": status,
-            "session_id": task.get("session_id"),
-        }
+    from open_agent.durable_runtime.delivery import (
+        DeliveryWorker,
+        LocalSessionDestination,
+        parent_session_result_obligation,
     )
-    await manager.update_chat(chat)
-    task.setdefault("metadata", {})["parent_backfilled"] = True
-    _persist_task(task)
+    from open_agent.durable_runtime.repository import DurableRuntimeRepository
+
+    now = datetime.now(timezone.utc)
+    repository = DurableRuntimeRepository(_task_control_plane())
+    obligation = parent_session_result_obligation(task, content=content, now=now)
+    obligation = repository.persist_agent_task_with_outbox(
+        task, obligation, now=now
+    )
+    worker = DeliveryWorker(
+        repository,
+        {"local_session": LocalSessionDestination(repository)},
+        owner_id=f"agent-control:{uuid.uuid4().hex}",
+        batch_size=100,
+    )
+    await worker.run_once(now)
+    delivered = repository.get_outbox(obligation.obligation_id)
+    if delivered is not None and delivered.state == "acknowledged":
+        task.setdefault("metadata", {})["parent_backfilled"] = True
+        _persist_task(task)
 
 
 def list_agent_profiles(include_disabled: bool = False) -> list[dict[str, Any]]:
@@ -167,17 +174,14 @@ async def _consume_agent_task(task_id: str, request: AgentRequest) -> None:
             _persist_task(task_state)
         if task_state.get("status") != "cancelled":
             task_state["status"] = "completed"
-            _persist_task(task_state)
             await _backfill_parent_session(task_state)
     except asyncio.CancelledError:
         task_state["status"] = "cancelled"
         await runner.cancel_session(request.session_id)
-        _persist_task(task_state)
         await _backfill_parent_session(task_state)
     except Exception as exc:
         task_state["status"] = "failed"
         task_state["error"] = str(exc)
-        _persist_task(task_state)
         await _backfill_parent_session(task_state)
 
 
@@ -284,23 +288,12 @@ async def cancel_agent_task(task_id: str) -> dict[str, Any] | None:
         if persisted.get("status") not in {"queued", "running"}:
             return persisted
         persisted["status"] = "cancelled"
-        return _task_control_plane().upsert_agent_task(
-            task_id=persisted["task_id"],
-            profile_id=persisted["profile_id"],
-            session_id=persisted["session_id"],
-            parent_session_id=persisted.get("parent_session_id"),
-            status="cancelled",
-            instruction=persisted.get("instruction", ""),
-            result=persisted.get("result"),
-            error=persisted.get("error"),
-            events=persisted.get("events", []),
-            metadata=persisted.get("metadata", {}),
-        )
+        await _backfill_parent_session(persisted)
+        return _public_task(persisted)
     task["status"] = "cancelled"
     await get_runner().cancel_session(task["session_id"])
     async_task = task.get("task")
     if async_task and not async_task.done():
         async_task.cancel()
-    _persist_task(task)
     await _backfill_parent_session(task)
     return _public_task(task)
