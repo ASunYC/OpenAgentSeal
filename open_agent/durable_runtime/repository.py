@@ -519,6 +519,146 @@ class DurableRuntimeRepository:
         value["should_dispatch"] = should_dispatch
         return value
 
+    def get_ingress_checkpoint(
+        self, account_id: str, transport_mode: str
+    ) -> dict[str, Any] | None:
+        _require_identifier(account_id, "account_id")
+        self._validate_transport_mode(transport_mode)
+        row = self._conn.execute(
+            """SELECT * FROM channel_ingress_checkpoints
+               WHERE account_id = ? AND transport_mode = ?""",
+            (account_id, transport_mode),
+        ).fetchone()
+        return self._ingress_checkpoint(row) if row is not None else None
+
+    def commit_ingress_checkpoint(
+        self,
+        *,
+        account_id: str,
+        transport_mode: str,
+        now: datetime,
+        cursor: str | None = None,
+        gateway_session_id: str | None = None,
+        gateway_sequence: int | None = None,
+        replay_state: Mapping[str, Any] | None = None,
+        reconnect_metadata: Mapping[str, Any] | None = None,
+        processed_event_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a transport resume point after its referenced event is durable."""
+        _require_identifier(account_id, "account_id")
+        self._validate_transport_mode(transport_mode)
+        if cursor is not None:
+            _require_identifier(cursor, "cursor")
+        if gateway_session_id is not None:
+            _require_identifier(gateway_session_id, "gateway_session_id")
+        if gateway_sequence is not None and (
+            isinstance(gateway_sequence, bool)
+            or not isinstance(gateway_sequence, int)
+            or gateway_sequence < 0
+        ):
+            raise ValueError("gateway_sequence must be a non-negative integer")
+        if processed_event_key is not None:
+            _require_identifier(processed_event_key, "processed_event_key")
+        for value, name in (
+            (replay_state, "replay_state"),
+            (reconnect_metadata, "reconnect_metadata"),
+        ):
+            if value is not None and not isinstance(value, Mapping):
+                raise ValueError(f"{name} must be a mapping")
+        now_value = _iso(now)
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            account = conn.execute(
+                "SELECT enabled FROM channel_accounts WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if account is None or not bool(account["enabled"]):
+                raise StateConflictError("channel account is missing or disabled")
+            if processed_event_key is not None:
+                durable = conn.execute(
+                    """SELECT 1 FROM inbox_events
+                       WHERE account_id = ? AND event_key = ?""",
+                    (account_id, processed_event_key),
+                ).fetchone()
+                if durable is None:
+                    raise StateConflictError(
+                        "checkpoint cannot advance before its event is durable"
+                    )
+            current = conn.execute(
+                """SELECT * FROM channel_ingress_checkpoints
+                   WHERE account_id = ? AND transport_mode = ?""",
+                (account_id, transport_mode),
+            ).fetchone()
+            if (
+                current is not None
+                and gateway_sequence is not None
+                and current["gateway_sequence"] is not None
+                and current["gateway_session_id"] == gateway_session_id
+                and gateway_sequence < int(current["gateway_sequence"])
+            ):
+                raise ValueError("gateway sequence cannot regress within a session")
+            replay_value = _json(
+                replay_state
+                if replay_state is not None
+                else (json.loads(current["replay_state"]) if current is not None else {})
+            )
+            reconnect_value = _json(
+                reconnect_metadata
+                if reconnect_metadata is not None
+                else (
+                    json.loads(current["reconnect_metadata"])
+                    if current is not None
+                    else {}
+                )
+            )
+            row = conn.execute(
+                """
+                INSERT INTO channel_ingress_checkpoints (
+                    account_id, transport_mode, cursor, gateway_session_id,
+                    gateway_sequence, replay_state, claim_owner, claim_generation,
+                    claim_expires_at, reconnect_metadata, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?)
+                ON CONFLICT(account_id, transport_mode) DO UPDATE SET
+                    cursor=excluded.cursor,
+                    gateway_session_id=excluded.gateway_session_id,
+                    gateway_sequence=excluded.gateway_sequence,
+                    replay_state=excluded.replay_state,
+                    reconnect_metadata=excluded.reconnect_metadata,
+                    updated_at=excluded.updated_at
+                RETURNING *
+                """,
+                (
+                    account_id,
+                    transport_mode,
+                    cursor if cursor is not None else (current["cursor"] if current else None),
+                    gateway_session_id
+                    if gateway_session_id is not None
+                    else (current["gateway_session_id"] if current else None),
+                    gateway_sequence
+                    if gateway_sequence is not None
+                    else (current["gateway_sequence"] if current else None),
+                    replay_value,
+                    reconnect_value,
+                    now_value,
+                ),
+            ).fetchone()
+        if row is None:
+            raise StateConflictError("ingress checkpoint upsert returned no row")
+        return self._ingress_checkpoint(row)
+
+    @staticmethod
+    def _validate_transport_mode(transport_mode: str) -> None:
+        if transport_mode not in {"webhook", "polling", "gateway"}:
+            raise ValueError("unsupported ingress transport mode")
+
+    def _ingress_checkpoint(self, row: sqlite3.Row) -> dict[str, Any]:
+        value = self.control_plane._row_to_dict(row)
+        for field in ("replay_state", "reconnect_metadata"):
+            if isinstance(value[field], str):
+                value[field] = json.loads(value[field])
+        return value
+
     @staticmethod
     def _gateway_id(prefix: str, *parts: str) -> str:
         value = _json([prefix, *parts])
@@ -626,13 +766,14 @@ class DurableRuntimeRepository:
             row = conn.execute(
                 """
                 UPDATE inbox_events
-                SET state = 'claimed', claim_owner = ?,
+                SET state = CASE WHEN state = 'dispatched' THEN 'dispatched' ELSE 'claimed' END,
+                    claim_owner = ?,
                     claim_generation = claim_generation + 1, claim_expires_at = ?,
                     attempt = attempt + 1, updated_at = ?
                 WHERE event_id = ?
                   AND (
                         state IN ('pending', 'retry_wait')
-                        OR (state = 'claimed' AND claim_expires_at <= ?)
+                        OR (state IN ('claimed', 'dispatched') AND claim_expires_at <= ?)
                   )
                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                 RETURNING *
@@ -640,6 +781,52 @@ class DurableRuntimeRepository:
                 (owner_id, _iso(expires_at), _iso(now), event_id, _iso(now), _iso(now)),
             ).fetchone()
         return self._inbox(row) if row else None
+
+    def claim_due_inbox(
+        self,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+        *,
+        limit: int = 1,
+    ) -> list[InboxEvent]:
+        self._validate_lease_window(now, expires_at)
+        _require_identifier(owner_id, "owner_id")
+        _require_limit(limit)
+        claimed: list[InboxEvent] = []
+        conn = self._conn
+        with conn:
+            for _ in range(limit):
+                row = conn.execute(
+                    """
+                    UPDATE inbox_events
+                    SET state = CASE WHEN state = 'dispatched' THEN 'dispatched' ELSE 'claimed' END,
+                        claim_owner = ?, claim_generation = claim_generation + 1,
+                        claim_expires_at = ?, attempt = attempt + 1, updated_at = ?
+                    WHERE event_id = (
+                        SELECT event_id FROM inbox_events
+                        WHERE (
+                            state IN ('pending', 'retry_wait')
+                            OR (state IN ('claimed', 'dispatched') AND claim_expires_at <= ?)
+                        )
+                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                        ORDER BY COALESCE(next_attempt_at, created_at), created_at, event_id
+                        LIMIT 1
+                    )
+                    RETURNING *
+                    """,
+                    (
+                        owner_id,
+                        _iso(expires_at),
+                        _iso(now),
+                        _iso(now),
+                        _iso(now),
+                    ),
+                ).fetchone()
+                if row is None:
+                    break
+                claimed.append(self._inbox(row))
+        return claimed
 
     def dispatch_inbox_with_turn(
         self,
@@ -659,16 +846,12 @@ class DurableRuntimeRepository:
         with conn:
             event_row = conn.execute(
                 """
-                UPDATE inbox_events
-                SET state = 'dispatched', claim_owner = NULL, claim_expires_at = NULL,
-                    updated_at = ?
-                WHERE event_id = ? AND state = 'claimed'
+                SELECT * FROM inbox_events
+                WHERE event_id = ? AND state IN ('claimed', 'dispatched')
                   AND claim_owner = ? AND claim_generation = ?
                   AND claim_expires_at = ? AND claim_expires_at > ?
-                RETURNING *
                 """,
                 (
-                    now_value,
                     event_id,
                     token.owner_id,
                     token.generation,
@@ -679,6 +862,38 @@ class DurableRuntimeRepository:
             if event_row is None:
                 raise StaleClaimError(f"stale inbox claim: {event_id}")
             source_event_key = _json([event_row["account_id"], event_row["event_key"]])
+            if event_row["state"] == "dispatched":
+                turn_row = conn.execute(
+                    "SELECT * FROM runtime_turns WHERE source_event_key = ?",
+                    (source_event_key,),
+                ).fetchone()
+                if turn_row is None:
+                    raise StateConflictError("dispatched inbox event has no runtime turn")
+                if (
+                    turn_row["thread_id"] != thread_id
+                    or turn_row["session_id"] != session_id
+                    or turn_row["user_input"] != user_input
+                ):
+                    raise StateConflictError("replayed dispatch does not match its runtime turn")
+                return self.control_plane._row_to_dict(turn_row)
+            updated = conn.execute(
+                """
+                UPDATE inbox_events SET state = 'dispatched', updated_at = ?
+                WHERE event_id = ? AND state = 'claimed'
+                  AND claim_owner = ? AND claim_generation = ?
+                  AND claim_expires_at = ? AND claim_expires_at > ?
+                """,
+                (
+                    now_value,
+                    event_id,
+                    token.owner_id,
+                    token.generation,
+                    _iso(token.expires_at),
+                    now_value,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise StaleClaimError(f"stale inbox claim: {event_id}")
             turn_metadata = dict(to_json_value(metadata or {}))
             turn_metadata.update(
                 {"source_inbox_event_id": event_id, "source_event_key": source_event_key}
@@ -715,6 +930,38 @@ class DurableRuntimeRepository:
                 "SELECT * FROM runtime_turns WHERE turn_id = ?", (turn_id,)
             ).fetchone()
         return self.control_plane._row_to_dict(turn_row)
+
+    def complete_inbox(
+        self,
+        event_id: str,
+        token: ClaimToken,
+        now: datetime,
+    ) -> InboxEvent:
+        """Complete an inbox item only while the caller owns its live fence."""
+        now_value = _iso(now)
+        with self._conn:
+            row = self._conn.execute(
+                """
+                UPDATE inbox_events
+                SET state = 'succeeded', claim_owner = NULL, claim_expires_at = NULL,
+                    next_attempt_at = NULL, last_error = NULL, updated_at = ?
+                WHERE event_id = ? AND state IN ('claimed', 'dispatched')
+                  AND claim_owner = ? AND claim_generation = ?
+                  AND claim_expires_at = ? AND claim_expires_at > ?
+                RETURNING *
+                """,
+                (
+                    now_value,
+                    event_id,
+                    token.owner_id,
+                    token.generation,
+                    _iso(token.expires_at),
+                    now_value,
+                ),
+            ).fetchone()
+        if row is None:
+            raise StaleClaimError(f"stale inbox claim: {event_id}")
+        return self._inbox(row)
 
     def enqueue_outbox(self, obligation: OutboxObligation) -> OutboxObligation:
         if obligation.state != "pending" or obligation.claim is not None:
@@ -2808,13 +3055,17 @@ class DurableRuntimeRepository:
             table, id_column, active_state = _CLAIM_TARGETS[kind]
         except KeyError as exc:
             raise ValueError(f"unsupported claim kind: {kind}") from exc
+        state_predicate = (
+            "state IN ('claimed', 'dispatched')" if kind == "inbox" else "state = ?"
+        )
+        state_values: tuple[str, ...] = () if kind == "inbox" else (active_state,)
         conn = self._conn
         with conn:
             row = conn.execute(
                 f"""
                 UPDATE {table}
                 SET claim_expires_at = ?, updated_at = ?
-                WHERE {id_column} = ? AND state = ?
+                WHERE {id_column} = ? AND {state_predicate}
                   AND claim_owner = ? AND claim_generation = ?
                   AND claim_expires_at = ? AND claim_expires_at > ?
                 RETURNING claim_owner, claim_generation, claim_expires_at
@@ -2823,7 +3074,7 @@ class DurableRuntimeRepository:
                     _iso(expires_at),
                     _iso(now),
                     record_id,
-                    active_state,
+                    *state_values,
                     token.owner_id,
                     token.generation,
                     _iso(token.expires_at),

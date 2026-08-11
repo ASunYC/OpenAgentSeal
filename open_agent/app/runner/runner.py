@@ -11,7 +11,7 @@ import mimetypes
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import AsyncGenerator, Optional, Callable, Any, Dict, List
+from typing import AsyncGenerator, Optional, Callable, Any, Dict, List, Mapping
 
 from open_agent.app.runner.models import (
     ChatSpec, Message, AgentRequest, AgentEvent
@@ -622,7 +622,7 @@ class AgentRunner:
                     "size": int(attachment.get("size") or 0),
                 })
 
-        return {
+        metadata = {
             "agent_id": agent_id,
             "profile_id": profile_id,
             "tool_access_mode": tool_access_mode,
@@ -633,6 +633,12 @@ class AgentRunner:
             "attachments": attachments,
             "memory_references": memory_references or [],
         }
+        source_event_key = request.meta.get("source_event_key")
+        if source_event_key is not None:
+            if not isinstance(source_event_key, str) or not source_event_key.strip():
+                raise ValueError("source_event_key must be a non-empty string")
+            metadata["source_event_key"] = source_event_key
+        return metadata
 
     def _recall_memory_context(
         self,
@@ -820,9 +826,21 @@ class AgentRunner:
             if event.get("turn_id") == latest_turn_id
         ]
     
+    async def run_stream(
+        self,
+        request: AgentRequest,
+        *,
+        runtime_turn: Mapping[str, Any] | None = None,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Stream through the one existing Agent loop, optionally resuming a durable turn."""
+        async for event in self.process_message(request, runtime_turn=runtime_turn):
+            yield event
+
     async def process_message(
         self,
         request: AgentRequest,
+        *,
+        runtime_turn: Mapping[str, Any] | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """
         Process a message through the agent with streaming events.
@@ -869,7 +887,7 @@ class AgentRunner:
             )
             return
 
-        if self._is_workspace_listing_request(user_content, request):
+        if runtime_turn is None and self._is_workspace_listing_request(user_content, request):
             answer = self._workspace_listing_answer(request)
             chat_manager.add_message(session_id, Message(role="user", content=user_content))
             chat_manager.add_message(session_id, Message(role="assistant", content=answer))
@@ -932,6 +950,26 @@ class AgentRunner:
         agent_home = profile_manager.get_agent_home(manager_profile_id)
         control_plane = get_control_plane(agent_home)
         runtime_thread = control_plane.get_runtime_thread_by_session(session_id)
+        if runtime_turn is not None:
+            supplied_turn_id = str(runtime_turn.get("turn_id") or "")
+            supplied_thread_id = str(runtime_turn.get("thread_id") or "")
+            if not supplied_turn_id or not supplied_thread_id:
+                raise ValueError("runtime_turn must include turn_id and thread_id")
+            stored_turn = control_plane._get_conn().execute(
+                "SELECT * FROM runtime_turns WHERE turn_id = ?",
+                (supplied_turn_id,),
+            ).fetchone()
+            supplied_thread = control_plane.get_runtime_thread(supplied_thread_id)
+            if (
+                stored_turn is None
+                or supplied_thread is None
+                or stored_turn["thread_id"] != supplied_thread_id
+                or stored_turn["session_id"] != session_id
+                or supplied_thread["session_id"] != session_id
+            ):
+                raise ValueError("runtime_turn does not belong to the requested session")
+            runtime_turn = control_plane._row_to_dict(stored_turn)
+            runtime_thread = supplied_thread
         recovery_runtime_events = self._latest_runtime_events_for_session(
             control_plane,
             session_id,
@@ -1056,17 +1094,18 @@ class AgentRunner:
                 title=user_content[:80],
                 metadata={"chat_id": chat.id, "source": "runner", "profile_id": profile_id},
             )
-        runtime_turn = control_plane.start_runtime_turn(
-            runtime_thread["thread_id"],
-            user_input=user_content,
-            metadata=self._runtime_turn_metadata(
-                request,
-                agent_id=agent_id,
-                profile_id=profile_id,
-                tool_access_mode=tool_access_mode,
-                memory_references=memory_references,
-            ),
-        )
+        if runtime_turn is None:
+            runtime_turn = control_plane.start_runtime_turn(
+                runtime_thread["thread_id"],
+                user_input=user_content,
+                metadata=self._runtime_turn_metadata(
+                    request,
+                    agent_id=agent_id,
+                    profile_id=profile_id,
+                    tool_access_mode=tool_access_mode,
+                    memory_references=memory_references,
+                ),
+            )
 
         def persist_event(event: AgentEvent) -> AgentEvent:
             payload = event.model_dump(exclude_none=True)

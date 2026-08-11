@@ -9,7 +9,11 @@ import pytest
 
 from open_agent.control_plane import ControlPlane
 from open_agent.durable_runtime.models import InboxEvent
-from open_agent.durable_runtime.repository import DurableRuntimeRepository, StaleClaimError
+from open_agent.durable_runtime.repository import (
+    DurableRuntimeRepository,
+    StaleClaimError,
+    StateConflictError,
+)
 from open_agent.gateway.contracts import ChannelCapabilities, NormalizedInboundEvent
 from open_agent.gateway.ingress import IngressService, IngressWorker
 from open_agent.gateway.router import GatewayRouter
@@ -218,6 +222,24 @@ def test_invalid_webhook_never_parses_or_enqueues(runtime):
     assert repository.list_inbox() == []
 
 
+def test_authenticated_account_cannot_be_rebound_by_normalized_payload(runtime):
+    _, repository = runtime
+    service, _ = ingress_service(repository)
+    adapter = Adapter(inbound(account_id="another-account"))
+    body = b'{"text":"hello"}'
+
+    with pytest.raises(SecurityViolation, match="account mismatch"):
+        service.accept_webhook(
+            adapter,
+            body,
+            signed_headers(body),
+            account_id="account-1",
+            remote_ip="203.0.113.7",
+        )
+
+    assert repository.list_inbox() == []
+
+
 def test_webhook_does_not_ack_when_durable_enqueue_fails(runtime):
     _, repository = runtime
     service, ledger = ingress_service(repository)
@@ -280,6 +302,21 @@ def test_polling_cursor_is_committed_only_after_event_is_durable_and_survives_re
         assert resumed["claim_owner"] is None
     finally:
         reopened.close()
+
+
+def test_checkpoint_cannot_advance_before_referenced_event_is_durable(runtime):
+    _, repository = runtime
+    service, _ = ingress_service(repository)
+
+    with pytest.raises(StateConflictError, match="before its event is durable"):
+        service.commit_checkpoint(
+            "account-1",
+            "polling",
+            cursor="cursor-too-early",
+            processed_event_key="missing-event",
+        )
+
+    assert service.get_checkpoint("account-1", "polling") is None
 
 
 def test_gateway_resume_checkpoint_is_persistent_and_sequence_cannot_regress(runtime):
@@ -376,6 +413,43 @@ async def test_restart_recovers_expired_dispatch_claim_and_reuses_existing_turn(
     assert recovered_runner.calls[0][1]["turn_id"] == first_turn["turn_id"]
 
 
+@pytest.mark.asyncio
+async def test_restart_after_completed_agent_turn_only_finishes_inbox(runtime):
+    control_plane, repository = runtime
+    service, _ = ingress_service(repository)
+    receipt = service.accept_polled_event(inbound())
+    claimed = repository.claim_due_inbox(
+        "worker-before-crash", NOW, NOW + timedelta(seconds=10), limit=1
+    )[0]
+    route = claimed.payload["route"]
+    turn = repository.dispatch_inbox_with_turn(
+        claimed.event_id,
+        claimed.claim,
+        thread_id=route["thread_id"],
+        session_id=route["session_id"],
+        user_input="hello",
+        now=NOW,
+    )
+    control_plane.complete_runtime_turn(turn["turn_id"], status="completed")
+
+    runner = RecordingRunner()
+    restart_now = NOW + timedelta(seconds=10)
+    worker = IngressWorker(
+        repository,
+        GatewayRouter(repository, now=lambda: restart_now),
+        runner,
+        worker_id="worker-after-crash",
+        now=lambda: restart_now,
+    )
+
+    summary = await worker.run_once()
+
+    assert summary.succeeded == 1
+    assert repository.get_inbox(receipt.event_id).state == "succeeded"
+    assert runner.calls == []
+    assert len(control_plane.list_runtime_turns(turn["thread_id"])) == 1
+
+
 def test_stale_dispatch_owner_cannot_complete_after_recovery(runtime):
     _, repository = runtime
     service, _ = ingress_service(repository)
@@ -402,4 +476,3 @@ def test_stale_dispatch_owner_cannot_complete_after_recovery(runtime):
     with pytest.raises(StaleClaimError):
         repository.complete_inbox(receipt.event_id, first.claim, NOW + timedelta(seconds=10))
     repository.complete_inbox(receipt.event_id, second.claim, NOW + timedelta(seconds=11))
-

@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from open_agent.app.runner.api import router
-from open_agent.app.runner.models import AgentRequest
+from open_agent.app.runner.models import AgentEvent, AgentRequest
 from open_agent.app.runner.runner import AgentRunner
 from open_agent.control_plane import ControlPlane
 
@@ -96,22 +96,6 @@ class TestRuntimeApi(unittest.TestCase):
         self.assertEqual(metadata["attachments"][0]["name"], "notes.md")
         self.assertNotIn("data", metadata["attachments"][0])
 
-    def test_runtime_turn_metadata_preserves_durable_source_event_key(self):
-        request = AgentRequest(
-            session_id="session_gateway",
-            messages=[{"role": "user", "content": "hello"}],
-            meta={"source_event_key": '["account-1","event-1"]'},
-        )
-
-        metadata = AgentRunner()._runtime_turn_metadata(
-            request,
-            agent_id="main",
-            profile_id="main",
-            tool_access_mode="default",
-        )
-
-        self.assertEqual(metadata["source_event_key"], '["account-1","event-1"]')
-
     def test_memory_recall_excludes_already_injected_memories(self):
         memory_manager = Mock()
         memory_manager.recall.return_value = [
@@ -128,3 +112,40 @@ class TestRuntimeApi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_runtime_turn_metadata_preserves_durable_source_event_key():
+    request = AgentRequest(
+        session_id="session_gateway",
+        messages=[{"role": "user", "content": "hello"}],
+        meta={"source_event_key": '["account-1","event-1"]'},
+    )
+
+    metadata = AgentRunner()._runtime_turn_metadata(
+        request,
+        agent_id="main",
+        profile_id="main",
+        tool_access_mode="default",
+    )
+
+    assert metadata["source_event_key"] == '["account-1","event-1"]'
+
+
+async def test_run_stream_reuses_process_message_instead_of_creating_an_agent_loop():
+    runner = AgentRunner()
+    request = AgentRequest(
+        session_id="session_gateway",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    turn = {"turn_id": "turn-existing", "thread_id": "thread-existing"}
+    observed = []
+
+    async def fake_process_message(received, *, runtime_turn=None):
+        observed.append((received, runtime_turn))
+        yield AgentEvent(event="complete", session_id=received.session_id)
+
+    runner.process_message = fake_process_message
+    emitted = [event async for event in runner.run_stream(request, runtime_turn=turn)]
+
+    assert [event.event for event in emitted] == ["complete"]
+    assert observed == [(request, turn)]
