@@ -49,3 +49,7 @@ Task 12: fix round 1/5 (3 HIGH and 5 MEDIUM TypeScript/code findings addressed: 
 Task 12: fix round 2/5 (bootstrap single-flight, one-shot reauth continuations, duplicate refresh, capability-bound reauthentication, and pre-publication session reservation/CAS addressed; TypeScript and security reviews clean)
 Task 12: fix round 3/5 (channel-route abort/epoch/account fencing and semantic tab keyboard navigation addressed)
 Task 12: complete (three RED commits; frontend model/build, 23 API tests, 11 Rust tests, 80% changed auth/API coverage; final TypeScript/code/security reviews 0 Critical / 0 High / 0 Medium)
+Task 13: RED b40c33a (six initial cross-system scenarios; 3 expected failures / 3 passes)
+Task 13: fix round 1/5 (retention acknowledgement sentinel, public audit/projection assertions, cross-process first-init proof, and migration runbook accuracy addressed)
+Task 13: verification (8 E2E passed; Tasks1-12 expanded 538 passed/2 skipped; Web/model/mobile/release/desktop packaging gates passed; repository-wide coverage command exceeded bounded execution window without reporting a test failure)
+Task 13: complete (RED b40c33a plus final implementation commit; combined E2E/retention/API 107 passed/2 skipped; final Python/code/security reviews 0 Critical / 0 High / 0 Medium)

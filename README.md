@@ -108,4 +108,5 @@ Use `npm run build:clean` only when a full local rebuild is required.
 - English docs: [README.en.md](./README.en.md)
 - 中文文档: [README.zh-CN.md](./README.zh-CN.md)
 - Desktop shell notes: [desktop/README.md](./desktop/README.md)
+- Autonomous runtime operations: [docs/autonomous-runtime-operations.md](./docs/autonomous-runtime-operations.md)
 - License: [LICENSE](./LICENSE)

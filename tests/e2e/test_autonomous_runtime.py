@@ -8,6 +8,9 @@ scripted so the suite never sleeps, reaches the network or reads host secrets.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +20,9 @@ import pytest
 from open_agent.app.runner.models import AgentEvent
 from open_agent.control_plane import ControlPlane
 from open_agent.durable_runtime.delivery import DeliveryWorker
+from open_agent.durable_runtime.models import InboxEvent, OutboxObligation
 from open_agent.durable_runtime.repository import DurableRuntimeRepository, GoalOperatorService
+from open_agent.durable_runtime.retention import RetentionPolicy, RetentionWorker
 from open_agent.durable_runtime.supervisor import DurableRuntimeSupervisor, WorkerSpec
 from open_agent.gateway.adapters.base_http import HttpResponse
 from open_agent.gateway.adapters.telegram import TelegramAdapter
@@ -281,17 +286,17 @@ async def test_ambiguous_remote_send_survives_restart_and_requires_manual_duplic
     with pytest.raises(ValueError, match="duplicate risk"):
         recovered.manual_resend(
             original.obligation_id, actor_id="operator", duplicate_risk_acknowledged=False,
-            acknowledgement_version="delivery-risk-v1", now=clock(), resend_id="manual-1",
+            acknowledgement_version="1", now=clock(), resend_id="manual-1",
         )
     resent = recovered.manual_resend(
         original.obligation_id, actor_id="operator", duplicate_risk_acknowledged=True,
-        acknowledgement_version="delivery-risk-v1", now=clock(), resend_id="manual-1",
+        acknowledgement_version="1", now=clock(), resend_id="manual-1",
     )
     assert resent.state == "pending"
-    audit = control._get_conn().execute(
-        "SELECT action, actor_id FROM runtime_audit_log WHERE subject_id=?", (original.obligation_id,)
-    ).fetchone()
-    assert tuple(audit) == ("manual_resend", "operator")
+    audit = repository.list_audit_events("outbox", original.obligation_id)
+    assert [(item["action"], item["actor_id"]) for item in audit] == [
+        ("manual_resend", "operator")
+    ]
     control.close()
 
 
@@ -374,8 +379,8 @@ async def test_goal_continues_after_restart_then_completes_with_strict_evidence_
     assert terminal.state == "completed"
     goal = control.get_goal(first.goal_id)
     assert goal["status"] == "completed"
-    assert goal["used_iterations"] == 2
-    assert goal["used_tokens"] == 2
+    assert goal["consumed_iterations"] == 2
+    assert goal["consumed_tokens"] == 2
     repository_states = [item.state for item in raw.list_outbox()]
     assert repository_states
     assert repository_states == ["pending"]
@@ -414,3 +419,105 @@ def test_operations_runbook_and_readme_are_published():
     ):
         assert required.casefold() in text.casefold()
     assert "docs/autonomous-runtime-operations.md" in readme
+
+
+def test_retention_redacts_secret_sentinels_is_idempotent_and_survives_reopen(tmp_path):
+    now = START
+    old = now - timedelta(days=31)
+    secret = "E2E-SECRET-SENTINEL-DO-NOT-LOG"
+    control = ControlPlane(tmp_path)
+    repository = DurableRuntimeRepository(control, retention_hmac_key=b"r" * 32)
+    attachments = tmp_path / "attachments"
+    attachments.mkdir()
+    repository.enqueue_inbox(
+        InboxEvent(
+            "expired-inbox", "expired-key", "account", "conversation",
+            {"text": secret}, created_at=old, updated_at=old,
+        )
+    )
+    repository.enqueue_outbox(
+        OutboxObligation(
+            "expired-outbox", "expired-idempotency", "channel:account",
+            {"content": secret}, created_at=old, updated_at=old,
+        )
+    )
+    with control._get_conn() as connection:
+        connection.execute("UPDATE inbox_events SET state='succeeded'")
+        connection.execute(
+            "UPDATE outbox_obligations SET state='acknowledged', acknowledgement=?, last_error=?",
+            (json.dumps({"provider": secret}), secret),
+        )
+    seeded = repository.get_outbox("expired-outbox")
+    assert seeded is not None
+    assert secret in json.dumps(
+        {"payload": dict(seeded.payload), "ack": dict(seeded.acknowledgement or {}),
+         "error": seeded.last_error}
+    )
+    policy = RetentionPolicy(
+        timedelta(days=30), timedelta(days=30), timedelta(days=30), batch_limit=10
+    )
+    worker = RetentionWorker(repository, policy, attachments)
+    first = worker.run_once(now)
+    second = worker.run_once(now)
+    assert (first.inbox_redacted, first.outbox_redacted) == (1, 1)
+    assert (second.inbox_redacted, second.outbox_redacted) == (0, 0)
+    control.close()
+
+    control = ControlPlane(tmp_path)
+    repository = DurableRuntimeRepository(control, retention_hmac_key=b"r" * 32)
+    inbox_rows = repository.list_inbox()
+    outbox_rows = repository.list_outbox()
+    assert len(inbox_rows) == len(outbox_rows) == 1
+    inbox, outbox = inbox_rows[0], outbox_rows[0]
+    assert secret not in json.dumps(
+        {
+            "inbox": dict(inbox.payload),
+            "outbox": dict(outbox.payload),
+            "acknowledgement": (
+                dict(outbox.acknowledgement)
+                if outbox.acknowledgement is not None else None
+            ),
+            "error": outbox.last_error,
+        }
+    )
+    control.close()
+
+
+def test_database_concurrent_first_init_and_reopen_are_idempotent(tmp_path):
+    gate = tmp_path / "start.gate"
+    program = (
+        "from open_agent.control_plane import ControlPlane; from pathlib import Path; import os,sys; "
+        "root=Path(sys.argv[1]); gate=Path(sys.argv[2]); "
+        "(root / ('ready.'+str(os.getpid()))).write_text('ready'); "
+        "\nwhile not gate.exists(): pass\n"
+        "c=ControlPlane(root); "
+        "assert c._get_conn().execute('PRAGMA integrity_check').fetchone()[0]=='ok'; "
+        "c.close()"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", program, str(tmp_path), str(gate)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for _ in range(2)
+    ]
+    deadline = time.monotonic() + 10
+    try:
+        while len(tuple(tmp_path.glob("ready.*"))) != 2:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("concurrent initialization children did not become ready")
+        gate.write_text("start", encoding="ascii")
+        results = [process.communicate(timeout=30) for process in processes]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+    assert [(process.returncode, stderr) for process, (_, stderr) in zip(processes, results)] == [
+        (0, ""), (0, "")
+    ]
+    final = ControlPlane(tmp_path)
+    assert final._get_conn().execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='runtime_turns'"
+    ).fetchone()[0] == 1
+    final.close()
