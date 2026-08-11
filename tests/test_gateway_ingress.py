@@ -172,6 +172,9 @@ def ingress_service(repository, *, order=None, now=lambda: NOW, limits=None, **c
         HierarchicalIngressLimiter(rules, now=now),
     )
     ledger = Ledger(order)
+    quota_snapshot = changes.pop(
+        "quota_snapshot", lambda event: QuotaSnapshot(attachment_bytes=0)
+    )
     service = IngressService(
         repository,
         GatewayRouter(repository, now=now),
@@ -184,7 +187,7 @@ def ingress_service(repository, *, order=None, now=lambda: NOW, limits=None, **c
             max_agents_per_conversation=1,
         ),
         quota_ledger=ledger,
-        quota_snapshot=lambda event: QuotaSnapshot(attachment_bytes=0),
+        quota_snapshot=quota_snapshot,
         now=now,
         limits=limits or IngressLimits(),
         **changes,
@@ -914,6 +917,182 @@ def test_runtime_terminal_event_and_status_are_one_idempotent_commit(runtime):
         if event["event_type"] in {"complete", "cancelled", "error"}
     ]
     assert len(terminal_events) == 1
+
+
+def test_polled_enqueue_requires_live_matching_transport_claim(runtime):
+    _, repository = runtime
+    now = [NOW]
+    service, _ = ingress_service(repository, now=lambda: now[0])
+
+    with pytest.raises((TypeError, ValueError), match="claim"):
+        service.accept_polled_event(inbound(), cursor="cursor-1")
+
+    claim = service.claim_checkpoint(
+        "account-1", "polling", owner_id="poller", lease_duration=timedelta(seconds=10)
+    )
+    receipt = service.accept_polled_event(
+        inbound(), cursor="cursor-1", claim=claim
+    )
+    assert repository.get_inbox(receipt.event_id) is not None
+
+    now[0] += timedelta(seconds=10)
+    with pytest.raises(StaleClaimError):
+        service.accept_polled_event(
+            inbound(event_key="stale"), cursor="cursor-2", claim=claim
+        )
+
+
+def test_gateway_enqueue_rejects_polling_claim_mode_mismatch(runtime):
+    _, repository = runtime
+    service, _ = ingress_service(repository)
+    polling_claim = service.claim_checkpoint(
+        "account-1", "polling", owner_id="poller", lease_duration=timedelta(seconds=30)
+    )
+
+    with pytest.raises(StateConflictError, match="transport"):
+        service.accept_polled_event(
+            inbound(), transport_mode="gateway", gateway_session_id="session-1",
+            gateway_sequence=1, claim=polling_claim,
+        )
+
+
+def test_duplicate_and_quota_rejection_do_not_write_attachments(runtime, tmp_path):
+    _, repository = runtime
+
+    class Guard:
+        def __init__(self):
+            self.ingest_calls = 0
+
+        def ingest(self, uploads, on_staging=None):
+            self.ingest_calls += 1
+            stored = (StoredAttachment("quarantine/attachment-1", 9, NOW + timedelta(days=1)),)
+            if on_staging:
+                on_staging(stored)
+            return stored
+
+        def rollback(self, stored):
+            raise AssertionError("preflight rejection must not need attachment rollback")
+
+    body = b'{"text":"hello"}'
+    first, _ = ingress_service(repository)
+    first.accept_webhook(
+        Adapter(inbound()), body, signed_headers(body, nonce="first"),
+        account_id="account-1", remote_ip="203.0.113.7",
+    )
+    guard = Guard()
+    duplicate, _ = ingress_service(repository, attachment_guard=guard)
+    duplicate.accept_webhook(
+        Adapter(inbound(attachments=({
+            "filename": "evidence.pdf", "claimed_content_type": "application/pdf",
+            "content": b"%PDF-safe",
+        },))), body, signed_headers(body, nonce="second"),
+        account_id="account-1", remote_ip="203.0.113.7",
+    )
+    assert guard.ingest_calls == 0
+
+    control_plane = ControlPlane(tmp_path / "quota-case")
+    quota_repository = DurableRuntimeRepository(control_plane)
+    quota_repository.upsert_channel_account(
+        account_id="account-1", adapter_kind="test", default_profile_id="main", now=NOW
+    )
+    try:
+        quota_guard = Guard()
+        rejected, _ = ingress_service(
+            quota_repository, attachment_guard=quota_guard,
+            quota_snapshot=lambda event: QuotaSnapshot(attachment_bytes=2**21),
+        )
+        with pytest.raises(SecurityViolation, match="attachment quota"):
+            rejected.accept_webhook(
+                Adapter(inbound(attachments=({
+                    "filename": "evidence.pdf",
+                    "claimed_content_type": "application/pdf",
+                    "content": b"%PDF-safe",
+                },))), body, signed_headers(body),
+                account_id="account-1", remote_ip="203.0.113.7",
+            )
+        assert quota_guard.ingest_calls == 0
+    finally:
+        control_plane.close()
+
+
+def test_attachment_staging_rolls_back_db_failure_and_crash_retry(runtime):
+    _, repository = runtime
+
+    class StagingGuard:
+        def __init__(self):
+            self.counter = 0
+            self.rolled_back = []
+
+        def ingest(self, uploads, on_staging=None):
+            tuple(uploads)
+            self.counter += 1
+            stored = (StoredAttachment(
+                f"quarantine/attachment-{self.counter}", 9, NOW + timedelta(days=1)
+            ),)
+            if on_staging:
+                on_staging(stored)
+            return stored
+
+        def rollback(self, stored):
+            self.rolled_back.append(tuple(item.storage_path for item in stored))
+
+    guard = StagingGuard()
+    service, _ = ingress_service(repository, attachment_guard=guard)
+    claim = service.claim_checkpoint(
+        "account-1", "polling", owner_id="poller", lease_duration=timedelta(seconds=30)
+    )
+    original = repository.enqueue_inbox
+
+    def crash_after_storage(*args, **kwargs):
+        raise SystemExit("simulated process death")
+
+    repository.enqueue_inbox = crash_after_storage
+    event = inbound(attachments=({
+        "filename": "evidence.pdf", "claimed_content_type": "application/pdf",
+        "content": b"%PDF-safe",
+    },))
+    with pytest.raises(SystemExit):
+        service.accept_polled_event(event, cursor="cursor-1", claim=claim)
+
+    repository.enqueue_inbox = original
+    receipt = service.accept_polled_event(event, cursor="cursor-1", claim=claim)
+
+    assert guard.rolled_back == [("quarantine/attachment-1",)]
+    assert repository.get_inbox(receipt.event_id).payload["normalized_event"]["attachments"][0][
+        "storage_path"
+    ] == "quarantine/attachment-2"
+
+
+@pytest.mark.asyncio
+async def test_inbox_cannot_succeed_with_executing_tool_effect(runtime):
+    control_plane, repository = runtime
+    service, _ = ingress_service(repository)
+    claim = service.claim_checkpoint(
+        "account-1", "polling", owner_id="poller", lease_duration=timedelta(seconds=30)
+    )
+    receipt = service.accept_polled_event(inbound(), cursor="cursor-1", claim=claim)
+
+    class RunnerWithOrphanedEffect(RecordingRunner):
+        async def run_stream(self, request, *, runtime_turn):
+            source_key = request.meta["source_event_key"]
+            control_plane.claim_tool_effect(
+                session_id=request.session_id, turn_id=runtime_turn["turn_id"],
+                source_event_key=source_key, platform_tool_call_id="provider-call",
+                invocation_id="step:1:tool:1", tool_name="external_write",
+                arguments={"value": 1}, idempotency_mode="non_idempotent",
+                owner_id="effect-worker", now=NOW,
+                expires_at=NOW + timedelta(seconds=30),
+            )
+            control_plane.complete_runtime_turn(runtime_turn["turn_id"], status="completed")
+            yield SimpleNamespace(event="complete", error=None)
+
+    worker = IngressWorker(
+        repository, GatewayRouter(repository, now=lambda: NOW),
+        RunnerWithOrphanedEffect(control_plane), worker_id="inbox-worker", now=lambda: NOW,
+    )
+
+    assert (await worker.run_once()).failed == 1
+    assert repository.get_inbox(receipt.event_id).state == "dispatched"
 
 
 def test_stale_dispatch_owner_cannot_complete_after_recovery(runtime):

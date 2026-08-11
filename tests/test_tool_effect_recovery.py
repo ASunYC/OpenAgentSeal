@@ -134,3 +134,37 @@ def test_uncertain_claimed_effect_is_fenced_for_manual_reconciliation(control_pl
     assert unknown["state"] == "delivery_unknown"
     assert unknown["reconciliation"] == "manual_required"
     assert claim(control_plane, "worker-2", NOW + timedelta(seconds=2))["disposition"] == "manual_reconciliation"
+
+
+def test_retry_admission_blocks_live_and_promotes_expired_non_idempotent(control_plane):
+    effect = claim(control_plane, "worker-1", NOW)
+
+    with pytest.raises(RuntimeError, match="live executing"):
+        control_plane.prepare_tool_effect_retry(
+            '["account-1","event-1"]', now=NOW + timedelta(seconds=1)
+        )
+
+    with pytest.raises(RuntimeError, match="manual reconciliation"):
+        control_plane.prepare_tool_effect_retry(
+            '["account-1","event-1"]', now=NOW + timedelta(seconds=10)
+        )
+    stored = control_plane.get_tool_call(effect["tool_call_id"])
+    assert stored["state"] == "delivery_unknown"
+    assert stored["reconciliation"] == "manual_required"
+
+
+def test_expired_idempotent_effect_requires_explicit_claim_recovery(control_plane):
+    effect = claim(control_plane, "worker-1", NOW, mode="idempotent")
+
+    assert control_plane.prepare_tool_effect_retry(
+        '["account-1","event-1"]', now=NOW + timedelta(seconds=10)
+    ) is True
+    unchanged = control_plane.get_tool_call(effect["tool_call_id"])
+    assert unchanged["state"] == "executing"
+    assert unchanged["claim_owner"] == "worker-1"
+
+    recovered = claim(
+        control_plane, "worker-2", NOW + timedelta(seconds=10), mode="idempotent"
+    )
+    assert recovered["disposition"] == "execute"
+    assert recovered["claim_generation"] == effect["claim_generation"] + 1
