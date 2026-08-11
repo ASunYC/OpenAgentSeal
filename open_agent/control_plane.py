@@ -326,6 +326,9 @@ class ControlPlane:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 retained_at TEXT,
+                retention_attachment_paths TEXT,
+                retention_attachment_key_id TEXT,
+                retention_attachment_tag TEXT,
                 UNIQUE(account_id, event_key)
             );
 
@@ -345,6 +348,9 @@ class ControlPlane:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 retained_at TEXT,
+                retention_attachment_paths TEXT,
+                retention_attachment_key_id TEXT,
+                retention_attachment_tag TEXT,
                 UNIQUE(destination, idempotency_key)
             );
 
@@ -417,21 +423,39 @@ class ControlPlane:
             CREATE TABLE IF NOT EXISTS retention_attachment_queue (
                 queue_id TEXT PRIMARY KEY,
                 storage_path TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                work_id TEXT NOT NULL UNIQUE,
+                generation TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
                 queued_at TEXT NOT NULL,
                 attempt INTEGER NOT NULL DEFAULT 0,
                 next_attempt_at TEXT NOT NULL,
-                last_error TEXT
+                last_error TEXT,
+                claim_owner TEXT,
+                claim_token TEXT,
+                claim_generation INTEGER NOT NULL DEFAULT 0,
+                claim_expires_at TEXT,
+                file_identity TEXT NOT NULL,
+                file_identity_tag TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS retention_attachment_backlog (
                 backlog_id TEXT PRIMARY KEY,
                 storage_paths TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                generation TEXT NOT NULL,
+                backlog_tag TEXT NOT NULL,
                 queued_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS retention_attachment_dead_letters (
                 dead_letter_id TEXT PRIMARY KEY,
                 storage_path TEXT NOT NULL UNIQUE,
+                key_id TEXT NOT NULL,
+                work_id TEXT NOT NULL UNIQUE,
+                generation TEXT NOT NULL,
+                file_identity TEXT NOT NULL,
+                file_identity_tag TEXT NOT NULL,
                 attempt INTEGER NOT NULL,
                 last_error TEXT NOT NULL,
                 quarantined_at TEXT NOT NULL
@@ -483,12 +507,51 @@ class ControlPlane:
             self._ensure_column(conn, "scheduler_jobs", definition)
         self._ensure_column(conn, "inbox_events", "retained_at TEXT")
         self._ensure_column(conn, "outbox_obligations", "retained_at TEXT")
+        for table in ("inbox_events", "outbox_obligations"):
+            for definition in (
+                "retention_attachment_paths TEXT",
+                "retention_attachment_key_id TEXT",
+                "retention_attachment_tag TEXT",
+            ):
+                self._ensure_column(conn, table, definition)
         self._ensure_column(conn, "runtime_retention_tombstones", "key_id TEXT")
         self._ensure_column(conn, "retention_attachment_queue", "next_attempt_at TEXT")
+        for definition in (
+            "key_id TEXT",
+            "work_id TEXT",
+            "generation TEXT",
+            "state TEXT NOT NULL DEFAULT 'pending'",
+            "claim_owner TEXT",
+            "claim_token TEXT",
+            "claim_generation INTEGER NOT NULL DEFAULT 0",
+            "claim_expires_at TEXT",
+            "file_identity TEXT",
+            "file_identity_tag TEXT",
+        ):
+            self._ensure_column(conn, "retention_attachment_queue", definition)
+        for definition in (
+            "key_id TEXT",
+            "work_id TEXT",
+            "generation TEXT",
+            "file_identity TEXT",
+            "file_identity_tag TEXT",
+        ):
+            self._ensure_column(
+                conn, "retention_attachment_dead_letters", definition
+            )
+        for definition in (
+            "key_id TEXT",
+            "generation TEXT",
+            "backlog_tag TEXT",
+        ):
+            self._ensure_column(conn, "retention_attachment_backlog", definition)
         conn.execute(
             """UPDATE retention_attachment_queue SET next_attempt_at = queued_at
                WHERE next_attempt_at IS NULL"""
         )
+        conn.execute("DROP INDEX IF EXISTS idx_attachment_retention_due")
+        conn.execute("DROP INDEX IF EXISTS idx_attachment_retention_work")
+        conn.execute("DROP INDEX IF EXISTS idx_attachment_dead_letter_work")
         conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_inbox_retention_due
@@ -500,9 +563,17 @@ class ControlPlane:
                 )
                 WHERE state IN ('acknowledged', 'dead_letter', 'delivery_unknown');
             CREATE INDEX IF NOT EXISTS idx_attachment_retention_due
-                ON retention_attachment_queue(next_attempt_at, queue_id);
+                ON retention_attachment_queue(
+                    state, next_attempt_at, claim_expires_at, queue_id
+                );
+            CREATE INDEX IF NOT EXISTS idx_attachment_retention_path
+                ON retention_attachment_queue(storage_path);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_attachment_retention_work
+                ON retention_attachment_queue(work_id);
             CREATE INDEX IF NOT EXISTS idx_attachment_dead_letter_time
                 ON retention_attachment_dead_letters(quarantined_at, dead_letter_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_attachment_dead_letter_work
+                ON retention_attachment_dead_letters(work_id);
             CREATE INDEX IF NOT EXISTS idx_retention_tombstone_key_id
                 ON runtime_retention_tombstones(key_id);
             """

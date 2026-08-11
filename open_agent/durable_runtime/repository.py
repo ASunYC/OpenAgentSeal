@@ -8,7 +8,9 @@ import hmac
 import re
 import sqlite3
 import time
+import unicodedata
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import isfinite
 from typing import Any, Callable, Iterable, Mapping, TYPE_CHECKING
@@ -32,6 +34,22 @@ class StaleClaimError(RuntimeError):
 
 class StateConflictError(RuntimeError):
     """The requested transition is illegal from persisted state."""
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionAttachmentClaim:
+    """Authenticated lease for one immutable attachment-retention occurrence."""
+
+    queue_id: str
+    storage_path: str
+    key_id: str
+    work_id: str
+    generation: str
+    claim_owner: str
+    claim_token: str
+    claim_generation: int
+    claim_expires_at: datetime
+    file_identity: str
 
 
 _CLAIM_TARGETS = {
@@ -59,6 +77,16 @@ def _require_limit(limit: int) -> None:
 
 _OPAQUE_CREDENTIAL_REF = re.compile(r"oas-cred:[0-9a-f]{32}\Z")
 _RETENTION_DIGEST_ID = re.compile(r"[0-9a-f]{64}\Z")
+_CANONICAL_ATTACHMENT_SEGMENT = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
+_WINDOWS_RESERVED_SEGMENTS = {
+    "aux",
+    "con",
+    "nul",
+    "prn",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
+_RETENTION_CLAIM_TTL = timedelta(minutes=5)
 
 
 def _require_opaque_credential_ref(value: str | None) -> None:
@@ -80,6 +108,31 @@ def _iso(value: datetime) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(to_json_value(value), ensure_ascii=False, separators=(",", ":"))
+
+
+def _canonical_attachment_storage_path(value: str) -> str:
+    """Require one cross-platform path spelling for SQLite identity checks."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 512
+        or value != unicodedata.normalize("NFC", value)
+        or value != value.lower()
+        or "\\" in value
+        or value.startswith("/")
+        or value.endswith("/")
+        or "//" in value
+    ):
+        raise ValueError("storage_path must use the canonical managed-path grammar")
+    parts = value.split("/")
+    for part in parts:
+        if (
+            _CANONICAL_ATTACHMENT_SEGMENT.fullmatch(part) is None
+            or part.endswith((".", " "))
+            or part.split(".", 1)[0] in _WINDOWS_RESERVED_SEGMENTS
+        ):
+            raise ValueError("storage_path must use the canonical managed-path grammar")
+    return value
 
 
 def _claim_from_row(row: sqlite3.Row) -> ClaimToken | None:
@@ -106,9 +159,13 @@ class DurableRuntimeRepository:
             raise ValueError("retention HMAC keys must contain at least 32 bytes")
         if len(retention_keys) > 8:
             raise ValueError("at most 8 retention HMAC keys may be active")
+        key_ids = tuple(self._retention_key_id(key) for key in retention_keys)
+        if len(set(key_ids)) != len(key_ids):
+            raise ValueError("retention HMAC key identifiers must be unique")
         self.control_plane = control_plane
         self._retention_hmac_keys = retention_keys
-        self._validate_retention_key_registry(self._conn)
+        self._retention_keys_by_id = dict(zip(key_ids, retention_keys))
+        self._migrate_retention_attachment_rows()
 
     def upsert_channel_account(
         self,
@@ -482,6 +539,11 @@ class DurableRuntimeRepository:
     def enqueue_inbox(self, event: InboxEvent) -> InboxEvent:
         if event.state != "pending" or event.claim is not None:
             raise ValueError("new inbox events must be pending and unclaimed")
+        attachment_paths, attachment_key_id, attachment_tag = (
+            self._retention_attachment_source_fields(
+                "inbox", event.event_id, event.payload
+            )
+        )
         conn = self._conn
         with conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -496,13 +558,22 @@ class DurableRuntimeRepository:
                 if row is None:
                     raise StateConflictError("inbox retention tombstone is orphaned")
                 return self._inbox(row)
+            if attachment_key_id is not None:
+                self._validate_retention_key_registry(conn)
+                conn.execute(
+                    """INSERT INTO retention_key_registry (key_id, first_used_at)
+                       VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
+                    (attachment_key_id, _iso(event.created_at)),
+                )
             conn.execute(
                 """
                 INSERT INTO inbox_events (
                     event_id, event_key, account_id, conversation_id, payload, state,
                     attempt, next_attempt_at, last_error, claim_owner,
-                    claim_generation, claim_expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    claim_generation, claim_expires_at, created_at, updated_at,
+                    retention_attachment_paths, retention_attachment_key_id,
+                    retention_attachment_tag
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id, event_key) DO NOTHING
                 """,
                 (
@@ -520,6 +591,9 @@ class DurableRuntimeRepository:
                     _iso(event.claim.expires_at) if event.claim else None,
                     _iso(event.created_at),
                     _iso(event.updated_at),
+                    attachment_paths,
+                    attachment_key_id,
+                    attachment_tag,
                 ),
             )
             row = conn.execute(
@@ -645,6 +719,11 @@ class DurableRuntimeRepository:
     def enqueue_outbox(self, obligation: OutboxObligation) -> OutboxObligation:
         if obligation.state != "pending" or obligation.claim is not None:
             raise ValueError("new outbox obligations must be pending and unclaimed")
+        attachment_paths, attachment_key_id, attachment_tag = (
+            self._retention_attachment_source_fields(
+                "outbox", obligation.obligation_id, obligation.payload
+            )
+        )
         conn = self._conn
         with conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -659,13 +738,22 @@ class DurableRuntimeRepository:
                 if row is None:
                     raise StateConflictError("outbox retention tombstone is orphaned")
                 return self._outbox(row)
+            if attachment_key_id is not None:
+                self._validate_retention_key_registry(conn)
+                conn.execute(
+                    """INSERT INTO retention_key_registry (key_id, first_used_at)
+                       VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
+                    (attachment_key_id, _iso(obligation.created_at)),
+                )
             conn.execute(
                 """
                 INSERT INTO outbox_obligations (
                     obligation_id, idempotency_key, destination, payload, state,
                     attempt, next_attempt_at, last_error, acknowledgement,
-                    claim_owner, claim_generation, claim_expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    claim_owner, claim_generation, claim_expires_at, created_at, updated_at,
+                    retention_attachment_paths, retention_attachment_key_id,
+                    retention_attachment_tag
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(destination, idempotency_key) DO NOTHING
                 """,
                 (
@@ -683,6 +771,9 @@ class DurableRuntimeRepository:
                     _iso(obligation.claim.expires_at) if obligation.claim else None,
                     _iso(obligation.created_at),
                     _iso(obligation.updated_at),
+                    attachment_paths,
+                    attachment_key_id,
+                    attachment_tag,
                 ),
             )
             row = conn.execute(
@@ -707,6 +798,11 @@ class DurableRuntimeRepository:
             raise ValueError("agent task must be terminal before outbox production")
         if obligation.state != "pending" or obligation.claim is not None:
             raise ValueError("new outbox obligations must be pending and unclaimed")
+        attachment_paths, attachment_key_id, attachment_tag = (
+            self._retention_attachment_source_fields(
+                "outbox", obligation.obligation_id, obligation.payload
+            )
+        )
         identifiers = {
             name: task.get(name) for name in ("task_id", "profile_id", "session_id")
         }
@@ -774,13 +870,22 @@ class DurableRuntimeRepository:
                 conn, "outbox", obligation.destination, obligation.idempotency_key
             )
             if tombstone is None:
+                if attachment_key_id is not None:
+                    self._validate_retention_key_registry(conn)
+                    conn.execute(
+                        """INSERT INTO retention_key_registry (key_id, first_used_at)
+                           VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
+                        (attachment_key_id, _iso(obligation.created_at)),
+                    )
                 conn.execute(
                     """
                     INSERT INTO outbox_obligations (
                         obligation_id, idempotency_key, destination, payload, state,
                         attempt, next_attempt_at, last_error, acknowledgement,
-                        claim_owner, claim_generation, claim_expires_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        claim_owner, claim_generation, claim_expires_at, created_at, updated_at,
+                        retention_attachment_paths, retention_attachment_key_id,
+                        retention_attachment_tag
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(destination, idempotency_key) DO NOTHING
                     """,
                     (
@@ -798,6 +903,9 @@ class DurableRuntimeRepository:
                         None,
                         _iso(obligation.created_at),
                         _iso(obligation.updated_at),
+                        attachment_paths,
+                        attachment_key_id,
+                        attachment_tag,
                     ),
                 )
                 row = conn.execute(
@@ -932,6 +1040,7 @@ class DurableRuntimeRepository:
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             self._validate_retention_key_registry(conn)
+            self._assert_unambiguous_retention_attachment_state(conn)
             conn.execute(
                 """INSERT INTO retention_key_registry (key_id, first_used_at)
                    VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
@@ -939,7 +1048,10 @@ class DurableRuntimeRepository:
             )
             inbox_rows = conn.execute(
                 """
-                SELECT event_id, payload, account_id, event_key, state FROM inbox_events
+                SELECT event_id, payload, account_id, event_key, state,
+                       retention_attachment_paths, retention_attachment_key_id,
+                       retention_attachment_tag
+                FROM inbox_events
                 WHERE retained_at IS NULL AND updated_at <= ?
                   AND state IN ('succeeded', 'dead_letter')
                 ORDER BY updated_at, event_id LIMIT ?
@@ -949,7 +1061,9 @@ class DurableRuntimeRepository:
             remaining = limit - len(inbox_rows)
             outbox_rows = conn.execute(
                 """
-                SELECT obligation_id, payload, destination, idempotency_key, state
+                SELECT obligation_id, payload, destination, idempotency_key, state,
+                       retention_attachment_paths, retention_attachment_key_id,
+                       retention_attachment_tag
                 FROM outbox_obligations
                 WHERE retained_at IS NULL AND updated_at <= ?
                   AND state IN ('acknowledged', 'dead_letter', 'delivery_unknown')
@@ -971,50 +1085,129 @@ class DurableRuntimeRepository:
                 "SELECT COUNT(*) FROM retention_attachment_queue"
             ).fetchone()[0]
             queue_limit = min(limit, 64, max(0, 64 - queue_occupancy))
-            queued_attachment_paths: list[str] = []
+            queued_attachment_occurrences: list[tuple[str, str]] = []
+            queued_identities: dict[str, str] = {}
             backlog_rows = conn.execute(
-                """SELECT backlog_id, storage_paths
+                """SELECT backlog_id, storage_paths, key_id, generation, backlog_tag
                    FROM retention_attachment_backlog
                    ORDER BY queued_at, backlog_id LIMIT ?""",
                 (queue_limit,),
             ).fetchall()
             for backlog_row in backlog_rows:
-                paths = json.loads(backlog_row["storage_paths"])
-                if not isinstance(paths, list) or any(
-                    not isinstance(path, str) for path in paths
-                ):
-                    raise StateConflictError("invalid retention attachment backlog")
-                available = queue_limit - len(queued_attachment_paths)
-                if available <= 0:
-                    break
-                moving = paths[:available]
-                remaining_paths = paths[available:]
-                queued_attachment_paths.extend(moving)
-                if remaining_paths:
-                    conn.execute(
-                        """UPDATE retention_attachment_backlog SET storage_paths = ?
-                           WHERE backlog_id = ?""",
-                        (_json(remaining_paths), backlog_row["backlog_id"]),
-                    )
-                else:
-                    conn.execute(
-                        "DELETE FROM retention_attachment_backlog WHERE backlog_id = ?",
-                        (backlog_row["backlog_id"],),
-                    )
-
-            attachment_paths: list[str] = []
-            rejected_attachment_payloads = 0
-            for row in (*inbox_rows, *outbox_rows):
-                paths, overflow = self._attachment_paths(
-                    json.loads(row["payload"]), limit=64
+                occurrences = self._authenticate_retention_attachment_backlog(
+                    backlog_row
                 )
-                if overflow:
-                    rejected_attachment_payloads += 1
-                attachment_paths.extend(paths)
-            attachment_paths = list(dict.fromkeys(attachment_paths))
-            available = queue_limit - len(queued_attachment_paths)
-            queued_attachment_paths.extend(attachment_paths[:available])
-            deferred_attachment_paths = attachment_paths[available:]
+                remaining_occurrences: list[tuple[str, str]] = []
+                for storage_path, file_identity in occurrences:
+                    existing_identity = queued_identities.get(storage_path)
+                    if existing_identity is not None:
+                        if existing_identity != file_identity:
+                            raise StateConflictError(
+                                "retention attachment occurrences are ambiguous"
+                            )
+                        continue
+                    if len(queued_attachment_occurrences) < queue_limit:
+                        queued_attachment_occurrences.append(
+                            (storage_path, file_identity)
+                        )
+                        queued_identities[storage_path] = file_identity
+                    else:
+                        remaining_occurrences.append((storage_path, file_identity))
+                if remaining_occurrences:
+                    replacement = self._new_retention_attachment_backlog_page(
+                        remaining_occurrences
+                    )
+                    updated = conn.execute(
+                        """UPDATE retention_attachment_backlog
+                           SET backlog_id = ?, storage_paths = ?, key_id = ?,
+                               generation = ?, backlog_tag = ?
+                           WHERE backlog_id = ? AND storage_paths = ? AND key_id = ?
+                             AND generation = ? AND backlog_tag = ?""",
+                        (
+                            *replacement,
+                            backlog_row["backlog_id"],
+                            backlog_row["storage_paths"],
+                            backlog_row["key_id"],
+                            backlog_row["generation"],
+                            backlog_row["backlog_tag"],
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        raise StateConflictError(
+                            "retention attachment backlog state changed"
+                        )
+                else:
+                    deleted = conn.execute(
+                        """DELETE FROM retention_attachment_backlog
+                           WHERE backlog_id = ? AND storage_paths = ? AND key_id = ?
+                             AND generation = ? AND backlog_tag = ?""",
+                        (
+                            backlog_row["backlog_id"],
+                            backlog_row["storage_paths"],
+                            backlog_row["key_id"],
+                            backlog_row["generation"],
+                            backlog_row["backlog_tag"],
+                        ),
+                    )
+                    if deleted.rowcount != 1:
+                        raise StateConflictError(
+                            "retention attachment backlog state changed"
+                        )
+
+            attachment_occurrences: list[tuple[str, str]] = []
+            attachment_identities: dict[str, str] = {}
+            rejected_attachment_payloads = 0
+            for row in inbox_rows:
+                occurrences = self._authenticate_retention_attachment_source(
+                    row, "inbox", "event_id"
+                )
+                if not occurrences and self._unsigned_attachment_source_requires_migration(
+                    row["payload"]
+                ):
+                    raise StateConflictError(
+                        "unsigned inbox attachment source requires explicit migration"
+                    )
+                for storage_path, file_identity in occurrences:
+                    prior_identity = attachment_identities.get(storage_path)
+                    if prior_identity is not None and prior_identity != file_identity:
+                        raise StateConflictError(
+                            "retention attachment occurrences are ambiguous"
+                        )
+                    if prior_identity is None:
+                        attachment_occurrences.append((storage_path, file_identity))
+                        attachment_identities[storage_path] = file_identity
+            for row in outbox_rows:
+                occurrences = self._authenticate_retention_attachment_source(
+                    row, "outbox", "obligation_id"
+                )
+                if not occurrences and self._unsigned_attachment_source_requires_migration(
+                    row["payload"]
+                ):
+                    raise StateConflictError(
+                        "unsigned outbox attachment source requires explicit migration"
+                    )
+                for storage_path, file_identity in occurrences:
+                    prior_identity = attachment_identities.get(storage_path)
+                    if prior_identity is not None and prior_identity != file_identity:
+                        raise StateConflictError(
+                            "retention attachment occurrences are ambiguous"
+                        )
+                    if prior_identity is None:
+                        attachment_occurrences.append((storage_path, file_identity))
+                        attachment_identities[storage_path] = file_identity
+            source_candidates: list[tuple[str, str]] = []
+            for storage_path, file_identity in attachment_occurrences:
+                queued_identity = queued_identities.get(storage_path)
+                if queued_identity is not None:
+                    if queued_identity != file_identity:
+                        raise StateConflictError(
+                            "retention attachment occurrences are ambiguous"
+                        )
+                    continue
+                source_candidates.append((storage_path, file_identity))
+            available = queue_limit - len(queued_attachment_occurrences)
+            queued_attachment_occurrences.extend(source_candidates[:available])
+            deferred_attachment_occurrences = source_candidates[available:]
 
             inbox_retention = [
                 (
@@ -1072,28 +1265,80 @@ class DurableRuntimeRepository:
                         now_value,
                     ),
                 )
-            for storage_path in queued_attachment_paths:
-                conn.execute(
+            inserted_attachment_paths: list[str] = []
+            for storage_path, file_identity in queued_attachment_occurrences:
+                existing = conn.execute(
+                    """SELECT file_identity FROM retention_attachment_queue
+                       WHERE storage_path = ?
+                       UNION ALL
+                       SELECT file_identity FROM retention_attachment_dead_letters
+                       WHERE storage_path = ? LIMIT 1""",
+                    (storage_path, storage_path),
+                ).fetchone()
+                if existing is not None:
+                    if existing["file_identity"] != file_identity:
+                        raise StateConflictError(
+                            "retention attachment occurrence conflicts with active state"
+                        )
+                    continue
+                self._validate_retention_file_identity(file_identity)
+                key_id, work_id, generation, queue_id = (
+                    self._new_retention_attachment_identity(
+                        "queue", storage_path
+                    )
+                )
+                file_identity_tag = self._retention_file_identity_digest(
+                    "queue",
+                    storage_path,
+                    key_id,
+                    work_id,
+                    generation,
+                    file_identity,
+                    self._retention_hmac_keys[0],
+                )
+                inserted = conn.execute(
                     """INSERT INTO retention_attachment_queue (
-                           queue_id, storage_path, queued_at, next_attempt_at
-                       ) VALUES (?, ?, ?, ?) ON CONFLICT(queue_id) DO NOTHING""",
+                           queue_id, storage_path, key_id, work_id, generation,
+                           queued_at, next_attempt_at, file_identity,
+                           file_identity_tag
+                       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM retention_attachment_queue
+                           WHERE storage_path = ?
+                       ) AND NOT EXISTS (
+                           SELECT 1 FROM retention_attachment_dead_letters
+                           WHERE storage_path = ?
+                       )
+                       ON CONFLICT(queue_id) DO NOTHING""",
                     (
-                        self._retention_digest(storage_path),
+                        queue_id,
                         storage_path,
+                        key_id,
+                        work_id,
+                        generation,
                         now_value,
                         now_value,
+                        file_identity,
+                        file_identity_tag,
+                        storage_path,
+                        storage_path,
                     ),
                 )
-            for offset in range(0, len(deferred_attachment_paths), 64):
+                if inserted.rowcount != 1:
+                    raise StateConflictError(
+                        "retention attachment queue identity collision"
+                    )
+                inserted_attachment_paths.append(storage_path)
+            for offset in range(0, len(deferred_attachment_occurrences), 64):
+                page = self._new_retention_attachment_backlog_page(
+                    deferred_attachment_occurrences[offset : offset + 64]
+                )
                 conn.execute(
                     """INSERT INTO retention_attachment_backlog (
-                           backlog_id, storage_paths, queued_at
-                       ) VALUES (?, ?, ?)""",
-                    (
-                        f"backlog:{uuid.uuid4().hex}",
-                        _json(deferred_attachment_paths[offset : offset + 64]),
-                        now_value,
-                    ),
+                           backlog_id, storage_paths, key_id, generation,
+                           backlog_tag, queued_at
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (*page, now_value),
                 )
 
             if inbox_retention:
@@ -1103,7 +1348,10 @@ class DurableRuntimeRepository:
                             conversation_id = 'retained',
                             payload = '{}', last_error = NULL,
                             next_attempt_at = NULL, claim_owner = NULL,
-                            claim_expires_at = NULL, retained_at = ?
+                            claim_expires_at = NULL, retained_at = ?,
+                            retention_attachment_paths = NULL,
+                            retention_attachment_key_id = NULL,
+                            retention_attachment_tag = NULL
                         WHERE event_id = ?""",
                     (
                         (
@@ -1124,7 +1372,10 @@ class DurableRuntimeRepository:
                             payload = '{}',
                             last_error = NULL, acknowledgement = NULL,
                             next_attempt_at = NULL, claim_owner = NULL,
-                            claim_expires_at = NULL, retained_at = ?
+                            claim_expires_at = NULL, retained_at = ?,
+                            retention_attachment_paths = NULL,
+                            retention_attachment_key_id = NULL,
+                            retention_attachment_tag = NULL
                         WHERE obligation_id = ?""",
                     (
                         (
@@ -1150,21 +1401,22 @@ class DurableRuntimeRepository:
                 "outbox_redacted": len(outbox_retention),
                 "audit_deleted": len(audit_ids),
                 "attachment_paths": (),
+                "attachment_claims": (),
             }
             if (
                 inbox_retention
                 or outbox_retention
                 or audit_ids
                 or rejected_attachment_payloads
-                or queued_attachment_paths
-                or deferred_attachment_paths
+                or inserted_attachment_paths
+                or deferred_attachment_occurrences
             ):
                 audit_payload = {
                     "inbox_redacted": result["inbox_redacted"],
                     "outbox_redacted": result["outbox_redacted"],
                     "audit_deleted": result["audit_deleted"],
-                    "attachments_queued": len(queued_attachment_paths),
-                    "attachments_deferred": len(deferred_attachment_paths),
+                    "attachments_queued": len(inserted_attachment_paths),
+                    "attachments_deferred": len(deferred_attachment_occurrences),
                     "attachment_payloads_rejected": rejected_attachment_payloads,
                 }
                 conn.execute(
@@ -1176,103 +1428,304 @@ class DurableRuntimeRepository:
                     """,
                     (f"retention:{uuid.uuid4().hex}", _json(audit_payload), now_value),
                 )
-        pending = conn.execute(
-            """SELECT storage_path FROM retention_attachment_queue
-               WHERE next_attempt_at <= ?
-               ORDER BY next_attempt_at, queue_id LIMIT ?""",
-            (now_value, min(limit, 64)),
-        ).fetchall()
-        return {**result, "attachment_paths": tuple(row["storage_path"] for row in pending)}
+            claims = self._claim_due_retention_attachments(
+                conn,
+                now=now,
+                limit=min(limit, 64),
+                claim_owner=f"retention-worker:{uuid.uuid4().hex}",
+            )
+        return {
+            **result,
+            "attachment_claims": claims,
+            "attachment_paths": tuple(claim.storage_path for claim in claims),
+        }
+
+    def claim_retention_attachments(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        claim_owner: str | None = None,
+    ) -> tuple[RetentionAttachmentClaim, ...]:
+        """Authenticate and lease due rows before revealing filesystem paths."""
+        _require_limit(limit)
+        owner = claim_owner or f"retention-worker:{uuid.uuid4().hex}"
+        _require_identifier(owner, "claim_owner")
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._validate_retention_key_registry(conn)
+            self._assert_unambiguous_retention_attachment_state(conn)
+            return self._claim_due_retention_attachments(
+                conn, now=now, limit=min(limit, 64), claim_owner=owner
+            )
+
+    def authorize_retention_attachment_deletion(
+        self,
+        claim: RetentionAttachmentClaim,
+        file_identity: str,
+        *,
+        now: datetime,
+    ) -> RetentionAttachmentClaim:
+        """Fence deletion and bind it to the opened object's immutable identity."""
+        self._validate_retention_attachment_claim(claim)
+        now_value = _iso(now)
+        self._validate_retention_file_identity(file_identity)
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._validate_retention_key_registry(conn)
+            self._assert_unambiguous_retention_attachment_state(conn)
+            row = conn.execute(
+                """SELECT * FROM retention_attachment_queue
+                   WHERE storage_path = ?""",
+                (claim.storage_path,),
+            ).fetchone()
+            if row is None:
+                raise StaleClaimError("retention attachment claim no longer exists")
+            self._authenticate_retention_attachment_row(row, "queue")
+            if not self._retention_claim_matches_row(claim, row, now_value=now_value):
+                raise StaleClaimError("retention attachment claim is expired or stale")
+            persisted_identity = row["file_identity"]
+            if persisted_identity != file_identity:
+                raise StateConflictError(
+                    "retention attachment immutable file identity changed"
+                )
+            updated = conn.execute(
+                """UPDATE retention_attachment_queue
+                   SET state = 'deleting'
+                   WHERE queue_id = ? AND storage_path = ? AND key_id = ?
+                      AND work_id = ? AND generation = ? AND claim_owner = ?
+                      AND claim_token = ? AND claim_generation = ?
+                      AND claim_expires_at = ? AND claim_expires_at > ?
+                      AND state IN ('claimed', 'deleting')
+                      AND file_identity = ?""",
+                (
+                    claim.queue_id,
+                    claim.storage_path,
+                    claim.key_id,
+                    claim.work_id,
+                    claim.generation,
+                    claim.claim_owner,
+                    claim.claim_token,
+                    claim.claim_generation,
+                    _iso(claim.claim_expires_at),
+                    now_value,
+                    file_identity,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise StaleClaimError("retention attachment claim changed")
+            return RetentionAttachmentClaim(
+                queue_id=claim.queue_id,
+                storage_path=claim.storage_path,
+                key_id=claim.key_id,
+                work_id=claim.work_id,
+                generation=claim.generation,
+                claim_owner=claim.claim_owner,
+                claim_token=claim.claim_token,
+                claim_generation=claim.claim_generation,
+                claim_expires_at=claim.claim_expires_at,
+                file_identity=file_identity,
+            )
 
     def complete_retention_attachments(
         self,
-        outcomes: Mapping[str, str],
+        outcomes: Mapping[RetentionAttachmentClaim, str],
         *,
         now: datetime,
         max_attempts: int = 5,
-    ) -> None:
-        """Acknowledge safe deletion outcomes while retaining transient failures for retry."""
+    ) -> dict[str, int]:
+        """CAS authenticated claims and audit only transitions that actually commit."""
         if (
             isinstance(max_attempts, bool)
             or not isinstance(max_attempts, int)
             or not 1 <= max_attempts <= 100
         ):
             raise ValueError("max_attempts must be an integer between 1 and 100")
-        if not outcomes:
-            return
         if len(outcomes) > 1000:
             raise ValueError("attachment outcome batch exceeds 1000")
-        allowed = {"deleted", "missing", "rejected", "failed"}
+        allowed = {"deleted", "missing", "rejected", "failed", "stale", "fenced"}
         if any(outcome not in allowed for outcome in outcomes.values()):
             raise ValueError("unsupported attachment retention outcome")
+        if any(
+            not isinstance(claim, RetentionAttachmentClaim) for claim in outcomes
+        ):
+            raise ValueError("attachment outcomes require authenticated claims")
         now_value = _iso(now)
-        counts = {name: 0 for name in (*allowed, "quarantined")}
+        counts = {
+            name: 0
+            for name in (
+                "deleted",
+                "missing",
+                "rejected",
+                "failed",
+                "quarantined",
+                "stale",
+                "fenced",
+                "no_op",
+            )
+        }
+        if not outcomes:
+            return counts
         conn = self._conn
         with conn:
             conn.execute("BEGIN IMMEDIATE")
-            for storage_path, outcome in outcomes.items():
-                counts[outcome] += 1
-                queue_ids = tuple(
-                    self._retention_digest_with_key(storage_path, key)
-                    for key in self._retention_hmac_keys
-                )
-                if not queue_ids:
-                    raise StateConflictError("retention HMAC key is unavailable")
-                placeholders = ",".join("?" for _ in queue_ids)
-                if outcome == "failed":
-                    row = conn.execute(
-                        f"""SELECT storage_path, attempt
-                            FROM retention_attachment_queue
-                            WHERE queue_id IN ({placeholders})
-                            ORDER BY attempt DESC LIMIT 1""",
-                        queue_ids,
+            self._validate_retention_key_registry(conn)
+            self._assert_unambiguous_retention_attachment_state(conn)
+            for claim, outcome in outcomes.items():
+                self._validate_retention_attachment_claim(claim)
+                row = conn.execute(
+                    """SELECT * FROM retention_attachment_queue
+                       WHERE storage_path = ?""",
+                    (claim.storage_path,),
+                ).fetchone()
+                if row is None:
+                    dead_row = conn.execute(
+                        """SELECT * FROM retention_attachment_dead_letters
+                           WHERE storage_path = ?""",
+                        (claim.storage_path,),
                     ).fetchone()
-                    if row is None:
-                        continue
+                    if dead_row is None:
+                        counts["no_op"] += 1
+                    else:
+                        self._authenticate_retention_attachment_row(
+                            dead_row, "dead-letter"
+                        )
+                        counts["stale"] += 1
+                    continue
+                self._authenticate_retention_attachment_row(row, "queue")
+                if not self._retention_claim_matches_row(
+                    claim, row, now_value=now_value
+                ):
+                    counts["stale"] += 1
+                    continue
+                if outcome == "stale":
+                    counts["stale"] += 1
+                    continue
+                if outcome == "fenced":
+                    counts["fenced"] += 1
+                    continue
+                if row["state"] == "deleting" and outcome != "deleted":
+                    counts["fenced"] += 1
+                    continue
+                if outcome == "deleted" and row["state"] != "deleting":
+                    raise StateConflictError(
+                        "retention attachment deletion was not authorized"
+                    )
+
+                claim_where = """queue_id = ? AND storage_path = ? AND key_id = ?
+                    AND work_id = ? AND generation = ? AND claim_owner = ?
+                    AND claim_token = ? AND claim_generation = ?
+                    AND claim_expires_at = ? AND claim_expires_at > ?
+                    AND state IN ('claimed', 'deleting') AND file_identity = ?"""
+                claim_values = (
+                    claim.queue_id,
+                    claim.storage_path,
+                    claim.key_id,
+                    claim.work_id,
+                    claim.generation,
+                    claim.claim_owner,
+                    claim.claim_token,
+                    claim.claim_generation,
+                    _iso(claim.claim_expires_at),
+                    now_value,
+                    claim.file_identity,
+                )
+                if outcome == "failed":
                     attempt = int(row["attempt"]) + 1
                     if attempt >= max_attempts:
+                        current_key_id = self._retention_key_id(
+                            self._retention_hmac_keys[0]
+                        )
                         conn.execute(
+                            """INSERT INTO retention_key_registry (key_id, first_used_at)
+                               VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
+                            (current_key_id, now_value),
+                        )
+                        dead_letter_id = self._retention_attachment_digest(
+                            "dead-letter",
+                            claim.storage_path,
+                            current_key_id,
+                            claim.work_id,
+                            claim.generation,
+                            self._retention_hmac_keys[0],
+                        )
+                        dead_identity_tag = (
+                            None
+                            if row["file_identity"] is None
+                            else self._retention_file_identity_digest(
+                                "dead-letter",
+                                claim.storage_path,
+                                current_key_id,
+                                claim.work_id,
+                                claim.generation,
+                                row["file_identity"],
+                                self._retention_hmac_keys[0],
+                            )
+                        )
+                        inserted = conn.execute(
                             """INSERT INTO retention_attachment_dead_letters (
-                                   dead_letter_id, storage_path, attempt, last_error,
-                                   quarantined_at
-                               ) VALUES (?, ?, ?, 'delete_failed', ?)
-                               ON CONFLICT(storage_path) DO UPDATE SET
-                                   attempt = MAX(
-                                       retention_attachment_dead_letters.attempt,
-                                       excluded.attempt
-                                   ),
-                                   last_error = excluded.last_error,
-                                   quarantined_at = excluded.quarantined_at""",
+                                   dead_letter_id, storage_path, key_id, work_id,
+                                   generation, file_identity, file_identity_tag,
+                                   attempt, last_error, quarantined_at
+                               ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'delete_failed', ?
+                               WHERE NOT EXISTS (
+                                   SELECT 1 FROM retention_attachment_dead_letters
+                                   WHERE storage_path = ?
+                               )""",
                             (
-                                self._retention_digest(
-                                    f"dead-letter:{row['storage_path']}"
-                                ),
-                                row["storage_path"],
+                                dead_letter_id,
+                                claim.storage_path,
+                                current_key_id,
+                                claim.work_id,
+                                claim.generation,
+                                row["file_identity"],
+                                dead_identity_tag,
                                 attempt,
                                 now_value,
+                                claim.storage_path,
                             ),
                         )
-                        conn.execute(
-                            f"""DELETE FROM retention_attachment_queue
-                                WHERE queue_id IN ({placeholders})""",
-                            queue_ids,
+                        if inserted.rowcount != 1:
+                            raise StateConflictError(
+                                "retention attachment dead-letter state changed"
+                            )
+                        deleted = conn.execute(
+                            f"DELETE FROM retention_attachment_queue WHERE {claim_where}",
+                            claim_values,
                         )
+                        if deleted.rowcount != 1:
+                            raise StateConflictError(
+                                "retention attachment claim changed during quarantine"
+                            )
+                        counts["failed"] += 1
                         counts["quarantined"] += 1
                         continue
                     retry_at = _iso(now + timedelta(seconds=min(2**attempt, 3600)))
-                    conn.execute(
+                    updated = conn.execute(
                         f"""UPDATE retention_attachment_queue
-                           SET attempt = attempt + 1, last_error = 'delete_failed',
-                               next_attempt_at = ?
-                           WHERE queue_id IN ({placeholders})""",
-                        (retry_at, *queue_ids),
+                            SET state = 'pending', attempt = ?,
+                                last_error = 'delete_failed', next_attempt_at = ?,
+                                claim_owner = NULL, claim_token = NULL,
+                                claim_expires_at = NULL
+                            WHERE {claim_where}""",
+                        (attempt, retry_at, *claim_values),
                     )
+                    if updated.rowcount != 1:
+                        raise StateConflictError(
+                            "retention attachment claim changed during retry"
+                        )
+                    counts["failed"] += 1
                 else:
-                    conn.execute(
-                        f"""DELETE FROM retention_attachment_queue
-                            WHERE queue_id IN ({placeholders})""",
-                        queue_ids,
+                    deleted = conn.execute(
+                        f"DELETE FROM retention_attachment_queue WHERE {claim_where}",
+                        claim_values,
                     )
+                    if deleted.rowcount != 1:
+                        counts["stale"] += 1
+                        continue
+                    counts[outcome] += 1
             conn.execute(
                 """INSERT INTO runtime_audit_events (
                        audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
@@ -1284,18 +1737,25 @@ class DurableRuntimeRepository:
                     now_value,
                 ),
             )
+        return counts
 
     def list_retention_attachment_dead_letters(
         self, *, limit: int = 100
     ) -> list[dict[str, Any]]:
-        """Return a bounded operator view of terminal attachment deletion failures."""
+        """Return only authenticated terminal attachment deletion failures."""
         _require_limit(limit)
-        rows = self._conn.execute(
-            """SELECT dead_letter_id, storage_path, attempt, last_error, quarantined_at
-               FROM retention_attachment_dead_letters
-               ORDER BY quarantined_at, dead_letter_id LIMIT ?""",
-            (limit,),
-        ).fetchall()
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN")
+            self._validate_retention_key_registry(conn)
+            self._assert_unambiguous_retention_attachment_state(conn)
+            rows = conn.execute(
+                """SELECT * FROM retention_attachment_dead_letters
+                   ORDER BY quarantined_at, dead_letter_id LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            for row in rows:
+                self._authenticate_retention_attachment_row(row, "dead-letter")
         return [
             {
                 "dead_letter_id": row["dead_letter_id"],
@@ -1324,50 +1784,104 @@ class DurableRuntimeRepository:
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             self._validate_retention_key_registry(conn)
+            self._assert_unambiguous_retention_attachment_state(conn)
             row = conn.execute(
-                """SELECT storage_path, attempt
-                   FROM retention_attachment_dead_letters
+                """SELECT * FROM retention_attachment_dead_letters
                    WHERE dead_letter_id = ?""",
                 (dead_letter_id,),
             ).fetchone()
             if row is not None:
-                prior_attempt = int(row["attempt"])
-                queue_ids = tuple(
-                    self._retention_digest_with_key(row["storage_path"], key)
-                    for key in self._retention_hmac_keys
+                self._authenticate_retention_attachment_row(row, "dead-letter")
+                conn.execute(
+                    """INSERT INTO retention_key_registry (key_id, first_used_at)
+                       VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
+                    (row["key_id"], now_value),
                 )
-                if not queue_ids:
+                prior_attempt = int(row["attempt"])
+                storage_path = row["storage_path"]
+                if not self._retention_hmac_keys:
                     raise StateConflictError("retention HMAC key is unavailable")
-                placeholders = ",".join("?" for _ in queue_ids)
-                duplicate = conn.execute(
-                    f"""SELECT 1 FROM retention_attachment_queue
-                        WHERE queue_id IN ({placeholders}) LIMIT 1""",
-                    queue_ids,
-                ).fetchone()
                 occupancy = conn.execute(
                     "SELECT COUNT(*) FROM retention_attachment_queue"
                 ).fetchone()[0]
-                if duplicate is not None:
-                    result = "already_active"
-                elif occupancy >= 64:
+                if occupancy >= 64:
                     result = "capacity_full"
                 else:
+                    key_id, work_id, generation, queue_id = (
+                        self._new_retention_attachment_identity(
+                            "queue", storage_path
+                        )
+                    )
+                    queue_identity_tag = (
+                        None
+                        if row["file_identity"] is None
+                        else self._retention_file_identity_digest(
+                            "queue",
+                            storage_path,
+                            key_id,
+                            work_id,
+                            generation,
+                            row["file_identity"],
+                            self._retention_hmac_keys[0],
+                        )
+                    )
                     conn.execute(
+                        """INSERT INTO retention_key_registry (key_id, first_used_at)
+                           VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
+                        (key_id, now_value),
+                    )
+                    inserted = conn.execute(
                         """INSERT INTO retention_attachment_queue (
-                               queue_id, storage_path, queued_at, next_attempt_at
-                           ) VALUES (?, ?, ?, ?)""",
+                               queue_id, storage_path, key_id, work_id, generation,
+                               queued_at, next_attempt_at, file_identity,
+                               file_identity_tag
+                           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+                           WHERE EXISTS (
+                               SELECT 1 FROM retention_attachment_dead_letters
+                               WHERE dead_letter_id = ? AND storage_path = ?
+                                 AND key_id = ? AND work_id = ? AND generation = ?
+                           ) AND NOT EXISTS (
+                               SELECT 1 FROM retention_attachment_queue
+                               WHERE storage_path = ?
+                           )""",
                         (
-                            self._retention_digest(row["storage_path"]),
-                            row["storage_path"],
+                            queue_id,
+                            storage_path,
+                            key_id,
+                            work_id,
+                            generation,
                             now_value,
                             now_value,
+                            row["file_identity"],
+                            queue_identity_tag,
+                            dead_letter_id,
+                            storage_path,
+                            row["key_id"],
+                            row["work_id"],
+                            row["generation"],
+                            storage_path,
                         ),
                     )
-                    conn.execute(
+                    if inserted.rowcount != 1:
+                        raise StateConflictError(
+                            "retention attachment requeue state changed"
+                        )
+                    deleted = conn.execute(
                         """DELETE FROM retention_attachment_dead_letters
-                           WHERE dead_letter_id = ?""",
-                        (dead_letter_id,),
+                           WHERE dead_letter_id = ? AND storage_path = ?
+                             AND key_id = ? AND work_id = ? AND generation = ?""",
+                        (
+                            dead_letter_id,
+                            storage_path,
+                            row["key_id"],
+                            row["work_id"],
+                            row["generation"],
+                        ),
                     )
+                    if deleted.rowcount != 1:
+                        raise StateConflictError(
+                            "retention attachment dead-letter state changed"
+                        )
                     result = "requeued"
             audit_payload: dict[str, Any] = {"result": result}
             if prior_attempt is not None:
@@ -1398,28 +1912,280 @@ class DurableRuntimeRepository:
 
     @staticmethod
     def _attachment_paths(payload: Any, *, limit: int) -> tuple[list[str], bool]:
+        """Read only the exact trusted attachment container, never nested metadata."""
+        if not isinstance(payload, Mapping) or "attachments" not in payload:
+            return [], False
+        attachments = payload["attachments"]
+        if not isinstance(attachments, (list, tuple)):
+            raise ValueError("attachments must be a bounded sequence")
         paths: list[str] = []
-        pending: list[Any] = [payload]
-        visited = 0
-        node_limit = max(100, limit * 20)
-        while pending:
-            visited += 1
-            if visited > node_limit:
-                return paths, True
-            value = pending.pop()
-            if isinstance(value, Mapping):
-                for key, nested in value.items():
-                    if key in {"storage_path", "attachment_path"} and isinstance(
-                        nested, str
-                    ):
-                        paths.append(nested)
-                        if len(paths) > limit:
-                            return paths[:limit], True
-                    else:
-                        pending.append(nested)
-            elif isinstance(value, (list, tuple)):
-                pending.extend(value)
+        for item in attachments:
+            if not isinstance(item, Mapping):
+                raise ValueError("attachment entries must be objects")
+            storage_path = item.get("storage_path")
+            if not isinstance(storage_path, str):
+                raise ValueError("attachment storage_path is required")
+            paths.append(_canonical_attachment_storage_path(storage_path))
+            if len(paths) > limit:
+                return paths[:limit], True
         return paths, False
+
+    @staticmethod
+    def _unsigned_attachment_source_requires_migration(payload_value: str) -> bool:
+        try:
+            payload = json.loads(payload_value)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise StateConflictError("durable source payload is invalid") from exc
+        if not isinstance(payload, Mapping) or "attachments" not in payload:
+            return False
+        attachments = payload["attachments"]
+        return not isinstance(attachments, list) or bool(attachments)
+
+    @staticmethod
+    def _retention_attachment_source_digest(
+        kind: str,
+        source_id: str,
+        key_id: str,
+        occurrences_value: str,
+        key: bytes,
+    ) -> str:
+        authenticated = _json(
+            [
+                "retention-attachment-source-v2",
+                kind,
+                source_id,
+                key_id,
+                occurrences_value,
+            ]
+        )
+        return DurableRuntimeRepository._retention_digest_with_key(
+            authenticated, key
+        )
+
+    @staticmethod
+    def _retention_attachment_occurrences_value(
+        occurrences: Iterable[tuple[str, str]],
+    ) -> str:
+        return _json(
+            [
+                {"storage_path": storage_path, "file_identity": file_identity}
+                for storage_path, file_identity in occurrences
+            ]
+        )
+
+    def _snapshot_retention_attachment_source(self, storage_path: str) -> str:
+        from .retention import snapshot_managed_attachment
+
+        identity = snapshot_managed_attachment(
+            self.control_plane.data_dir / "attachments", storage_path
+        )
+        self._validate_retention_file_identity(identity)
+        return identity
+
+    def _retention_attachment_source_fields(
+        self,
+        kind: str,
+        source_id: str,
+        payload: Any,
+    ) -> tuple[str | None, str | None, str | None]:
+        paths, overflow = self._attachment_paths(payload, limit=64)
+        if overflow:
+            raise ValueError("attachment source exceeds the retention safety bound of 64")
+        if not paths:
+            return None, None, None
+        if not self._retention_hmac_keys:
+            raise StateConflictError(
+                "attachment sources require an externally managed retention HMAC key"
+            )
+        occurrences = tuple(
+            (storage_path, self._snapshot_retention_attachment_source(storage_path))
+            for storage_path in dict.fromkeys(paths)
+        )
+        occurrences_value = self._retention_attachment_occurrences_value(occurrences)
+        key = self._retention_hmac_keys[0]
+        key_id = self._retention_key_id(key)
+        tag = self._retention_attachment_source_digest(
+            kind, source_id, key_id, occurrences_value, key
+        )
+        return occurrences_value, key_id, tag
+
+    def _authenticate_retention_attachment_source(
+        self,
+        row: sqlite3.Row,
+        kind: str,
+        source_id_column: str,
+    ) -> tuple[tuple[str, str], ...]:
+        occurrences_value = row["retention_attachment_paths"]
+        key_id = row["retention_attachment_key_id"]
+        tag = row["retention_attachment_tag"]
+        if occurrences_value is None and key_id is None and tag is None:
+            return ()
+        if not all(
+            isinstance(value, str) and value
+            for value in (occurrences_value, key_id, tag)
+        ):
+            raise StateConflictError(
+                "retention attachment source manifest requires explicit migration"
+            )
+        key = self._retention_keys_by_id.get(key_id)
+        if key is None:
+            raise StateConflictError(
+                "retention attachment source requires an unavailable historical HMAC key"
+            )
+        expected = self._retention_attachment_source_digest(
+            kind, row[source_id_column], key_id, occurrences_value, key
+        )
+        if not hmac.compare_digest(tag, expected):
+            raise StateConflictError(
+                "retention attachment source manifest failed to authenticate"
+            )
+        try:
+            encoded_occurrences = json.loads(occurrences_value)
+        except json.JSONDecodeError as exc:
+            raise StateConflictError(
+                "retention attachment source manifest is invalid"
+            ) from exc
+        if (
+            not isinstance(encoded_occurrences, list)
+            or not 1 <= len(encoded_occurrences) <= 64
+        ):
+            raise StateConflictError("retention attachment source manifest is invalid")
+        try:
+            occurrences = tuple(
+                (
+                    _canonical_attachment_storage_path(item["storage_path"]),
+                    item["file_identity"],
+                )
+                for item in encoded_occurrences
+                if isinstance(item, dict)
+                and set(item) == {"storage_path", "file_identity"}
+            )
+            if len(occurrences) != len(encoded_occurrences):
+                raise ValueError("invalid occurrence shape")
+            for _, file_identity in occurrences:
+                self._validate_retention_file_identity(file_identity)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StateConflictError(
+                "retention attachment source manifest is not canonical"
+            ) from exc
+        if (
+            len({storage_path for storage_path, _ in occurrences}) != len(occurrences)
+            or self._retention_attachment_occurrences_value(occurrences)
+            != occurrences_value
+        ):
+            raise StateConflictError("retention attachment source manifest is invalid")
+        return occurrences
+
+    @staticmethod
+    def _retention_attachment_backlog_digest(
+        backlog_id: str,
+        key_id: str,
+        generation: str,
+        occurrences_value: str,
+        key: bytes,
+    ) -> str:
+        authenticated = _json(
+            [
+                "retention-attachment-backlog-v2",
+                backlog_id,
+                key_id,
+                generation,
+                occurrences_value,
+            ]
+        )
+        return DurableRuntimeRepository._retention_digest_with_key(
+            authenticated, key
+        )
+
+    def _new_retention_attachment_backlog_page(
+        self, occurrences: Iterable[tuple[str, str]]
+    ) -> tuple[str, str, str, str, str]:
+        canonical = tuple(
+            (_canonical_attachment_storage_path(storage_path), file_identity)
+            for storage_path, file_identity in occurrences
+        )
+        for _, file_identity in canonical:
+            self._validate_retention_file_identity(file_identity)
+        if (
+            not 1 <= len(canonical) <= 64
+            or len({storage_path for storage_path, _ in canonical}) != len(canonical)
+        ):
+            raise ValueError("retention attachment backlog page is invalid")
+        if not self._retention_hmac_keys:
+            raise StateConflictError("retention HMAC key is unavailable")
+        occurrences_value = self._retention_attachment_occurrences_value(canonical)
+        backlog_id = f"backlog:{uuid.uuid4().hex}"
+        generation = uuid.uuid4().hex
+        key = self._retention_hmac_keys[0]
+        key_id = self._retention_key_id(key)
+        tag = self._retention_attachment_backlog_digest(
+            backlog_id, key_id, generation, occurrences_value, key
+        )
+        return backlog_id, occurrences_value, key_id, generation, tag
+
+    def _authenticate_retention_attachment_backlog(
+        self, row: sqlite3.Row
+    ) -> tuple[tuple[str, str], ...]:
+        backlog_id = row["backlog_id"]
+        occurrences_value = row["storage_paths"]
+        key_id = row["key_id"]
+        generation = row["generation"]
+        tag = row["backlog_tag"]
+        if not all(
+            isinstance(value, str) and value
+            for value in (backlog_id, occurrences_value, key_id, generation, tag)
+        ):
+            raise StateConflictError(
+                "retention attachment backlog requires explicit migration"
+            )
+        key = self._retention_keys_by_id.get(key_id)
+        if key is None:
+            raise StateConflictError(
+                "retention attachment backlog requires an unavailable historical HMAC key"
+            )
+        expected = self._retention_attachment_backlog_digest(
+            backlog_id, key_id, generation, occurrences_value, key
+        )
+        if not hmac.compare_digest(tag, expected):
+            raise StateConflictError(
+                "retention attachment backlog failed to authenticate"
+            )
+        try:
+            encoded_occurrences = json.loads(occurrences_value)
+        except json.JSONDecodeError as exc:
+            raise StateConflictError(
+                "retention attachment backlog is invalid"
+            ) from exc
+        if (
+            not isinstance(encoded_occurrences, list)
+            or not 1 <= len(encoded_occurrences) <= 64
+        ):
+            raise StateConflictError("retention attachment backlog is invalid")
+        try:
+            occurrences = tuple(
+                (
+                    _canonical_attachment_storage_path(item["storage_path"]),
+                    item["file_identity"],
+                )
+                for item in encoded_occurrences
+                if isinstance(item, dict)
+                and set(item) == {"storage_path", "file_identity"}
+            )
+            if len(occurrences) != len(encoded_occurrences):
+                raise ValueError("invalid occurrence shape")
+            for _, file_identity in occurrences:
+                self._validate_retention_file_identity(file_identity)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StateConflictError(
+                "retention attachment backlog is not canonical"
+            ) from exc
+        if (
+            len({storage_path for storage_path, _ in occurrences}) != len(occurrences)
+            or self._retention_attachment_occurrences_value(occurrences)
+            != occurrences_value
+        ):
+            raise StateConflictError("retention attachment backlog is invalid")
+        return occurrences
 
     @staticmethod
     def _retention_digest_with_key(value: str, key: bytes) -> str:
@@ -1436,6 +2202,381 @@ class DurableRuntimeRepository:
 
     def _retention_token(self, domain: str, value: str) -> str:
         return f"retained:{self._retention_digest(f'{domain}:{value}')}"
+
+    @staticmethod
+    def _retention_attachment_digest(
+        kind: str,
+        storage_path: str,
+        key_id: str,
+        work_id: str,
+        generation: str,
+        key: bytes,
+    ) -> str:
+        authenticated = _json(
+            [
+                "retention-attachment-v1",
+                kind,
+                key_id,
+                work_id,
+                generation,
+                storage_path,
+            ]
+        )
+        return DurableRuntimeRepository._retention_digest_with_key(
+            authenticated, key
+        )
+
+    def _new_retention_attachment_identity(
+        self, kind: str, storage_path: str
+    ) -> tuple[str, str, str, str]:
+        if not self._retention_hmac_keys:
+            raise StateConflictError("retention HMAC key is unavailable")
+        key = self._retention_hmac_keys[0]
+        key_id = self._retention_key_id(key)
+        work_id = uuid.uuid4().hex
+        generation = uuid.uuid4().hex
+        digest = self._retention_attachment_digest(
+            kind, storage_path, key_id, work_id, generation, key
+        )
+        return key_id, work_id, generation, digest
+
+    @staticmethod
+    def _retention_file_identity_digest(
+        kind: str,
+        storage_path: str,
+        key_id: str,
+        work_id: str,
+        generation: str,
+        file_identity: str,
+        key: bytes,
+    ) -> str:
+        authenticated = _json(
+            [
+                "retention-attachment-file-v1",
+                kind,
+                key_id,
+                work_id,
+                generation,
+                storage_path,
+                file_identity,
+            ]
+        )
+        return DurableRuntimeRepository._retention_digest_with_key(
+            authenticated, key
+        )
+
+    def _authenticate_retention_attachment_row(
+        self, row: sqlite3.Row, kind: str
+    ) -> None:
+        id_column = "queue_id" if kind == "queue" else "dead_letter_id"
+        key_id = row["key_id"]
+        work_id = row["work_id"]
+        generation = row["generation"]
+        identifier = row[id_column]
+        try:
+            canonical_path = _canonical_attachment_storage_path(row["storage_path"])
+        except ValueError as exc:
+            raise StateConflictError(
+                "retention attachment path is not canonical"
+            ) from exc
+        if not all(
+            isinstance(value, str) and value
+            for value in (key_id, work_id, generation, canonical_path)
+        ) or not isinstance(identifier, str):
+            raise StateConflictError(
+                "retention attachment identity requires explicit migration"
+            )
+        key = self._retention_keys_by_id.get(key_id)
+        if key is None:
+            raise StateConflictError(
+                "retention attachment requires an unavailable historical HMAC key"
+            )
+        expected = self._retention_attachment_digest(
+            kind,
+            canonical_path,
+            key_id,
+            work_id,
+            generation,
+            key,
+        )
+        if not hmac.compare_digest(identifier, expected):
+            raise StateConflictError(
+                "retention attachment row failed to authenticate"
+            )
+        file_identity = row["file_identity"]
+        file_identity_tag = row["file_identity_tag"]
+        try:
+            self._validate_retention_file_identity(file_identity)
+        except ValueError as exc:
+            raise StateConflictError(
+                "retention attachment file identity requires explicit migration"
+            ) from exc
+        if not isinstance(file_identity_tag, str):
+            raise StateConflictError(
+                "retention attachment file identity failed to authenticate"
+            )
+        expected_tag = self._retention_file_identity_digest(
+            kind,
+            canonical_path,
+            key_id,
+            work_id,
+            generation,
+            file_identity,
+            key,
+        )
+        if not hmac.compare_digest(file_identity_tag, expected_tag):
+            raise StateConflictError(
+                "retention attachment file identity failed to authenticate"
+            )
+
+    @staticmethod
+    def _assert_unambiguous_retention_attachment_state(
+        conn: sqlite3.Connection,
+    ) -> None:
+        paths = conn.execute(
+            """SELECT storage_path FROM retention_attachment_queue
+               UNION ALL
+               SELECT storage_path FROM retention_attachment_dead_letters"""
+        ).fetchall()
+        try:
+            for row in paths:
+                _canonical_attachment_storage_path(row["storage_path"])
+        except ValueError as exc:
+            raise StateConflictError(
+                "retention attachment state contains a non-canonical path"
+            ) from exc
+        duplicate = conn.execute(
+            """SELECT storage_path FROM retention_attachment_queue
+               GROUP BY storage_path HAVING COUNT(*) > 1 LIMIT 1"""
+        ).fetchone()
+        overlap = conn.execute(
+            """SELECT q.storage_path
+               FROM retention_attachment_queue AS q
+               JOIN retention_attachment_dead_letters AS d
+                 ON d.storage_path = q.storage_path
+               LIMIT 1"""
+        ).fetchone()
+        if duplicate is not None or overlap is not None:
+            raise StateConflictError(
+                "ambiguous retention attachment active/dead state requires migration"
+            )
+
+    def _claim_due_retention_attachments(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        now: datetime,
+        limit: int,
+        claim_owner: str,
+    ) -> tuple[RetentionAttachmentClaim, ...]:
+        self._assert_unambiguous_retention_attachment_state(conn)
+        now_value = _iso(now)
+        invalid_lease = conn.execute(
+            """SELECT 1 FROM retention_attachment_queue
+               WHERE state IN ('claimed', 'deleting')
+                 AND claim_expires_at IS NULL LIMIT 1"""
+        ).fetchone()
+        if invalid_lease is not None:
+            raise StateConflictError(
+                "retention attachment claim lease is incomplete"
+            )
+        # A claim may be recovered after its lease expires only until deletion is
+        # authorized.  `deleting` is a fail-closed fence: reclaiming it could let
+        # the old handle delete a later same-path occurrence after requeue.
+        rows = tuple(
+            conn.execute(
+                """SELECT * FROM retention_attachment_queue
+                   WHERE (state = 'pending' AND next_attempt_at <= ?)
+                      OR (state = 'claimed'
+                          AND claim_expires_at <= ?)
+                   ORDER BY
+                       CASE WHEN state = 'pending'
+                            THEN next_attempt_at ELSE claim_expires_at END,
+                       queue_id
+                   LIMIT ?""",
+                (now_value, now_value, limit),
+            ).fetchall()
+        )
+        for row in rows:
+            self._authenticate_retention_attachment_row(row, "queue")
+            conn.execute(
+                """INSERT INTO retention_key_registry (key_id, first_used_at)
+                   VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
+                (row["key_id"], now_value),
+            )
+
+        expires_at = now + _RETENTION_CLAIM_TTL
+        expires_value = _iso(expires_at)
+        claims: list[RetentionAttachmentClaim] = []
+        for row in rows:
+            token = uuid.uuid4().hex
+            claim_generation = int(row["claim_generation"]) + 1
+            updated = conn.execute(
+                """UPDATE retention_attachment_queue
+                   SET state = 'claimed', claim_owner = ?, claim_token = ?,
+                       claim_generation = ?, claim_expires_at = ?
+                   WHERE queue_id = ? AND storage_path = ? AND key_id = ?
+                      AND work_id = ? AND generation = ?
+                      AND file_identity = ? AND file_identity_tag = ?
+                      AND ((state = 'pending' AND next_attempt_at <= ?)
+                        OR (state = 'claimed'
+                           AND claim_expires_at <= ?))""",
+                (
+                    claim_owner,
+                    token,
+                    claim_generation,
+                    expires_value,
+                    row["queue_id"],
+                    row["storage_path"],
+                    row["key_id"],
+                    row["work_id"],
+                    row["generation"],
+                    row["file_identity"],
+                    row["file_identity_tag"],
+                    now_value,
+                    now_value,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise StateConflictError(
+                    "retention attachment claim compare-and-swap failed"
+                )
+            claims.append(
+                RetentionAttachmentClaim(
+                    queue_id=row["queue_id"],
+                    storage_path=row["storage_path"],
+                    key_id=row["key_id"],
+                    work_id=row["work_id"],
+                    generation=row["generation"],
+                    claim_owner=claim_owner,
+                    claim_token=token,
+                    claim_generation=claim_generation,
+                    claim_expires_at=expires_at,
+                    file_identity=row["file_identity"],
+                )
+            )
+        return tuple(claims)
+
+    @staticmethod
+    def _validate_retention_file_identity(file_identity: str) -> None:
+        if (
+            not isinstance(file_identity, str)
+            or not file_identity
+            or len(file_identity) > 512
+        ):
+            raise ValueError("file_identity must be a bounded non-empty string")
+
+    @staticmethod
+    def _validate_retention_attachment_claim(
+        claim: RetentionAttachmentClaim,
+    ) -> None:
+        if not isinstance(claim, RetentionAttachmentClaim):
+            raise ValueError("attachment claim is invalid")
+        _require_retention_digest_id(claim.queue_id, "queue_id")
+        for value, name in (
+            (claim.storage_path, "storage_path"),
+            (claim.key_id, "key_id"),
+            (claim.work_id, "work_id"),
+            (claim.generation, "generation"),
+            (claim.claim_owner, "claim_owner"),
+            (claim.claim_token, "claim_token"),
+        ):
+            _require_identifier(value, name)
+        if (
+            isinstance(claim.claim_generation, bool)
+            or not isinstance(claim.claim_generation, int)
+            or claim.claim_generation < 1
+        ):
+            raise ValueError("claim_generation must be positive")
+        _require_aware(claim.claim_expires_at, "claim_expires_at")
+        DurableRuntimeRepository._validate_retention_file_identity(
+            claim.file_identity
+        )
+
+    @staticmethod
+    def _retention_claim_matches_row(
+        claim: RetentionAttachmentClaim,
+        row: sqlite3.Row,
+        *,
+        now_value: str,
+    ) -> bool:
+        claim_expires_at = _iso(claim.claim_expires_at)
+        return (
+            row["queue_id"] == claim.queue_id
+            and row["storage_path"] == claim.storage_path
+            and row["key_id"] == claim.key_id
+            and row["work_id"] == claim.work_id
+            and row["generation"] == claim.generation
+            and row["claim_owner"] == claim.claim_owner
+            and row["claim_token"] == claim.claim_token
+            and int(row["claim_generation"]) == claim.claim_generation
+            and row["claim_expires_at"] == claim_expires_at
+            and row["claim_expires_at"] > now_value
+            and row["state"] in {"claimed", "deleting"}
+            and row["file_identity"] == claim.file_identity
+        )
+
+    def _migrate_retention_attachment_rows(self) -> None:
+        """Authenticate legacy IDs, then assign versioned identities atomically."""
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._validate_retention_key_registry(conn)
+            self._assert_unambiguous_retention_attachment_state(conn)
+            for kind, table, source_id_column in (
+                ("inbox", "inbox_events", "event_id"),
+                ("outbox", "outbox_obligations", "obligation_id"),
+            ):
+                for source_row in conn.execute(f"SELECT * FROM {table}").fetchall():
+                    source_fields = (
+                        source_row["retention_attachment_paths"],
+                        source_row["retention_attachment_key_id"],
+                        source_row["retention_attachment_tag"],
+                    )
+                    if all(value is None for value in source_fields):
+                        if self._unsigned_attachment_source_requires_migration(
+                            source_row["payload"]
+                        ):
+                            raise StateConflictError(
+                                f"unsigned {kind} attachment source requires explicit migration"
+                            )
+                        continue
+                    self._authenticate_retention_attachment_source(
+                        source_row, kind, source_id_column
+                    )
+            for backlog_row in conn.execute(
+                "SELECT * FROM retention_attachment_backlog"
+            ).fetchall():
+                self._authenticate_retention_attachment_backlog(backlog_row)
+            for kind, table in (
+                ("queue", "retention_attachment_queue"),
+                ("dead-letter", "retention_attachment_dead_letters"),
+            ):
+                rows = tuple(conn.execute(f"SELECT * FROM {table}").fetchall())
+                for row in rows:
+                    if row["file_identity"] is None or row["file_identity_tag"] is None:
+                        raise StateConflictError(
+                            "retention attachment immutable identity requires explicit migration"
+                        )
+                    identity = (row["key_id"], row["work_id"], row["generation"])
+                    if not all(value is not None for value in identity):
+                        raise StateConflictError(
+                            "retention attachment identity requires explicit migration"
+                        )
+                    self._authenticate_retention_attachment_row(row, kind)
+            self._assert_unambiguous_retention_attachment_state(conn)
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_attachment_queue_unique_path
+                   ON retention_attachment_queue(storage_path)"""
+            )
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_attachment_queue_unique_work
+                   ON retention_attachment_queue(work_id)"""
+            )
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_attachment_dead_unique_work
+                   ON retention_attachment_dead_letters(work_id)"""
+            )
 
     def _validate_retention_key_registry(self, conn: sqlite3.Connection) -> None:
         stored_key_ids = {

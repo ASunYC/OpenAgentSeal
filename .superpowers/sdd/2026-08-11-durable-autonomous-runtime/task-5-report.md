@@ -184,3 +184,143 @@ Planned conventional commit: `feat: secure channel credentials and retention`.
 - Final Tasks 1-5 compatibility run: 263 passed with one upstream
   `python_multipart` deprecation warning.
 - Final security-focused run: 114 passed.
+
+## Formal review fix round 4
+
+### RED / GREEN
+
+- Initial RED checkpoint: 21 fencing/authentication regressions failed while 28 prior
+  tests passed. The failures covered tampered due/dead rows, same-path stale workers,
+  immutable file identity, authenticated CAS accounting, active/dead ambiguity, legacy
+  migration, and historical-key failure. The tests were preserved in commit `88e53e0`.
+- Review RED checkpoint: two focused tests reproduced an expired five-minute claim still
+  authorizing/completing work and `apply_retention_batch` returning a claim for an
+  authenticated active+dead overlap (`2 failed, 52 deselected`). The strengthened tests
+  were preserved in commit `5fd3adc` before the implementation fix.
+- GREEN focused run: `tests/test_runtime_retention.py` — 75 passed, 2 POSIX-only
+  tests skipped on Windows and executed separately under WSL/ext4.
+- GREEN repository/credential compatibility run — 142 passed, 2 skipped.
+- GREEN security-focused run (`gateway_security`, `gateway_credentials`, and
+  `runtime_retention`) — 159 passed, 2 skipped.
+- GREEN Tasks 1-5 compatibility/coverage run — 318 passed, 2 skipped, with one upstream
+  `python_multipart` deprecation warning. Coverage was 88% for `repository.py`, 86% for
+  `retention.py`, 82% for `credentials.py`, and 87% combined.
+
+### Authenticated occurrence and claim fencing
+
+- Every active occurrence now has independent random `work_id` and `generation` values;
+  queue/dead identifiers authenticate the domain, kind, `key_id`, work ID, generation,
+  and storage path. A row is authenticated before its path is placed in a filesystem
+  claim, so a path/key/ID/work/generation mutation fails closed before exposure.
+- Claiming is a serialized compare-and-swap that returns the complete owner, random
+  token, monotonically increasing claim generation, exact expiry, and occurrence
+  identity. Authorization and completion require all claim fields plus the persisted
+  expiry to match and require the lease to remain unexpired. An expired or superseded
+  worker is counted as stale and cannot delete, retry, quarantine, or acknowledge the
+  current occurrence.
+- Completion removes or changes an active row only when its authenticated claim CAS
+  affects exactly one row. Successful deleted/missing/rejected/failed/quarantined counts
+  are incremented only after that transition; stale and absent/no-op outcomes have
+  separate counters and audit fields.
+
+### Immutable filesystem-object fencing
+
+- The filesystem worker opens the target without following links/reparse points, checks
+  that the opened regular object stays below the managed root, and derives a versioned
+  identity from the opened handle (`device/inode/ctime/mtime/size` on POSIX; volume/file
+  index/write version/size on Windows).
+- The repository binds that identity to the authenticated occurrence with a separate
+  HMAC tag and moves the claim to the fail-closed `deleting` state before filesystem
+  deletion. The worker re-reads the opened identity (and the POSIX named entry) before
+  deleting. A replacement object or identity/tag mutation is rejected without deleting
+  or acknowledging it.
+- `deleting` claims are deliberately not auto-reclaimed after expiry: an older process
+  may still hold the authorized handle, so automatic same-path reuse would make a later
+  occurrence unsafe. A crash after authorization therefore requires explicit operator
+  repair rather than a destructive guess.
+
+### Dead-letter rotation and state migration
+
+- Dead-letter listing and requeue authenticate the dead-letter identifier against its
+  path, `key_id`, work ID, generation, and optional file-identity tag. Missing historical
+  keys abort before mutation. A successful K1-to-K2 requeue registers K2 in the same
+  transaction, revalidates the key registry, creates a brand-new work ID/generation,
+  inserts the K2 active occurrence, and deletes exactly the authenticated K1 dead row.
+- A path cannot be active and dead simultaneously. Repository initialization, batch
+  ingress, claiming, authorization, completion, and requeue assert this invariant inside
+  their write transaction. Legacy path-only rows, missing immutable identity, ambiguous
+  active+dead state, partial version metadata, or unavailable keys require explicit
+  operator migration and fail without changing either row.
+
+### Verification
+
+- Final security review: **APPROVE, 0 Critical / 0 High / 0 Medium**. It independently
+  exercised real POSIX deletion/race cases and a concurrent key-registry serialization
+  reproduction.
+- A final quick security gate for the stricter unsigned-legacy-source handling also
+  returned **APPROVE, 0 Critical / 0 High / 0 Medium** after 15 relevant tests.
+- Final code review: **APPROVE, 0 Critical / 0 High / 0 Medium** after independently
+  rerunning the focused retention suite (75 passed, 2 skipped).
+
+### Adversarial RED checkpoints and final closure
+
+- Commit `ad787a8` preserves ten additional security-gate REDs for unsigned backlog
+  laundering, recursive raw-path trust, a frozen operation clock, pre-open replacement,
+  missing POSIX quarantine, and cross-platform path aliases.
+- A later focused RED showed that replacing A with B after durable source ingest but
+  before queue creation still deleted B (`1 failed, 1 passed`). The final design now
+  captures A's OS identity at source ingest and includes it in a version-2 HMAC manifest;
+  queue creation never rebinds whichever object currently occupies the path.
+- The final gate caught two last defects with live checks. Claim CAS omitted the
+  authenticated file identity/tag, and a normal POSIX rename changed `ctime`, causing a
+  valid deletion to fence. A deterministic between-auth/CAS mutation regression and
+  actual-module WSL/ext4 deletion/race tests now cover both fixes.
+- Final code review also found that a pre-Round4 source row with nonempty unsigned
+  attachments could be redacted without queueing its file. Startup migration and the
+  batch transaction now stop before redaction, preserve the sole payload/path reference,
+  and require explicit authenticated migration. Dedicated startup and late-tamper
+  regressions prove both paths fail closed without losing the file reference.
+
+### End-to-end attachment trust chain
+
+- Only the exact top-level `attachments` container is trusted. Paths must already equal
+  one lowercase ASCII, forward-slash canonical grammar. Duplicate separators, dot
+  segments, backslashes, case variants, trailing dots, and Windows reserved names fail
+  at ingress; persisted active/dead paths are rechecked before any claim exposure.
+- Source HMAC manifests cover source kind/ID, key ID, canonical path, and the original
+  file identity (or explicit `missing`/`rejected` sentinel). Raw payload edits cannot
+  select a victim path, and source-manifest edits fail before filesystem work.
+- Signed backlog pages carry the same path/identity occurrence and authenticate backlog
+  ID, key ID, random generation, and exact canonical JSON. Authentication precedes
+  split/promotion/update/deletion; every remainder receives a fresh ID/generation/tag.
+  The K1-backlog/K2 regression proves promotion requires K1 history and emits K2 work.
+- Active/dead identifiers authenticate domain/kind, key ID, random work ID, random
+  generation, and path; a second HMAC covers immutable file identity. Fresh and additive
+  schemas enforce unique active paths and work IDs.
+
+### Lease, CAS, audit, and filesystem evidence
+
+- Due claim, authorization, and completion compare the complete authenticated
+  occurrence, file identity/tag, owner, random token, increasing claim generation, and
+  exact live expiry. The worker derives fresh operation time from an injected monotonic
+  clock; non-finite or backwards clocks fail closed.
+- Completion records successful deleted/missing/rejected/retry/quarantine counts only
+  after a full CAS changes exactly one row. Stale, fenced, and absent/no-op outcomes are
+  separate. Once state is `deleting`, any non-deleted outcome remains fenced and cannot
+  release the occurrence for same-path reuse.
+- Windows deletes the verified opened handle after checking reparse/directory status,
+  final managed-root location, volume/file index, size, creation version, and write
+  version against the signed source occurrence.
+- POSIX walks held directory descriptors with `O_NOFOLLOW`, authorizes the verified
+  source object, then atomically renames the candidate into a unique slot under a
+  mode-`0700` private directory. It compares the still-held original descriptor with the
+  quarantined descriptor before unlink. A pre-rename replacement is preserved in the
+  private quarantine and fences the row; after rename, the private name cannot be
+  replaced by an untrusted directory writer.
+
+### Operational concern
+
+Post-authorization uncertainty deliberately favors preservation: a row remains
+`deleting`, and a deterministic private quarantine slot may require explicit operator
+repair. The system never automatically reclaims that fence or invents a legacy identity
+from whichever object happens to occupy the path.

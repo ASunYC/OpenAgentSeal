@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -38,6 +39,25 @@ def attachment_digest(key, kind, storage_path, key_id, work_id, generation):
             work_id,
             generation,
             storage_path,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hmac.new(key, authenticated.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def file_identity_digest(
+    key, kind, storage_path, key_id, work_id, generation, file_identity
+):
+    authenticated = json.dumps(
+        [
+            "retention-attachment-file-v1",
+            kind,
+            key_id,
+            work_id,
+            generation,
+            storage_path,
+            file_identity,
         ],
         ensure_ascii=False,
         separators=(",", ":"),
@@ -117,6 +137,10 @@ def policy(batch_limit=100, attachment_max_attempts=5):
     )
 
 
+def apply_batch(repository, **kwargs):
+    return repository.apply_retention_batch(**kwargs)
+
+
 def attachment_claims(batch):
     claims = batch["attachment_claims"]
     assert batch["attachment_paths"] == tuple(claim.storage_path for claim in claims)
@@ -134,13 +158,23 @@ def insert_authenticated_queue_row(repository, storage_path, *, generation):
     queue_id = attachment_digest(
         RETENTION_KEY, "queue", storage_path, key_id, work_id, generation
     )
+    file_identity = "missing"
+    identity_tag = file_identity_digest(
+        RETENTION_KEY,
+        "queue",
+        storage_path,
+        key_id,
+        work_id,
+        generation,
+        file_identity,
+    )
     conn = repository.control_plane._get_conn()
     with conn:
         conn.execute(
             """INSERT INTO retention_attachment_queue (
                    queue_id, storage_path, key_id, work_id, generation,
-                   queued_at, next_attempt_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   queued_at, next_attempt_at, file_identity, file_identity_tag
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 queue_id,
                 storage_path,
@@ -149,6 +183,8 @@ def insert_authenticated_queue_row(repository, storage_path, *, generation):
                 generation,
                 NOW.isoformat(),
                 NOW.isoformat(),
+                file_identity,
+                identity_tag,
             ),
         )
     return queue_id
@@ -173,7 +209,7 @@ def quarantine_attachment(repository, storage_path, *, suffix):
             "UPDATE inbox_events SET state = 'succeeded' WHERE event_id = ?",
             (event_id,),
         )
-    batch = repository.apply_retention_batch(
+    batch = apply_batch(repository,
         now=NOW,
         inbox_before=NOW,
         outbox_before=NOW,
@@ -230,7 +266,7 @@ def test_expired_sensitive_data_is_redacted_while_idempotency_tombstones_remain(
         "SELECT action, payload FROM runtime_audit_events ORDER BY created_at, audit_id"
     ).fetchall()
     audit_actions = [row["action"] for row in retained_audits]
-    assert audit_actions == ["attachment_retention", "retention_batch"]
+    assert set(audit_actions) == {"attachment_retention", "retention_batch"}
 
     database_bytes = (control_plane.db_path).read_bytes()
     for sensitive in (
@@ -355,6 +391,51 @@ def test_tombstones_and_attachment_queue_survive_external_hmac_key_rotation(
         )
 
 
+def test_k1_backlog_manifest_promotes_under_k2_only_with_k1_history(runtime):
+    control_plane, k1_repository, _ = runtime
+    storage_path = "quarantine/k1-backlog-object-0001"
+    page = k1_repository._new_retention_attachment_backlog_page(
+        ((storage_path, "missing"),)
+    )
+    conn = control_plane._get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO retention_key_registry (key_id, first_used_at)
+               VALUES (?, ?)""",
+            (retention_key_id(RETENTION_KEY), NOW.isoformat()),
+        )
+        conn.execute(
+            """INSERT INTO retention_attachment_backlog (
+                   backlog_id, storage_paths, key_id, generation, backlog_tag, queued_at
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (*page, NOW.isoformat()),
+        )
+    k2 = b"task5-test-retention-hmac-key-0002"
+    rotated = DurableRuntimeRepository(
+        control_plane,
+        retention_hmac_key=k2,
+        previous_retention_hmac_keys=(RETENTION_KEY,),
+    )
+
+    batch = apply_batch(
+        rotated,
+        now=NOW,
+        inbox_before=OLD,
+        outbox_before=OLD,
+        audit_before=OLD,
+        limit=1,
+    )
+
+    claim = attachment_claims(batch)[storage_path]
+    assert claim.file_identity == "missing"
+    assert claim.key_id == retention_key_id(k2)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM retention_attachment_backlog"
+    ).fetchone()[0] == 0
+    with pytest.raises(StateConflictError, match="historical HMAC"):
+        DurableRuntimeRepository(control_plane, retention_hmac_key=k2)
+
+
 def test_stale_repository_revalidates_hmac_registry_inside_dedupe_transaction(
     tmp_path,
 ):
@@ -420,7 +501,7 @@ def test_rotated_requeue_registers_key_and_old_worker_completion_fails_closed(ru
     with conn:
         conn.execute("UPDATE inbox_events SET state = 'succeeded'")
 
-    batch = old_worker_repository.apply_retention_batch(
+    batch = apply_batch(old_worker_repository,
         now=NOW,
         inbox_before=NOW,
         outbox_before=NOW,
@@ -493,6 +574,16 @@ def test_attachment_completion_fails_closed_for_an_unavailable_id_key(runtime):
         work_id,
         generation,
     )
+    file_identity = "missing"
+    identity_tag = file_identity_digest(
+        unavailable_key,
+        "queue",
+        storage_path,
+        unavailable_key_id,
+        work_id,
+        generation,
+        file_identity,
+    )
     conn = control_plane._get_conn()
     with conn:
         conn.execute(
@@ -502,8 +593,8 @@ def test_attachment_completion_fails_closed_for_an_unavailable_id_key(runtime):
         conn.execute(
             """INSERT INTO retention_attachment_queue (
                    queue_id, storage_path, key_id, work_id, generation,
-                   queued_at, next_attempt_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   queued_at, next_attempt_at, file_identity, file_identity_tag
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 queue_id,
                 storage_path,
@@ -512,6 +603,8 @@ def test_attachment_completion_fails_closed_for_an_unavailable_id_key(runtime):
                 generation,
                 NOW.isoformat(),
                 NOW.isoformat(),
+                file_identity,
+                identity_tag,
             ),
         )
 
@@ -543,7 +636,7 @@ def test_due_queue_row_is_authenticated_before_path_is_exposed(
 ):
     _, repository, _ = runtime
     seed_expired_records(repository, "authenticated-due.bin")
-    batch = repository.apply_retention_batch(
+    batch = apply_batch(repository,
         now=NOW,
         inbox_before=NOW,
         outbox_before=NOW,
@@ -567,13 +660,62 @@ def test_due_queue_row_is_authenticated_before_path_is_exposed(
         )
 
 
+def test_claim_cas_rechecks_authenticated_file_identity(runtime, monkeypatch):
+    _, repository, _ = runtime
+    storage_path = "claim-cas-file-identity.bin"
+    seed_expired_records(repository, storage_path)
+    batch = apply_batch(
+        repository,
+        now=NOW,
+        inbox_before=NOW,
+        outbox_before=NOW,
+        audit_before=OLD - timedelta(days=1),
+        limit=1,
+    )
+    claim = attachment_claims(batch)[storage_path]
+    repository.complete_retention_attachments(
+        {claim: "failed"}, now=NOW, max_attempts=5
+    )
+    conn = repository.control_plane._get_conn()
+    original_authenticate = repository._authenticate_retention_attachment_row
+    tampered = False
+
+    def authenticate_then_tamper(row, kind):
+        nonlocal tampered
+        original_authenticate(row, kind)
+        if kind == "queue" and not tampered:
+            tampered = True
+            conn.execute(
+                """UPDATE retention_attachment_queue SET file_identity = ?
+                   WHERE queue_id = ?""",
+                ("tampered-between-auth-and-claim-cas", row["queue_id"]),
+            )
+
+    monkeypatch.setattr(
+        repository,
+        "_authenticate_retention_attachment_row",
+        authenticate_then_tamper,
+    )
+
+    with pytest.raises(StateConflictError, match="compare-and-swap"):
+        repository.claim_retention_attachments(
+            now=NOW + timedelta(seconds=3), limit=1
+        )
+
+    row = conn.execute(
+        "SELECT state, file_identity FROM retention_attachment_queue"
+    ).fetchone()
+    assert row["state"] == "pending"
+    assert row["file_identity"] == "missing"
+
+
 def test_stale_claim_cannot_delete_or_ack_a_requeued_same_path_occurrence(runtime):
     _, repository, attachment_root = runtime
     storage_path = "same-path-new-occurrence.bin"
     attachment = attachment_root / storage_path
     attachment.write_bytes(b"new occurrence must survive")
     seed_expired_records(repository, storage_path)
-    batch = repository.apply_retention_batch(
+    batch = apply_batch(repository,
         now=NOW,
         inbox_before=NOW,
         outbox_before=NOW,
@@ -631,7 +773,7 @@ def test_expired_claim_is_reclaimed_with_a_new_fencing_token(runtime):
     attachment = attachment_root / storage_path
     attachment.write_bytes(b"must survive stale lease holder")
     seed_expired_records(repository, storage_path)
-    batch = repository.apply_retention_batch(
+    batch = apply_batch(repository,
         now=NOW,
         inbox_before=NOW,
         outbox_before=NOW,
@@ -681,7 +823,7 @@ def test_file_identity_mismatch_fails_closed_before_handle_deletion(runtime):
     attachment = attachment_root / storage_path
     attachment.write_bytes(b"must survive identity mismatch")
     seed_expired_records(repository, storage_path)
-    batch = repository.apply_retention_batch(
+    batch = apply_batch(repository,
         now=NOW,
         inbox_before=NOW,
         outbox_before=NOW,
@@ -689,12 +831,24 @@ def test_file_identity_mismatch_fails_closed_before_handle_deletion(runtime):
         limit=1,
     )
     claim = attachment_claims(batch)[storage_path]
-    forged_identity_claim = repository.authorize_retention_attachment_deletion(
-        claim, "forged-immutable-file-identity", now=NOW
+    with pytest.raises(StateConflictError, match="identity"):
+        repository.authorize_retention_attachment_deletion(
+            claim, "forged-immutable-file-identity", now=NOW
+        )
+    authorized_claim = repository.authorize_retention_attachment_deletion(
+        claim, claim.file_identity, now=NOW
+    )
+    forged_identity_claim = replace(
+        authorized_claim, file_identity="forged-immutable-file-identity"
     )
 
     worker = RetentionWorker(repository, policy(), attachment_root)
     assert worker._delete_managed_attachment(forged_identity_claim, NOW) == "failed"
+    fenced = repository.complete_retention_attachments(
+        {authorized_claim: "failed"}, now=NOW
+    )
+    assert fenced["failed"] == 0
+    assert fenced["fenced"] == 1
     assert attachment.read_bytes() == b"must survive identity mismatch"
     assert repository.claim_retention_attachments(
         now=NOW + timedelta(minutes=6), limit=1
@@ -717,7 +871,7 @@ def test_file_identity_mismatch_fails_closed_before_handle_deletion(runtime):
             """UPDATE inbox_events SET state = 'succeeded'
                WHERE event_id = 'event-after-delete-fence'"""
         )
-    later = repository.apply_retention_batch(
+    later = apply_batch(repository,
         now=NOW + timedelta(minutes=7),
         inbox_before=NOW,
         outbox_before=NOW,
@@ -894,12 +1048,251 @@ def test_pre_open_replacement_cannot_become_the_bound_file_identity(
     assert row is not None and row["file_identity"] is not None
 
 
+def test_replacement_before_queue_creation_cannot_rebind_the_source_occurrence(runtime):
+    _, repository, attachment_root = runtime
+    storage_path = "quarantine/pre-queue-replacement-object-0001"
+    attachment = attachment_root / storage_path
+    attachment.parent.mkdir(parents=True)
+    attachment.write_bytes(b"original occurrence")
+    seed_expired_records(repository, storage_path)
+    saved_original = attachment_root / "saved-original-occurrence"
+    os.replace(attachment, saved_original)
+    attachment.write_bytes(b"replacement must survive")
+
+    summary = RetentionWorker(repository, policy(), attachment_root).run_once(NOW)
+
+    assert summary.attachments_deleted == 0
+    assert summary.attachments_failed == 1
+    assert attachment.read_bytes() == b"replacement must survive"
+    assert saved_original.read_bytes() == b"original occurrence"
+
+
+def test_tampered_source_manifest_fails_before_any_filesystem_operation(
+    runtime, monkeypatch
+):
+    _, repository, attachment_root = runtime
+    storage_path = "quarantine/authenticated-source-object-0001"
+    victim_path = "quarantine/tampered-source-victim-0001"
+    seed_expired_records(repository, storage_path)
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute(
+            """UPDATE inbox_events SET retention_attachment_paths = ?
+               WHERE event_id = 'event-old'""",
+            (json.dumps([victim_path], separators=(",", ":")),),
+        )
+    attempted = []
+    worker = RetentionWorker(repository, policy(), attachment_root)
+    monkeypatch.setattr(
+        worker,
+        "_delete_managed_attachment",
+        lambda claim, now: attempted.append(claim.storage_path) or "failed",
+    )
+
+    with pytest.raises(StateConflictError, match="source manifest"):
+        worker.run_once(NOW)
+
+    assert attempted == []
+    assert repository.get_inbox("event-old").payload["attachments"][0][
+        "storage_path"
+    ] == storage_path
+
+
+def test_legacy_unsigned_source_requires_migration_without_losing_its_path(runtime):
+    control_plane, repository, attachment_root = runtime
+    storage_path = "quarantine/legacy-unsigned-source-object-0001"
+    attachment = attachment_root / storage_path
+    attachment.parent.mkdir(parents=True)
+    attachment.write_bytes(b"legacy attachment must remain referenced")
+    repository.enqueue_inbox(
+        InboxEvent(
+            "event-legacy-unsigned-source",
+            "key-legacy-unsigned-source",
+            "account-a",
+            "private",
+            {},
+            created_at=OLD,
+            updated_at=OLD,
+        )
+    )
+    unsigned_payload = json.dumps(
+        {"attachments": [{"storage_path": storage_path}]}, separators=(",", ":")
+    )
+    conn = control_plane._get_conn()
+    with conn:
+        conn.execute(
+            """UPDATE inbox_events SET payload = ?, state = 'succeeded'
+               WHERE event_id = 'event-legacy-unsigned-source'""",
+            (unsigned_payload,),
+        )
+
+    with pytest.raises(StateConflictError, match="unsigned.*explicit migration"):
+        DurableRuntimeRepository(control_plane, retention_hmac_key=RETENTION_KEY)
+
+    row = conn.execute(
+        """SELECT payload, retained_at, retention_attachment_paths
+           FROM inbox_events WHERE event_id = 'event-legacy-unsigned-source'"""
+    ).fetchone()
+    assert row["payload"] == unsigned_payload
+    assert row["retained_at"] is None
+    assert row["retention_attachment_paths"] is None
+    assert attachment.read_bytes() == b"legacy attachment must remain referenced"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM retention_attachment_queue"
+    ).fetchone()[0] == 0
+
+
+def test_late_unsigned_source_tamper_aborts_batch_before_redaction(runtime):
+    _, repository, attachment_root = runtime
+    storage_path = "quarantine/late-unsigned-source-object-0001"
+    attachment = attachment_root / storage_path
+    attachment.parent.mkdir(parents=True)
+    attachment.write_bytes(b"late unsigned attachment")
+    repository.enqueue_inbox(
+        InboxEvent(
+            "event-late-unsigned-source",
+            "key-late-unsigned-source",
+            "account-a",
+            "private",
+            {},
+            created_at=OLD,
+            updated_at=OLD,
+        )
+    )
+    unsigned_payload = json.dumps(
+        {"attachments": [{"storage_path": storage_path}]}, separators=(",", ":")
+    )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute(
+            """UPDATE inbox_events SET payload = ?, state = 'succeeded'
+               WHERE event_id = 'event-late-unsigned-source'""",
+            (unsigned_payload,),
+        )
+
+    with pytest.raises(StateConflictError, match="unsigned.*explicit migration"):
+        RetentionWorker(repository, policy(), attachment_root).run_once(NOW)
+
+    row = conn.execute(
+        """SELECT payload, retained_at FROM inbox_events
+           WHERE event_id = 'event-late-unsigned-source'"""
+    ).fetchone()
+    assert row["payload"] == unsigned_payload
+    assert row["retained_at"] is None
+    assert attachment.read_bytes() == b"late unsigned attachment"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM retention_attachment_queue"
+    ).fetchone()[0] == 0
+
+
+def test_raw_payload_tampering_cannot_replace_the_signed_source_occurrence(runtime):
+    _, repository, attachment_root = runtime
+    storage_path = "quarantine/signed-source-object-0001"
+    victim_path = "quarantine/raw-payload-victim-0001"
+    attachment = attachment_root / storage_path
+    victim = attachment_root / victim_path
+    attachment.parent.mkdir(parents=True)
+    attachment.write_bytes(b"signed source occurrence")
+    victim.write_bytes(b"tampered payload victim")
+    seed_expired_records(repository, storage_path)
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute(
+            """UPDATE inbox_events SET payload = ?
+               WHERE event_id = 'event-old'""",
+            (
+                json.dumps(
+                    {"attachments": [{"storage_path": victim_path}]},
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+
+    summary = RetentionWorker(repository, policy(), attachment_root).run_once(NOW)
+
+    assert summary.attachments_deleted == 1
+    assert not attachment.exists()
+    assert victim.read_bytes() == b"tampered payload victim"
+
+
 def test_posix_deletion_uses_a_private_quarantine_before_unlink():
     source = inspect.getsource(RetentionWorker._delete_posix_handle)
 
-    assert "rename" in source
+    assert "os.rename" in source
     assert "private" in source or "quarantine" in source
-    assert source.index("rename") < source.index("unlink")
+    assert source.index("os.rename") < source.index("os.unlink")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX dir_fd semantics")
+def test_posix_quarantine_rename_deletes_the_held_occurrence(runtime):
+    _, repository, attachment_root = runtime
+    storage_path = "quarantine/posix-normal-delete-object-0001"
+    attachment = attachment_root / storage_path
+    attachment.parent.mkdir(parents=True)
+    attachment.write_bytes(b"ordinary POSIX occurrence")
+    seed_expired_records(repository, storage_path)
+    batch = apply_batch(
+        repository,
+        now=NOW,
+        inbox_before=NOW,
+        outbox_before=NOW,
+        audit_before=OLD - timedelta(days=1),
+        limit=1,
+    )
+    claim = attachment_claims(batch)[storage_path]
+    worker = RetentionWorker(repository, policy(), attachment_root)
+
+    assert worker._delete_managed_attachment(claim, NOW) == "deleted"
+    assert not attachment.exists()
+    assert list((attachment_root / ".retention-delete").iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX dir_fd semantics")
+def test_posix_swap_before_quarantine_rename_never_unlinks_replacement(
+    runtime, monkeypatch
+):
+    import open_agent.durable_runtime.retention as retention_module
+
+    _, repository, attachment_root = runtime
+    storage_path = "quarantine/posix-rename-race-object-0001"
+    attachment = attachment_root / storage_path
+    saved_original = attachment_root / "saved-posix-original-object-0001"
+    attachment.parent.mkdir(parents=True)
+    attachment.write_bytes(b"original POSIX occurrence")
+    seed_expired_records(repository, storage_path)
+    batch = apply_batch(
+        repository,
+        now=NOW,
+        inbox_before=NOW,
+        outbox_before=NOW,
+        audit_before=OLD - timedelta(days=1),
+        limit=1,
+    )
+    claim = attachment_claims(batch)[storage_path]
+    worker = RetentionWorker(repository, policy(), attachment_root)
+    original_rename = retention_module.os.rename
+    swapped = False
+
+    def swap_then_rename(src, dst, *, src_dir_fd, dst_dir_fd):
+        nonlocal swapped
+        if not swapped:
+            os.replace(attachment, saved_original)
+            attachment.write_bytes(b"replacement must remain quarantined")
+            swapped = True
+        return original_rename(
+            src,
+            dst,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(retention_module.os, "rename", swap_then_rename)
+
+    assert worker._delete_managed_attachment(claim, NOW) == "fenced"
+    assert saved_original.read_bytes() == b"original POSIX occurrence"
+    private_files = list((attachment_root / ".retention-delete").iterdir())
+    assert len(private_files) == 1
+    assert private_files[0].read_bytes() == b"replacement must remain quarantined"
 
 
 @pytest.mark.parametrize(
@@ -927,6 +1320,24 @@ def test_attachment_source_rejects_filesystem_alias_paths(runtime, storage_path)
                 updated_at=OLD,
             )
         )
+
+
+def test_noncanonical_persisted_alias_aborts_before_any_claim_path_is_exposed(runtime):
+    _, repository, _ = runtime
+    insert_authenticated_queue_row(
+        repository,
+        "quarantine/canonical-persisted-object-0001",
+        generation="canonical-persisted-generation",
+    )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute(
+            """UPDATE retention_attachment_queue SET storage_path = ?""",
+            ("quarantine//canonical-persisted-object-0001",),
+        )
+
+    with pytest.raises(StateConflictError, match="non-canonical"):
+        repository.claim_retention_attachments(now=NOW, limit=1)
 
 
 @pytest.mark.parametrize(
@@ -985,7 +1396,7 @@ def test_completion_audit_counts_authenticated_cas_and_separates_no_op(runtime):
     _, repository, _ = runtime
     storage_path = "audit-cas.bin"
     seed_expired_records(repository, storage_path)
-    batch = repository.apply_retention_batch(
+    batch = apply_batch(repository,
         now=NOW,
         inbox_before=NOW,
         outbox_before=NOW,
@@ -1016,23 +1427,52 @@ def test_completion_audit_counts_authenticated_cas_and_separates_no_op(runtime):
     assert payload["attachments_no_op"] == 1
 
 
+def test_completion_cas_fences_a_forged_claim_file_identity(runtime):
+    _, repository, _ = runtime
+    storage_path = "completion-file-identity.bin"
+    seed_expired_records(repository, storage_path)
+    batch = apply_batch(
+        repository,
+        now=NOW,
+        inbox_before=NOW,
+        outbox_before=NOW,
+        audit_before=OLD - timedelta(days=1),
+        limit=1,
+    )
+    claim = attachment_claims(batch)[storage_path]
+    forged_claim = replace(claim, file_identity="forged-completion-identity")
+
+    counts = repository.complete_retention_attachments(
+        {forged_claim: "missing"}, now=NOW
+    )
+
+    assert counts["missing"] == 0
+    assert counts["stale"] == 1
+    assert repository.control_plane._get_conn().execute(
+        "SELECT COUNT(*) FROM retention_attachment_queue WHERE storage_path = ?",
+        (storage_path,),
+    ).fetchone()[0] == 1
+
+
 def test_poison_attachment_payload_is_redacted_without_blocking_the_batch(runtime):
     _, repository, attachment_root = runtime
-    repository.enqueue_inbox(
-        InboxEvent(
-            "event-poison",
-            "poison-key",
-            "account-a",
-            "private",
-            {
-                "attachments": [
-                    {"storage_path": f"forged-{index}.bin"} for index in range(65)
-                ]
-            },
-            created_at=OLD,
-            updated_at=OLD,
+    with pytest.raises(ValueError, match="safety bound"):
+        repository.enqueue_inbox(
+            InboxEvent(
+                "event-poison",
+                "poison-key",
+                "account-a",
+                "private",
+                {
+                    "attachments": [
+                        {"storage_path": f"forged-{index}.bin"}
+                        for index in range(65)
+                    ]
+                },
+                created_at=OLD,
+                updated_at=OLD,
+            )
         )
-    )
     repository.enqueue_inbox(
         InboxEvent(
             "event-after-poison",
@@ -1055,11 +1495,8 @@ def test_poison_attachment_payload_is_redacted_without_blocking_the_batch(runtim
     assert summary.inbox_redacted == 1
     assert repository.get_inbox("event-poison") is None
     assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_backlog").fetchone()[0] == 1
-    followup = RetentionWorker(repository, policy(batch_limit=1), attachment_root).run_once(
-        NOW + timedelta(seconds=1)
-    )
-    assert followup.inbox_redacted == 1
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_backlog").fetchone()[0] == 0
+    assert summary.inbox_redacted == 1
     assert repository.get_inbox("event-after-poison") is None
 
 
@@ -1080,7 +1517,12 @@ def test_attachment_enqueue_and_due_work_are_hard_capped_at_64(runtime, monkeypa
     conn = repository.control_plane._get_conn()
     with conn:
         conn.execute("UPDATE inbox_events SET state = 'succeeded'")
-    worker = RetentionWorker(repository, policy(batch_limit=80), attachment_root)
+    worker = RetentionWorker(
+        repository,
+        policy(batch_limit=80),
+        attachment_root,
+        monotonic=lambda: 0.0,
+    )
     attempted = []
     monkeypatch.setattr(
         worker,
@@ -1125,7 +1567,12 @@ def test_full_retry_queue_defers_backlog_until_ack_releases_slots(runtime, monke
     with conn:
         conn.execute("UPDATE inbox_events SET state = 'succeeded'")
     attempted = []
-    worker = RetentionWorker(repository, policy(batch_limit=80), attachment_root)
+    worker = RetentionWorker(
+        repository,
+        policy(batch_limit=80),
+        attachment_root,
+        monotonic=lambda: 0.0,
+    )
     monkeypatch.setattr(
         worker,
         "_delete_managed_attachment",
@@ -1182,6 +1629,7 @@ def test_terminal_attachment_failures_release_capacity_and_can_be_requeued(
         repository,
         policy(batch_limit=80, attachment_max_attempts=2),
         attachment_root,
+        monotonic=lambda: 0.0,
     )
     monkeypatch.setattr(
         worker, "_delete_managed_attachment", lambda claim, now: "failed"
@@ -1284,7 +1732,7 @@ def test_retention_batch_keeps_a_quarantined_path_out_of_the_active_queue(runtim
             ("event-reused-path",),
         )
 
-    batch = repository.apply_retention_batch(
+    batch = apply_batch(repository,
         now=NOW,
         inbox_before=NOW,
         outbox_before=NOW,
@@ -1310,7 +1758,7 @@ def test_due_claim_fails_closed_for_ambiguous_active_and_dead_state(runtime):
     )
 
     with pytest.raises(StateConflictError, match="ambiguous"):
-        repository.apply_retention_batch(
+        apply_batch(repository,
             now=NOW,
             inbox_before=NOW,
             outbox_before=NOW,
@@ -1360,7 +1808,7 @@ def test_requeue_refuses_ambiguous_active_and_dead_state(runtime):
     )
 
 
-def test_authenticated_legacy_queue_row_is_explicitly_version_migrated(tmp_path):
+def test_legacy_queue_without_file_identity_requires_explicit_migration(tmp_path):
     storage_path = "legacy-unambiguous.bin"
     legacy_queue_id = hmac.new(
         RETENTION_KEY, storage_path.encode("utf-8"), hashlib.sha256
@@ -1384,18 +1832,17 @@ def test_authenticated_legacy_queue_row_is_explicitly_version_migrated(tmp_path)
 
     control_plane = ControlPlane(tmp_path)
     try:
-        repository = DurableRuntimeRepository(
-            control_plane, retention_hmac_key=RETENTION_KEY
-        )
+        with pytest.raises(StateConflictError, match="identity.*explicit migration"):
+            DurableRuntimeRepository(
+                control_plane, retention_hmac_key=RETENTION_KEY
+            )
         row = control_plane._get_conn().execute(
             "SELECT * FROM retention_attachment_queue"
         ).fetchone()
-        assert row["queue_id"] != legacy_queue_id
-        assert row["key_id"] == retention_key_id(RETENTION_KEY)
-        assert row["work_id"]
-        assert row["generation"]
-        claim = claim_due_attachment(repository, storage_path)
-        assert claim.queue_id == row["queue_id"]
+        assert row["queue_id"] == legacy_queue_id
+        assert row["key_id"] is None
+        assert row["work_id"] is None
+        assert row["generation"] is None
     finally:
         control_plane.close()
 
@@ -1641,13 +2088,10 @@ def test_attachment_cleanup_rejects_traversal_and_symlink_escape(
 
 @pytest.mark.parametrize("unsafe_path", ["../outside.txt", "C:\\outside.txt", "/outside.txt"])
 def test_attachment_cleanup_rejects_non_relative_managed_paths(runtime, unsafe_path):
-    _, repository, attachment_root = runtime
-    seed_expired_records(repository, unsafe_path)
+    _, repository, _ = runtime
 
-    summary = RetentionWorker(repository, policy(), attachment_root).run_once(NOW)
-
-    assert summary.attachments_deleted == 0
-    assert summary.attachments_rejected == 1
+    with pytest.raises(ValueError, match="canonical|storage_path"):
+        seed_expired_records(repository, unsafe_path)
 
 
 @pytest.mark.parametrize(
@@ -1682,6 +2126,27 @@ def test_run_once_requires_timezone_aware_now(runtime):
     worker = RetentionWorker(repository, policy(), attachment_root)
     with pytest.raises(ValueError, match="timezone"):
         worker.run_once(NOW.replace(tzinfo=None))
+
+
+def test_run_once_rejects_a_non_finite_monotonic_clock(runtime):
+    _, repository, attachment_root = runtime
+    worker = RetentionWorker(
+        repository, policy(), attachment_root, monotonic=lambda: float("nan")
+    )
+
+    with pytest.raises(ValueError, match="monotonic"):
+        worker.run_once(NOW)
+
+
+def test_run_once_fails_closed_if_the_monotonic_clock_moves_backwards(runtime):
+    _, repository, attachment_root = runtime
+    ticks = iter((2.0, 1.0))
+    worker = RetentionWorker(
+        repository, policy(), attachment_root, monotonic=lambda: next(ticks)
+    )
+
+    with pytest.raises(StateConflictError, match="monotonic"):
+        worker.run_once(NOW)
 
 
 def test_attachment_root_and_windows_path_normalization_are_defensive(runtime, tmp_path):
