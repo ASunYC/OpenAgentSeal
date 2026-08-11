@@ -126,6 +126,9 @@ export function buildPyInstallerPlan({
       'uvicorn.lifespan',
       'uvicorn.lifespan.on',
     )
+    if (normalizedPlatform === 'windows') {
+      hiddenImports.push('win32timezone')
+    }
   }
 
   return {

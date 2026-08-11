@@ -130,6 +130,7 @@ test('builds a Linux CLI onedir plan without desktop static assets', () => {
   assert.equal(plan.entry.endsWith(path.join('scripts', 'packaging', 'open_agent_cli.py')), true)
   assert.equal(plan.data.some((item) => item.destination === 'open_agent/app/static'), false)
   assert.equal(plan.data.some((item) => item.destination === 'open_agent/skills'), true)
+  assert.equal(plan.hiddenImports.includes('win32timezone'), false)
 })
 
 test('builds a target-qualified Linux backend sidecar', () => {
@@ -143,6 +144,7 @@ test('builds a target-qualified Linux backend sidecar', () => {
 
   assert.equal(plan.name, 'open-agent-backend-x86_64-unknown-linux-gnu')
   assert.equal(plan.oneFile, true)
+  assert.equal(plan.hiddenImports.includes('win32timezone'), false)
 })
 
 test('builds a Windows backend onefile plan with Web UI and winpty', () => {
@@ -162,6 +164,16 @@ test('builds a Windows backend onefile plan with Web UI and winpty', () => {
     plan.binaries.map((item) => path.basename(item.source)).sort(),
     ['OpenConsole.exe', 'winpty-agent.exe'],
   )
+  assert.equal(plan.hiddenImports.includes('win32timezone'), true)
+  const args = createPyInstallerArgs(plan, {
+    root,
+    distPath: path.join(root, 'build', 'backend-dist'),
+    workPath: path.join(root, 'build', 'backend-work'),
+    specPath: path.join(root, 'build', 'backend-spec'),
+  })
+  const importIndex = args.indexOf('win32timezone')
+  assert.equal(importIndex > 0, true)
+  assert.equal(args[importIndex - 1], '--hidden-import')
 })
 
 test('renders platform-correct PyInstaller arguments', () => {
