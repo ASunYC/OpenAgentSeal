@@ -791,6 +791,94 @@ class DurableRuntimeRepository:
     def enqueue_inbox(self, event: InboxEvent) -> InboxEvent:
         return self._enqueue_inbox(event)
 
+    def stage_inbox_attachments(
+        self,
+        *,
+        event_id: str,
+        account_id: str,
+        attachments: Iterable[Any],
+        now: datetime,
+    ) -> None:
+        serialized = _json(
+            [
+                {
+                    "storage_path": item.storage_path,
+                    "size": item.size,
+                    "expires_at": _iso(item.expires_at),
+                    "ownership_token": item.ownership_token,
+                }
+                for item in attachments
+            ]
+        )
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO inbox_attachment_staging (
+                    event_id, account_id, attachments, created_at
+                ) VALUES (?, ?, ?, ?)""",
+                (event_id, account_id, serialized, _iso(now)),
+            )
+
+    def get_staged_inbox_attachments(self, event_id: str) -> tuple[dict[str, Any], ...]:
+        row = self._conn.execute(
+            "SELECT attachments FROM inbox_attachment_staging WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        return tuple(json.loads(row["attachments"])) if row is not None else ()
+
+    def clear_staged_inbox_attachments(self, event_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM inbox_attachment_staging WHERE event_id = ?", (event_id,)
+            )
+
+    def enqueue_polled_inbox(
+        self,
+        event: InboxEvent,
+        *,
+        transport_mode: str,
+        token: ClaimToken,
+        now: datetime,
+        attachment_stage_event_id: str | None = None,
+    ) -> InboxEvent:
+        self._validate_transport_mode(transport_mode)
+        if transport_mode == "webhook":
+            raise ValueError("webhook inbox uses durable nonce admission")
+        return self._enqueue_inbox(
+            event, transport_mode=transport_mode, transport_token=token,
+            transport_now=now,
+            attachment_stage_event_id=attachment_stage_event_id,
+        )
+
+    def validate_ingress_claim(
+        self,
+        *,
+        account_id: str,
+        transport_mode: str,
+        token: ClaimToken,
+        now: datetime,
+    ) -> None:
+        row = self._conn.execute(
+            """SELECT * FROM channel_ingress_checkpoints
+               WHERE account_id = ? AND transport_mode = ?""",
+            (account_id, transport_mode),
+        ).fetchone()
+        if row is None:
+            conflicting = self._conn.execute(
+                """SELECT 1 FROM channel_ingress_checkpoints
+                   WHERE account_id = ? AND transport_mode != ? LIMIT 1""",
+                (account_id, transport_mode),
+            ).fetchone()
+            if conflicting is not None:
+                raise StateConflictError("channel ingress transport does not match claim")
+            raise StaleClaimError("ingress transport has no claimed checkpoint")
+        if (
+            row["claim_owner"] != token.owner_id
+            or int(row["claim_generation"]) != token.generation
+            or row["claim_expires_at"] != _iso(token.expires_at)
+            or row["claim_expires_at"] <= _iso(now)
+        ):
+            raise StaleClaimError("stale ingress transport claim")
+
     def get_webhook_nonce_receipt(
         self, account_id: str, nonce: str
     ) -> dict[str, Any] | None:
@@ -810,6 +898,7 @@ class DurableRuntimeRepository:
         nonce: str,
         request_digest: str,
         nonce_expires_at: datetime,
+        attachment_stage_event_id: str | None = None,
     ) -> InboxEvent:
         _require_identifier(nonce, "nonce")
         if not re.fullmatch(r"[0-9a-f]{64}", request_digest):
@@ -820,6 +909,7 @@ class DurableRuntimeRepository:
             nonce=nonce,
             request_digest=request_digest,
             nonce_expires_at=nonce_expires_at,
+            attachment_stage_event_id=attachment_stage_event_id,
         )
 
     def _enqueue_inbox(
@@ -829,6 +919,10 @@ class DurableRuntimeRepository:
         nonce: str | None = None,
         request_digest: str | None = None,
         nonce_expires_at: datetime | None = None,
+        transport_mode: str | None = None,
+        transport_token: ClaimToken | None = None,
+        transport_now: datetime | None = None,
+        attachment_stage_event_id: str | None = None,
     ) -> InboxEvent:
         if event.state != "pending" or event.claim is not None:
             raise ValueError("new inbox events must be pending and unclaimed")
@@ -840,6 +934,31 @@ class DurableRuntimeRepository:
         conn = self._conn
         with conn:
             conn.execute("BEGIN IMMEDIATE")
+            if transport_mode is not None:
+                if transport_token is None or transport_now is None:
+                    raise ValueError("transport claim and time are required")
+                now_value = _iso(transport_now)
+                owned = conn.execute(
+                    """SELECT * FROM channel_ingress_checkpoints
+                       WHERE account_id = ? AND transport_mode = ?""",
+                    (event.account_id, transport_mode),
+                ).fetchone()
+                if owned is None:
+                    conflicting = conn.execute(
+                        """SELECT 1 FROM channel_ingress_checkpoints
+                           WHERE account_id = ? AND transport_mode != ? LIMIT 1""",
+                        (event.account_id, transport_mode),
+                    ).fetchone()
+                    if conflicting is not None:
+                        raise StateConflictError("channel ingress transport does not match claim")
+                    raise StaleClaimError("ingress transport has no claimed checkpoint")
+                if (
+                    owned["claim_owner"] != transport_token.owner_id
+                    or int(owned["claim_generation"]) != transport_token.generation
+                    or owned["claim_expires_at"] != _iso(transport_token.expires_at)
+                    or owned["claim_expires_at"] <= now_value
+                ):
+                    raise StaleClaimError("stale ingress transport claim")
             if nonce is not None:
                 conflicting_transport = conn.execute(
                     """SELECT transport_mode FROM channel_ingress_checkpoints
@@ -877,10 +996,39 @@ class DurableRuntimeRepository:
                     if row is None:
                         raise StateConflictError("webhook nonce receipt is orphaned")
                     return self._inbox(row)
+            if attachment_stage_event_id is not None:
+                staged = conn.execute(
+                    """SELECT attachments FROM inbox_attachment_staging
+                       WHERE event_id = ? AND account_id = ?""",
+                    (attachment_stage_event_id, event.account_id),
+                ).fetchone()
+                if staged is None:
+                    raise StateConflictError("attachment staging manifest is missing")
+                expected_attachments = (
+                    to_json_value(event.payload)
+                    .get("normalized_event", {})
+                    .get("attachments", [])
+                )
+                staged_references = [
+                    {
+                        "storage_path": item["storage_path"],
+                        "size": item["size"],
+                        "expires_at": item["expires_at"],
+                    }
+                    for item in json.loads(staged["attachments"])
+                ]
+                if staged_references != expected_attachments:
+                    raise StateConflictError(
+                        "attachment staging manifest does not match inbox"
+                    )
             tombstone = self._find_retention_tombstone(
                 conn, "inbox", event.account_id, event.event_key
             )
             if tombstone is not None:
+                if attachment_stage_event_id is not None:
+                    raise StateConflictError(
+                        "retained duplicate cannot adopt new attachments"
+                    )
                 row = conn.execute(
                     "SELECT * FROM inbox_events WHERE event_id = ?",
                     (tombstone["record_id"],),
@@ -946,6 +1094,13 @@ class DurableRuntimeRepository:
                         _iso(event.created_at),
                     ),
                 )
+            if attachment_stage_event_id is not None:
+                deleted = conn.execute(
+                    "DELETE FROM inbox_attachment_staging WHERE event_id = ?",
+                    (attachment_stage_event_id,),
+                )
+                if deleted.rowcount != 1:
+                    raise StateConflictError("attachment staging adoption was lost")
         return self._inbox(row)
 
     def get_inbox(self, event_id: str) -> InboxEvent | None:
@@ -1184,6 +1339,43 @@ class DurableRuntimeRepository:
                     token.generation,
                     _iso(token.expires_at),
                     now_value,
+                ),
+            ).fetchone()
+        if row is None:
+            raise StaleClaimError(f"stale inbox claim: {event_id}")
+        return self._inbox(row)
+
+    def complete_inbox_after_agent(
+        self,
+        event_id: str,
+        token: ClaimToken,
+        *,
+        source_event_key: str,
+        now: datetime,
+    ) -> InboxEvent:
+        """Atomically require every durable effect resolved before inbox success."""
+        now_value = _iso(now)
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            unresolved = self._conn.execute(
+                """SELECT 1 FROM tool_calls WHERE source_event_key = ?
+                   AND state != 'completed' LIMIT 1""",
+                (source_event_key,),
+            ).fetchone()
+            if unresolved is not None:
+                raise StateConflictError("inbox has unresolved tool effects")
+            row = self._conn.execute(
+                """UPDATE inbox_events
+                   SET state = 'succeeded', claim_owner = NULL,
+                       claim_expires_at = NULL, next_attempt_at = NULL,
+                       last_error = NULL, updated_at = ?
+                   WHERE event_id = ? AND state = 'dispatched'
+                     AND claim_owner = ? AND claim_generation = ?
+                     AND claim_expires_at = ? AND claim_expires_at > ?
+                   RETURNING *""",
+                (
+                    now_value, event_id, token.owner_id, token.generation,
+                    _iso(token.expires_at), now_value,
                 ),
             ).fetchone()
         if row is None:

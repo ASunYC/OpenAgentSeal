@@ -753,14 +753,15 @@ Requirements:
                         result = ToolResult(success=False, content="", error=policy_error)
                     else:
                         effect = None
+                        durable_effect_context = bool(
+                            self.runtime_control_plane is not None
+                            and self.runtime_turn_id
+                            and self.source_event_key
+                        )
                         try:
                             tool = self.tools[function_name]
                             self._bind_tool_context(tool)
-                            if (
-                                self.runtime_control_plane is not None
-                                and self.runtime_turn_id
-                                and self.source_event_key
-                            ):
+                            if durable_effect_context:
                                 effect_now = datetime.now(timezone.utc)
                                 effect = self.runtime_control_plane.claim_tool_effect(
                                     session_id=self.session_id,
@@ -817,6 +818,10 @@ Requirements:
                                     )
                                 raise RuntimeError(
                                     "Durable tool effect requires manual reconciliation"
+                                ) from e
+                            if durable_effect_context:
+                                raise RuntimeError(
+                                    "Durable tool effect claim failed; Agent turn aborted"
                                 ) from e
                             # Catch all exceptions during tool execution, convert to failed ToolResult
                             import traceback

@@ -8,6 +8,7 @@ import io
 import ipaddress
 import math
 import re
+import secrets
 import stat
 import threading
 import zipfile
@@ -473,16 +474,23 @@ class StoredAttachment:
     storage_path: str
     size: int
     expires_at: datetime
+    ownership_token: str = ""
 
 
 class AttachmentStorage(Protocol):
     def put_batch(
-        self, entries: tuple[tuple[str, bytes, datetime, bool], ...]
+        self, entries: tuple[tuple[str, bytes, datetime, bool, str], ...]
     ) -> bool:
         """Exclusively create every entry atomically; false must leave none."""
         ...
 
     def cleanup_expired(self, now: datetime) -> int: ...
+
+    def delete_batch_if_owned(
+        self, owned_paths: tuple[tuple[str, str], ...]
+    ) -> bool:
+        """Idempotently delete objects only when their ownership token matches."""
+        ...
 
 
 class AttachmentScanner(Protocol):
@@ -514,7 +522,12 @@ class AttachmentGuard:
         self._monotonic = monotonic
         self._random_name = random_name
 
-    def ingest(self, uploads: Iterable[AttachmentUpload]) -> tuple[StoredAttachment, ...]:
+    def ingest(
+        self,
+        uploads: Iterable[AttachmentUpload],
+        on_staging: Callable[[tuple[StoredAttachment, ...]], None] | None = None,
+        before_storage: Callable[[tuple[StoredAttachment, ...]], None] | None = None,
+    ) -> tuple[StoredAttachment, ...]:
         items: list[AttachmentUpload] = []
         for item in uploads:
             items.append(item)
@@ -553,10 +566,11 @@ class AttachmentGuard:
         _require_aware(now)
         expires_at = now + self._policy.retention
         results = []
-        writes: list[tuple[str, bytes, datetime, bool]] = []
+        writes: list[tuple[str, bytes, datetime, bool, str]] = []
         used_paths: set[str] = set()
         for _, content in prepared:
             path = f"quarantine/{self._random_name()}"
+            ownership_token = secrets.token_hex(16)
             token = path.removeprefix("quarantine/")
             if (
                 path in used_paths
@@ -564,15 +578,44 @@ class AttachmentGuard:
             ):
                 raise SecurityViolation("unsafe attachment storage name")
             used_paths.add(path)
-            writes.append((path, content, expires_at, False))
-            results.append(StoredAttachment(path, len(content), expires_at))
+            writes.append((path, content, expires_at, False, ownership_token))
+            results.append(
+                StoredAttachment(path, len(content), expires_at, ownership_token)
+            )
+        staged = tuple(results)
+        if before_storage is not None:
+            before_storage(staged)
+        if on_staging is not None:
+            on_staging(staged)
         try:
             created = self._storage.put_batch(tuple(writes))
         except Exception as exc:
             raise SecurityViolation("attachment storage unavailable") from exc
         if created is not True:
             raise SecurityViolation("attachment storage collision")
-        return tuple(results)
+        return staged
+
+    def rollback(self, stored: Iterable[StoredAttachment]) -> None:
+        items = tuple(stored)
+        paths = tuple(item.storage_path for item in items)
+        if any(
+            re.fullmatch(r"quarantine/[A-Za-z0-9_-]{16,128}", path) is None
+            for path in paths
+        ):
+            raise SecurityViolation("unsafe attachment rollback path")
+        if any(
+            re.fullmatch(r"[0-9a-f]{32}", item.ownership_token) is None
+            for item in items
+        ):
+            raise SecurityViolation("unsafe attachment ownership token")
+        try:
+            removed = self._storage.delete_batch_if_owned(
+                tuple((item.storage_path, item.ownership_token) for item in items)
+            )
+        except Exception as exc:
+            raise SecurityViolation("attachment rollback unavailable") from exc
+        if removed is not True:
+            raise SecurityViolation("attachment rollback incomplete")
 
     def cleanup_expired(self) -> int:
         now = self._now()

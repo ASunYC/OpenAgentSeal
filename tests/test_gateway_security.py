@@ -286,6 +286,14 @@ class MemoryStorage:
         self.cleaned_at = now
         return 2
 
+    def delete_batch_if_owned(self, owned_paths):
+        selected = dict(owned_paths)
+        self.saved = [
+            entry for entry in self.saved
+            if selected.get(entry[0]) != entry[4]
+        ]
+        return True
+
 
 class CleanScanner:
     def scan(self, content):
@@ -489,8 +497,19 @@ def test_attachment_storage_names_are_safe_and_created_exclusively():
         def put_batch(self, entries):
             return False
 
+    collision_storage = CollisionStorage()
+    collision_storage.saved.append(
+        (
+            "quarantine/random-token-123456", b"pre-existing", NOW,
+            False, "0" * 32,
+        )
+    )
+    staged = []
+    collision_guard = attachment_guard(storage=collision_storage)
     with pytest.raises(SecurityViolation, match="collision"):
-        attachment_guard(storage=CollisionStorage()).ingest((upload(),))
+        collision_guard.ingest((upload(),), on_staging=staged.extend)
+    collision_guard.rollback(staged)
+    assert collision_storage.saved[0][1] == b"pre-existing"
 
 
 def test_multi_attachment_storage_uses_one_atomic_batch_boundary():
@@ -506,6 +525,16 @@ def test_multi_attachment_storage_uses_one_atomic_batch_boundary():
     assert len(stored) == 2
     assert storage.batch_calls == 1
     assert len(storage.saved) == 2
+
+
+def test_attachment_guard_rolls_back_exact_managed_batch():
+    storage = MemoryStorage()
+    guard = attachment_guard(storage=storage)
+    stored = guard.ingest((upload(),))
+
+    guard.rollback(stored)
+
+    assert storage.saved == []
 
 
 def test_attachments_use_random_non_executable_isolated_paths_and_expire():

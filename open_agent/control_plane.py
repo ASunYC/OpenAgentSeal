@@ -600,6 +600,12 @@ class ControlPlane:
             );
             CREATE INDEX IF NOT EXISTS idx_webhook_nonce_expiry
                 ON webhook_nonce_receipts(expires_at);
+            CREATE TABLE IF NOT EXISTS inbox_attachment_staging (
+                event_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                attachments TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         for definition in (
@@ -1301,14 +1307,62 @@ class ControlPlane:
             raise StaleClaimError(f"stale tool effect claim: {tool_call_id}")
         return self._row_to_dict(row)
 
-    def has_unresolved_tool_effect(self, source_event_key: str) -> bool:
+    def prepare_tool_effect_retry(self, source_event_key: str, *, now: datetime) -> bool:
+        """Atomically classify orphaned effects before an inbox retry."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("tool retry time must be timezone-aware")
+        now_value = now.astimezone(timezone.utc).isoformat()
+        conn = self._get_conn()
+        blocked_reason = None
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """UPDATE tool_calls SET state = 'delivery_unknown',
+                   reconciliation = 'manual_required', claim_owner = NULL,
+                   claim_expires_at = NULL,
+                   error = COALESCE(error, 'non-idempotent effect lease expired')
+                   WHERE source_event_key = ? AND state = 'executing'
+                     AND idempotency_mode = 'non_idempotent'
+                     AND claim_expires_at <= ?""",
+                (source_event_key, now_value),
+            )
+            unknown = conn.execute(
+                """SELECT 1 FROM tool_calls WHERE source_event_key = ?
+                   AND state = 'delivery_unknown' LIMIT 1""",
+                (source_event_key,),
+            ).fetchone()
+            if unknown is not None:
+                blocked_reason = "tool effect requires manual reconciliation"
+            else:
+                live = conn.execute(
+                    """SELECT 1 FROM tool_calls WHERE source_event_key = ?
+                       AND state = 'executing' AND claim_expires_at > ? LIMIT 1""",
+                    (source_event_key, now_value),
+                ).fetchone()
+                if live is not None:
+                    blocked_reason = "live executing tool effect blocks Agent retry"
+        if blocked_reason is not None:
+            raise RuntimeError(blocked_reason)
+        return True
+
+    def get_tool_effect(self, tool_call_id: str) -> dict[str, Any]:
+        row = self._get_conn().execute(
+            "SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Tool effect not found: {tool_call_id}")
+        return self._row_to_dict(row)
+
+    def tool_effects_resolved(self, source_event_key: str) -> bool:
         row = self._get_conn().execute(
             """SELECT 1 FROM tool_calls
-               WHERE source_event_key = ? AND state = 'delivery_unknown'
-               LIMIT 1""",
+               WHERE source_event_key = ? AND state != 'completed' LIMIT 1""",
             (source_event_key,),
         ).fetchone()
-        return row is not None
+        return row is None
+
+    def has_unresolved_tool_effect(self, source_event_key: str) -> bool:
+        return not self.tool_effects_resolved(source_event_key)
 
     def create_scheduler_job(
         self,

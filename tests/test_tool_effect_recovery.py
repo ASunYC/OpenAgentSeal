@@ -2,8 +2,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from open_agent.agent import Agent
 from open_agent.control_plane import ControlPlane
 from open_agent.durable_runtime.repository import StaleClaimError
+from open_agent.schema import FunctionCall, LLMResponse, ToolCall
+from open_agent.tools.base import Tool, ToolResult
 
 
 NOW = datetime(2026, 8, 11, 8, 0, tzinfo=timezone.utc)
@@ -148,7 +151,7 @@ def test_retry_admission_blocks_live_and_promotes_expired_non_idempotent(control
         control_plane.prepare_tool_effect_retry(
             '["account-1","event-1"]', now=NOW + timedelta(seconds=10)
         )
-    stored = control_plane.get_tool_call(effect["tool_call_id"])
+    stored = control_plane.get_tool_effect(effect["tool_call_id"])
     assert stored["state"] == "delivery_unknown"
     assert stored["reconciliation"] == "manual_required"
 
@@ -159,7 +162,7 @@ def test_expired_idempotent_effect_requires_explicit_claim_recovery(control_plan
     assert control_plane.prepare_tool_effect_retry(
         '["account-1","event-1"]', now=NOW + timedelta(seconds=10)
     ) is True
-    unchanged = control_plane.get_tool_call(effect["tool_call_id"])
+    unchanged = control_plane.get_tool_effect(effect["tool_call_id"])
     assert unchanged["state"] == "executing"
     assert unchanged["claim_owner"] == "worker-1"
 
@@ -168,3 +171,50 @@ def test_expired_idempotent_effect_requires_explicit_claim_recovery(control_plan
     )
     assert recovered["disposition"] == "execute"
     assert recovered["claim_generation"] == effect["claim_generation"] + 1
+
+
+@pytest.mark.asyncio
+async def test_live_tool_claim_conflict_aborts_agent_instead_of_becoming_tool_result(
+    control_plane, tmp_path
+):
+    class ExternalWrite(Tool):
+        @property
+        def name(self):
+            return "external_write"
+
+        @property
+        def description(self):
+            return "write externally"
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {"value": {"type": "integer"}}}
+
+        async def execute(self, **kwargs):
+            raise AssertionError("live effect claim must prevent execution")
+
+    class OneToolCall:
+        async def generate(self, messages, tools):
+            return LLMResponse(
+                content="", finish_reason="tool_calls",
+                tool_calls=[ToolCall(
+                    id="new-provider-id", type="function",
+                    function=FunctionCall(name="external_write", arguments={"value": 1}),
+                )],
+            )
+
+    live_now = datetime.now(timezone.utc)
+    claim(control_plane, "existing-worker", live_now)
+    agent = Agent(
+        llm_client=OneToolCall(), system_prompt="system", tools=[ExternalWrite()],
+        max_steps=1, workspace_dir=str(tmp_path), tool_access_mode="full",
+    )
+    agent.session_id = "session-1"
+    agent.runtime_control_plane = control_plane
+    agent.runtime_turn_id = "turn-1"
+    agent.source_event_key = '["account-1","event-1"]'
+    agent.tool_effect_owner = "retry-worker"
+    agent.add_user_message("run")
+
+    with pytest.raises(RuntimeError, match="claim failed"):
+        await agent.run()

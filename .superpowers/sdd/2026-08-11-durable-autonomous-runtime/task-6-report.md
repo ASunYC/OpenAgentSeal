@@ -143,3 +143,56 @@ returning an acknowledgement-safe receipt, and never executes the Agent inline.
   untracked local `open_agent/config/config.yaml`; in this worktree those two
   tests fail at fixture setup. The remaining selected Agent/tool tests passed
   `19/19`, and all required Task 1-6 suites above are green.
+
+## Formal review fix round 2
+
+- RED checkpoint: `9c9244b test: reproduce round2 ingress recovery gaps`.
+  Seven focused failures reproduced orphaned tool-effect replay, transport
+  admission outside the ownership transaction, and attachment leakage across
+  rejection and crash boundaries.
+- A worker now classifies effects before every attempt: live `executing` claims
+  block; expired non-idempotent claims become `delivery_unknown/manual_required`;
+  and expired idempotent effects may be reclaimed only through the normal fenced
+  claim operation. Claim/fence conflicts abort the Agent turn. Inbox completion
+  checks and its fenced success transition share one transaction and reject any
+  effect whose state is not `completed`.
+- Polling and gateway admission require the account/transport claim and revalidate
+  its owner, generation, expiry, and transport mode inside the same
+  `BEGIN IMMEDIATE` transaction that inserts the inbox row. A webhook checkpoint
+  remains mutually exclusive with polling/gateway ownership, and stale claims
+  fail before durable admission.
+- Attachment admission now performs size, quota, duplicate, and route preflight
+  before storage. A durable staging manifest is adopted in the successful inbox
+  transaction or recovered on retry. Every stored object carries a per-attempt
+  ownership token; rollback deletes only an object with that exact token, so a
+  generated-path collision cannot remove a pre-existing/adopted object.
+- Staging recovery is keyed by the deterministic event ID and runs before both
+  duplicate lookup and normal admission even if the retry omits attachments;
+  this closes the crash/retry path that could otherwise strand a manifest and
+  owned quarantine object forever.
+- URL attachment descriptors reserve the policy maximum before fetch. The guard
+  then exposes the fetched byte count before manifest/storage, validates it
+  against the declaration, and acquires the actual-size quota lease before the
+  storage commit. Only managed references are admitted to the inbox.
+
+### Fix-round 2 verification
+
+- Focused GREEN:
+  `.venv\Scripts\python.exe -m pytest tests/test_gateway_ingress.py tests/test_tool_effect_recovery.py tests/test_gateway_security.py -q`
+  -> `118 passed`.
+- Required Task 6/runtime compatibility GREEN:
+  `.venv\Scripts\python.exe -m pytest tests/test_gateway_ingress.py tests/test_tool_effect_recovery.py tests/test_runtime_api.py tests/test_session_recovery.py -q`
+  -> `54 passed`.
+- Tasks 1-5 compatibility GREEN: durable models/repository, runtime capabilities,
+  reliable delivery, gateway core/security/credentials, runtime retention, and
+  session recovery -> `308 passed, 2 skipped`.
+- Coverage:
+  `.venv\Scripts\python.exe -m pytest tests/test_gateway_ingress.py tests/test_tool_effect_recovery.py --cov=open_agent.gateway.ingress --cov-report=term-missing -q`
+  -> `46 passed`; Task 6 ingress line coverage `85%`.
+- `python -m compileall -q open_agent` and `git diff --check` passed. Final code
+  review approved the ownership-token cleanup and pre-storage actual-byte quota
+  changes; the security review recorded no Critical/High finding.
+
+### Fix-round 2 concerns
+
+- No Task 6 functional or security blocker remains.
