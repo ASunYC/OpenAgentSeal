@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from math import isfinite
-from typing import Any, Iterable, Mapping, TYPE_CHECKING
+from typing import Any, Callable, Iterable, Mapping, TYPE_CHECKING
 
 from .models import (
     ClaimToken,
@@ -73,6 +73,298 @@ class DurableRuntimeRepository:
 
     def __init__(self, control_plane: ControlPlane):
         self.control_plane = control_plane
+
+    def upsert_channel_account(
+        self,
+        *,
+        account_id: str,
+        adapter_kind: str,
+        default_profile_id: str | None,
+        now: datetime,
+        enabled: bool = True,
+        credential_ref: str | None = None,
+        capabilities: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        for value, name in ((account_id, "account_id"), (adapter_kind, "adapter_kind")):
+            _require_identifier(value, name)
+        if default_profile_id is not None:
+            _require_identifier(default_profile_id, "default_profile_id")
+        now_value = _iso(now)
+        with self._conn:
+            row = self._conn.execute(
+                """
+                INSERT INTO channel_accounts (
+                    account_id, adapter_kind, enabled, credential_ref, default_profile_id,
+                    capabilities, created_at, updated_at, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    adapter_kind=excluded.adapter_kind, enabled=excluded.enabled,
+                    credential_ref=excluded.credential_ref,
+                    default_profile_id=excluded.default_profile_id,
+                    capabilities=excluded.capabilities, updated_at=excluded.updated_at,
+                    metadata=excluded.metadata
+                RETURNING *
+                """,
+                (
+                    account_id,
+                    adapter_kind,
+                    int(enabled),
+                    credential_ref,
+                    default_profile_id,
+                    _json(capabilities or {}),
+                    now_value,
+                    now_value,
+                    _json(metadata or {}),
+                ),
+            ).fetchone()
+        if row is None:
+            raise StateConflictError("channel account upsert returned no row")
+        return self._channel_account(row)
+
+    def get_channel_account(self, account_id: str) -> dict[str, Any] | None:
+        _require_identifier(account_id, "account_id")
+        row = self._conn.execute(
+            "SELECT * FROM channel_accounts WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._channel_account(row)
+
+    def upsert_channel_route(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        now: datetime,
+        sender_id: str = "",
+        profile_id: str | None = None,
+        trigger_policy: str = "default",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        for value, name in ((account_id, "account_id"), (conversation_id, "conversation_id")):
+            _require_identifier(value, name)
+        if not isinstance(sender_id, str):
+            raise ValueError("sender_id must be a string")
+        if profile_id is not None:
+            _require_identifier(profile_id, "profile_id")
+        if trigger_policy not in {"default", "always", "never", "mention", "reply"}:
+            raise ValueError("unsupported trigger_policy")
+        route_id = self._gateway_id("route", account_id, conversation_id, sender_id)
+        now_value = _iso(now)
+        with self._conn:
+            row = self._conn.execute(
+                """
+                INSERT INTO channel_routes (
+                    route_id, account_id, conversation_id, sender_id, profile_id,
+                    trigger_policy, created_at, updated_at, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, conversation_id, sender_id) DO UPDATE SET
+                    profile_id=excluded.profile_id, trigger_policy=excluded.trigger_policy,
+                    updated_at=excluded.updated_at, metadata=excluded.metadata
+                RETURNING *
+                """,
+                (
+                    route_id,
+                    account_id,
+                    conversation_id,
+                    sender_id,
+                    profile_id,
+                    trigger_policy,
+                    now_value,
+                    now_value,
+                    _json(metadata or {}),
+                ),
+            ).fetchone()
+        if row is None:
+            raise StateConflictError("channel route upsert returned no row")
+        return self._channel_route(row, should_dispatch=False)
+
+    def resolve_channel_route(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        sender_id: str,
+        now: datetime,
+        exact: bool = False,
+        expected_adapter_kind: str | None = None,
+        should_dispatch: Callable[[str], bool] | None = None,
+        require_profile: bool = False,
+    ) -> dict[str, Any]:
+        for value, name in (
+            (account_id, "account_id"),
+            (conversation_id, "conversation_id"),
+        ):
+            _require_identifier(value, name)
+        if not isinstance(sender_id, str):
+            raise ValueError("sender_id must be a string")
+        now_value = _iso(now)
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            account_row = conn.execute(
+                "SELECT * FROM channel_accounts WHERE account_id = ?", (account_id,)
+            ).fetchone()
+            if account_row is None:
+                raise StateConflictError("channel account not found")
+            if expected_adapter_kind is not None:
+                _require_identifier(expected_adapter_kind, "expected_adapter_kind")
+                if not bool(account_row["enabled"]):
+                    raise StateConflictError("channel account is disabled")
+                if account_row["adapter_kind"] != expected_adapter_kind:
+                    raise StateConflictError("event adapter does not match channel account")
+            row = conn.execute(
+                """
+                SELECT * FROM channel_routes
+                WHERE account_id = ? AND conversation_id = ?
+                  AND sender_id IN (?, '')
+                ORDER BY CASE WHEN sender_id = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (account_id, conversation_id, sender_id, sender_id),
+            ).fetchone()
+            if exact and (row is None or row["sender_id"] != sender_id):
+                row = None
+            trigger_policy = row["trigger_policy"] if row is not None else "default"
+            dispatch = True if should_dispatch is None else should_dispatch(trigger_policy)
+            if not isinstance(dispatch, bool):
+                raise StateConflictError("route trigger decision must be boolean")
+            profile_id = (
+                row["profile_id"] if row is not None and row["profile_id"] else account_row["default_profile_id"]
+            )
+            if require_profile and not profile_id:
+                raise StateConflictError("channel account has no resolvable profile")
+            if not dispatch:
+                route_id = (
+                    row["route_id"]
+                    if row is not None
+                    else self._gateway_id("route", account_id, conversation_id, sender_id if exact else "")
+                )
+                return {
+                    "route_id": route_id,
+                    "account_id": account_id,
+                    "conversation_id": conversation_id,
+                    "sender_id": row["sender_id"] if row is not None else (sender_id if exact else ""),
+                    "profile_id": profile_id,
+                    "trigger_policy": trigger_policy,
+                    "session_id": None,
+                    "thread_id": None,
+                    "metadata": {},
+                    "should_dispatch": False,
+                }
+            if row is None:
+                route_id = self._gateway_id("route", account_id, conversation_id, sender_id if exact else "")
+                route_sender = sender_id if exact else ""
+                conn.execute(
+                    """
+                    INSERT INTO channel_routes (
+                        route_id, account_id, conversation_id, sender_id,
+                        trigger_policy, created_at, updated_at, metadata
+                    ) VALUES (?, ?, ?, ?, 'default', ?, ?, '{}')
+                    ON CONFLICT(account_id, conversation_id, sender_id) DO NOTHING
+                    """,
+                    (route_id, account_id, conversation_id, route_sender, now_value, now_value),
+                )
+                row = conn.execute(
+                    """SELECT * FROM channel_routes
+                       WHERE account_id = ? AND conversation_id = ? AND sender_id = ?""",
+                    (account_id, conversation_id, route_sender),
+                ).fetchone()
+            route_id = row["route_id"]
+            session_was_bound = row["session_id"] is not None
+            thread_was_bound = row["thread_id"] is not None
+            session_id = row["session_id"] or self._gateway_id("session", route_id)
+            thread_id = row["thread_id"] or self._gateway_id("thread", route_id)
+            principal = (
+                row["sender_id"]
+                if row["sender_id"]
+                else f"gateway:{account_id}:{conversation_id}"
+            )
+            inserted_session = conn.execute(
+                """
+                INSERT INTO sessions (
+                    session_id, channel, user_id, status, created_at, updated_at, metadata
+                ) VALUES (?, 'gateway', ?, 'active', ?, ?, ?)
+                ON CONFLICT(session_id) DO NOTHING
+                RETURNING session_id
+                """,
+                (session_id, principal, now_value, now_value, _json({"route_id": route_id})),
+            ).fetchone()
+            if not session_was_bound and inserted_session is None:
+                raise StateConflictError("gateway session id collision")
+            session_row = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            session = self.control_plane._row_to_dict(session_row)
+            if (
+                session["channel"] != "gateway"
+                or session["user_id"] != principal
+                or session["metadata"].get("route_id") != route_id
+            ):
+                raise StateConflictError("gateway session id collision")
+            inserted_thread = conn.execute(
+                """
+                INSERT INTO runtime_threads (
+                    thread_id, session_id, user_id, title, status,
+                    created_at, updated_at, metadata
+                ) VALUES (?, ?, ?, '', 'active', ?, ?, ?)
+                ON CONFLICT(thread_id) DO NOTHING
+                RETURNING thread_id
+                """,
+                (
+                    thread_id,
+                    session_id,
+                    principal,
+                    now_value,
+                    now_value,
+                    _json({"route_id": route_id}),
+                ),
+            ).fetchone()
+            if not thread_was_bound and inserted_thread is None:
+                raise StateConflictError("gateway thread id collision")
+            thread_row = conn.execute(
+                "SELECT * FROM runtime_threads WHERE thread_id = ?", (thread_id,)
+            ).fetchone()
+            thread = self.control_plane._row_to_dict(thread_row)
+            if (
+                thread["session_id"] != session_id
+                or thread["user_id"] != principal
+                or thread["metadata"].get("route_id") != route_id
+            ):
+                raise StateConflictError("gateway thread id collision")
+            conn.execute(
+                """UPDATE channel_routes SET session_id = ?, thread_id = ?, updated_at = ?
+                   WHERE route_id = ?""",
+                (session_id, thread_id, now_value, route_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM channel_routes WHERE route_id = ?", (route_id,)
+            ).fetchone()
+        value = self._channel_route(row, should_dispatch=True)
+        value["profile_id"] = profile_id
+        return value
+
+    def _channel_account(self, row: sqlite3.Row) -> dict[str, Any]:
+        value = self.control_plane._row_to_dict(row)
+        value["enabled"] = bool(value["enabled"])
+        if isinstance(value["capabilities"], str):
+            value["capabilities"] = json.loads(value["capabilities"])
+        if isinstance(value["metadata"], str):
+            value["metadata"] = json.loads(value["metadata"])
+        return value
+
+    def _channel_route(self, row: sqlite3.Row, *, should_dispatch: bool) -> dict[str, Any]:
+        value = self.control_plane._row_to_dict(row)
+        if isinstance(value["metadata"], str):
+            value["metadata"] = json.loads(value["metadata"])
+        value["should_dispatch"] = should_dispatch
+        return value
+
+    @staticmethod
+    def _gateway_id(prefix: str, *parts: str) -> str:
+        value = "\x1f".join(parts)
+        return f"{prefix}_{uuid.uuid5(uuid.NAMESPACE_URL, value).hex}"
 
     @property
     def _conn(self) -> sqlite3.Connection:
