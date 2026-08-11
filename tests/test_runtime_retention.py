@@ -96,15 +96,22 @@ def test_expired_sensitive_data_is_redacted_while_idempotency_tombstones_remain(
 
     summary = RetentionWorker(repository, policy(), attachment_root).run_once(NOW)
 
-    inbox = repository.get_inbox("event-old")
-    outbox = repository.get_outbox("outbox-old")
+    assert repository.get_inbox("event-old") is None
+    assert repository.get_outbox("outbox-old") is None
+    inbox = repository.list_inbox()[0]
+    outbox = repository.list_outbox()[0]
     assert inbox.payload == {}
     assert inbox.conversation_id == "retained"
-    assert inbox.event_key == "retained:event-old"
+    assert inbox.event_id.startswith("retained:")
+    assert inbox.event_key.startswith("retained:")
+    assert inbox.account_id.startswith("retained:")
+    assert "event-old" not in inbox.event_id
     assert inbox.state == "succeeded"
     assert outbox.payload == {}
-    assert outbox.idempotency_key == "retained:outbox-old"
-    assert outbox.destination == "retained:outbox-old"
+    assert outbox.obligation_id.startswith("retained:")
+    assert outbox.idempotency_key.startswith("retained:")
+    assert outbox.destination.startswith("retained:")
+    assert "outbox-old" not in outbox.obligation_id
     assert outbox.state == "acknowledged"
     assert outbox.acknowledgement is None
     assert outbox.last_error is None
@@ -134,6 +141,9 @@ def test_expired_sensitive_data_is_redacted_while_idempotency_tombstones_remain(
         b"private-conversation-id",
         b"platform-event-key",
         b"stable-idempotency-key",
+        b"event-old",
+        b"outbox-old",
+        b"account-a",
         RETENTION_KEY,
     ):
         assert sensitive not in database_bytes
@@ -157,8 +167,47 @@ def test_expired_sensitive_data_is_redacted_while_idempotency_tombstones_remain(
             {"text": "must not resend"},
         )
     )
-    assert duplicate_inbox.event_id == "event-old"
-    assert duplicate_outbox.obligation_id == "outbox-old"
+    assert duplicate_inbox.event_id == inbox.event_id
+    assert duplicate_outbox.obligation_id == outbox.obligation_id
+
+
+def test_email_and_phone_identifiers_are_absent_from_database_and_wal(runtime):
+    control_plane, repository, attachment_root = runtime
+    email = "alice.retention@example.com"
+    phone = "+15551234567"
+    repository.enqueue_inbox(
+        InboxEvent(
+            f"event:{email}",
+            f"provider:{phone}",
+            email,
+            phone,
+            {"sender": email, "text": phone},
+            created_at=OLD,
+            updated_at=OLD,
+        )
+    )
+    repository.enqueue_outbox(
+        OutboxObligation(
+            f"delivery:{phone}",
+            f"reply:{email}",
+            f"{email}:{phone}",
+            {"recipient": phone},
+            created_at=OLD,
+            updated_at=OLD,
+        )
+    )
+    conn = control_plane._get_conn()
+    with conn:
+        conn.execute("UPDATE inbox_events SET state = 'succeeded'")
+        conn.execute("UPDATE outbox_obligations SET state = 'acknowledged'")
+
+    RetentionWorker(repository, policy(), attachment_root).run_once(NOW)
+
+    for path in (control_plane.db_path, control_plane.db_path.with_name("runtime.db-wal")):
+        if path.exists():
+            contents = path.read_bytes()
+            assert email.encode() not in contents
+            assert phone.encode() not in contents
 
 
 def test_tombstones_and_attachment_queue_survive_external_hmac_key_rotation(
@@ -191,7 +240,7 @@ def test_tombstones_and_attachment_queue_survive_external_hmac_key_rotation(
         NOW + timedelta(seconds=3)
     )
 
-    assert duplicate.obligation_id == "outbox-old"
+    assert duplicate.obligation_id == rotated.list_outbox()[0].obligation_id
     assert retried.attachments_deleted == 1
     assert not attachment.exists()
 
@@ -200,6 +249,53 @@ def test_tombstones_and_attachment_queue_survive_external_hmac_key_rotation(
             control_plane,
             retention_hmac_key=b"task5-test-retention-hmac-key-0003",
         )
+
+
+def test_stale_repository_revalidates_hmac_registry_inside_dedupe_transaction(
+    tmp_path,
+):
+    control_plane = ControlPlane(tmp_path)
+    stale = DurableRuntimeRepository(control_plane, retention_hmac_key=RETENTION_KEY)
+    current_key = b"task5-test-retention-hmac-key-0002"
+    current = DurableRuntimeRepository(
+        control_plane,
+        retention_hmac_key=current_key,
+        previous_retention_hmac_keys=(RETENTION_KEY,),
+    )
+    attachment_root = tmp_path / "attachments"
+    attachment_root.mkdir()
+    try:
+        current.enqueue_inbox(
+            InboxEvent(
+                "event-rolling",
+                "rolling-event-key",
+                "account@example.com",
+                "+15551234567",
+                {"text": "rolling private payload"},
+                created_at=OLD,
+                updated_at=OLD,
+            )
+        )
+        with control_plane._get_conn() as conn:
+            conn.execute(
+                "UPDATE inbox_events SET state = 'succeeded' WHERE event_id = ?",
+                ("event-rolling",),
+            )
+        RetentionWorker(current, policy(), attachment_root).run_once(NOW)
+
+        with pytest.raises(StateConflictError, match="historical HMAC"):
+            stale.enqueue_inbox(
+                InboxEvent(
+                    "event-rolling-duplicate",
+                    "rolling-event-key",
+                    "account@example.com",
+                    "other",
+                    {},
+                )
+            )
+        assert len(current.list_inbox()) == 1
+    finally:
+        control_plane.close()
 
 
 def test_poison_attachment_payload_is_redacted_without_blocking_the_batch(runtime):
@@ -239,13 +335,58 @@ def test_poison_attachment_payload_is_redacted_without_blocking_the_batch(runtim
     )
 
     assert summary.inbox_redacted == 1
-    assert repository.get_inbox("event-poison").payload == {}
-    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 63
+    assert repository.get_inbox("event-poison") is None
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_backlog").fetchone()[0] == 1
     followup = RetentionWorker(repository, policy(batch_limit=1), attachment_root).run_once(
         NOW + timedelta(seconds=1)
     )
     assert followup.inbox_redacted == 1
-    assert repository.get_inbox("event-after-poison").payload == {}
+    assert repository.get_inbox("event-after-poison") is None
+
+
+def test_attachment_enqueue_and_due_work_are_hard_capped_at_64(runtime, monkeypatch):
+    _, repository, attachment_root = runtime
+    for index in range(80):
+        repository.enqueue_inbox(
+            InboxEvent(
+                f"event-cap-{index}",
+                f"key-cap-{index}",
+                "account-a",
+                "private",
+                {"attachments": [{"storage_path": f"missing-{index}.bin"}]},
+                created_at=OLD,
+                updated_at=OLD,
+            )
+        )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute("UPDATE inbox_events SET state = 'succeeded'")
+    worker = RetentionWorker(repository, policy(batch_limit=80), attachment_root)
+    attempted = []
+    monkeypatch.setattr(
+        worker,
+        "_delete_managed_attachment",
+        lambda path: attempted.append(path) or "failed",
+    )
+
+    worker.run_once(NOW)
+
+    assert len(attempted) == 64
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 64
+    deferred_paths = json.loads(
+        conn.execute(
+            "SELECT storage_paths FROM retention_attachment_backlog"
+        ).fetchone()[0]
+    )
+    assert len(deferred_paths) == 16
+    audit_payloads = [
+        json.loads(row[0])
+        for row in conn.execute(
+            "SELECT payload FROM runtime_audit_events WHERE action = 'retention_batch'"
+        )
+    ]
+    assert any(payload.get("attachments_deferred") == 16 for payload in audit_payloads)
 
 
 def test_failed_attachment_backoff_does_not_starve_newer_due_work(runtime, monkeypatch):
@@ -381,7 +522,8 @@ def test_terminal_record_expires_at_the_configured_cutoff(runtime):
     summary = RetentionWorker(repository, policy(), attachment_root).run_once(NOW)
 
     assert summary.inbox_redacted == 1
-    assert repository.get_inbox("event-cutoff").payload == {}
+    assert repository.get_inbox("event-cutoff") is None
+    assert repository.list_inbox()[0].payload == {}
 
 
 def test_attachment_cleanup_rejects_traversal_and_symlink_escape(

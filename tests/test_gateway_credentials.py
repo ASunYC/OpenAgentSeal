@@ -22,6 +22,23 @@ from open_agent.gateway.credentials import (
 NOW = datetime(2026, 8, 11, 8, 0, tzinfo=timezone.utc)
 
 
+def seed_legacy_inline_credential(repository, secret="legacy-inline-secret"):
+    """Model an existing pre-credential-store row without using the normal API."""
+    repository.upsert_channel_account(
+        account_id="legacy-account",
+        adapter_kind="line",
+        default_profile_id=None,
+        credential_ref=None,
+        now=NOW,
+    )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute(
+            "UPDATE channel_accounts SET credential_ref = ? WHERE account_id = ?",
+            (secret, "legacy-account"),
+        )
+
+
 def test_sqlite_receives_only_an_opaque_reference_and_backend_owns_secret(tmp_path):
     control_plane = ControlPlane(tmp_path)
     repository = DurableRuntimeRepository(control_plane)
@@ -110,18 +127,35 @@ def test_rotate_revoke_and_delete_take_effect_immediately():
         store.resolve(secret_ref)
 
 
+@pytest.mark.parametrize(
+    "unsafe_ref",
+    ("INLINE-SECRET", "oas-cred:not-a-uuid", "oas-cred:" + "A" * 32),
+)
+def test_normal_channel_account_upsert_rejects_non_opaque_credentials(
+    tmp_path, unsafe_ref
+):
+    control_plane = ControlPlane(tmp_path)
+    repository = DurableRuntimeRepository(control_plane)
+    try:
+        with pytest.raises(ValueError, match="opaque credential reference"):
+            repository.upsert_channel_account(
+                account_id="account-a",
+                adapter_kind="telegram",
+                default_profile_id=None,
+                credential_ref=unsafe_ref,
+                now=NOW,
+            )
+        assert repository.get_channel_account("account-a") is None
+    finally:
+        control_plane.close()
+
+
 def test_legacy_inline_secret_is_migrated_once_and_replaced_atomically(tmp_path):
     control_plane = ControlPlane(tmp_path)
     repository = DurableRuntimeRepository(control_plane)
     store = CredentialStore(MemoryCredentialBackend())
     try:
-        repository.upsert_channel_account(
-            account_id="legacy-account",
-            adapter_kind="line",
-            default_profile_id=None,
-            credential_ref="legacy-inline-secret",
-            now=NOW,
-        )
+        seed_legacy_inline_credential(repository)
 
         first = store.migrate_legacy_account(repository, "legacy-account", NOW)
         second = store.migrate_legacy_account(repository, "legacy-account", NOW)
@@ -178,13 +212,7 @@ def test_concurrent_legacy_migration_cannot_overwrite_a_later_rotation(tmp_path)
     repository = DurableRuntimeRepository(control_plane)
     backend = BlockingBackend()
     store = CredentialStore(backend)
-    repository.upsert_channel_account(
-        account_id="legacy-account",
-        adapter_kind="line",
-        default_profile_id=None,
-        credential_ref="legacy-inline-secret",
-        now=NOW,
-    )
+    seed_legacy_inline_credential(repository)
     results = []
     threads = [
         threading.Thread(

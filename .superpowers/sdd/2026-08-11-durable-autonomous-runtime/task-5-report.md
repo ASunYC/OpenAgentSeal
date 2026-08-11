@@ -100,3 +100,41 @@ Planned conventional commit: `feat: secure channel credentials and retention`.
 - Overflow attachment auditing is a corruption/security fallback. Supported ingress is
   constrained to the same 64-path retention bound, so integrations must not bypass the
   attachment policy when constructing durable payloads.
+
+## Formal review fix round 1
+
+### RED / GREEN
+
+- RED reproduced all four review findings with seven failures: normal account upsert
+  accepted inline/malformed credential values, retained primary and account identifiers
+  remained enumerable, a stale K1 repository missed the K2 registry update, and an
+  80-item attachment batch attempted all 80 deletions.
+- GREEN focused run: 37 passed; `credentials.py` 82%, `retention.py` 93%, combined 86%.
+- Tasks 1-5 compatibility run: 257 passed with one upstream
+  `python_multipart` deprecation warning.
+- Security-focused run (`gateway_security`, `gateway_credentials`, and
+  `runtime_retention`): 108 passed.
+
+### Fixes
+
+- Normal `upsert_channel_account` now accepts only `None` or the exact generated
+  `oas-cred:<32 lowercase hex>` opaque-reference form. Tests model pre-existing inline
+  secrets by isolated direct legacy fixture state; only the serialized migration API
+  can replace that state with a validated opaque reference.
+- Retention now applies domain-separated HMAC tokens to inbox primary ID, account ID,
+  event key, outbox primary ID, destination, idempotency key, and tombstone record ID.
+  Tests prove representative email, phone, raw primary IDs, account IDs, payloads, and
+  keys are absent from both SQLite and WAL after the secure checkpoint while duplicate
+  enqueue still resolves to the tokenized retained row.
+- Every tombstone lookup and write is guarded by `BEGIN IMMEDIATE` and revalidates the
+  persisted HMAC key registry inside that transaction. A repository initialized with K1
+  now fails closed if a rolling K2 repository registers K2 before a later K1 dedupe.
+- Attachment enqueue and due selection both use `min(batch_limit, 64)`. Excess supported
+  paths are persisted in bounded 64-path backlog pages, audited as deferred, and drained
+  over later runs without retaining the original payload or exceeding the per-run queue
+  cap. Oversized corrupt payload overflow remains explicitly audited.
+
+### Deferred minor
+
+- The formal reviewer classified the `put_async` ledger concern as deferred and outside
+  this fix loop; no behavior change was made for it in round 1.

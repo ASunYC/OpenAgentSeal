@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -55,6 +56,16 @@ def _require_limit(limit: int) -> None:
         raise ValueError("limit must be an integer between 1 and 1000")
 
 
+_OPAQUE_CREDENTIAL_REF = re.compile(r"oas-cred:[0-9a-f]{32}\Z")
+
+
+def _require_opaque_credential_ref(value: str | None) -> None:
+    if value is not None and (
+        not isinstance(value, str) or _OPAQUE_CREDENTIAL_REF.fullmatch(value) is None
+    ):
+        raise ValueError("credential_ref must be an opaque credential reference")
+
+
 def _iso(value: datetime) -> str:
     _require_aware(value, "datetime")
     return value.astimezone(timezone.utc).isoformat()
@@ -90,19 +101,7 @@ class DurableRuntimeRepository:
             raise ValueError("at most 8 retention HMAC keys may be active")
         self.control_plane = control_plane
         self._retention_hmac_keys = retention_keys
-        stored_key_ids = {
-            row[0]
-            for row in self._conn.execute(
-                "SELECT key_id FROM retention_key_registry LIMIT 9"
-            ).fetchall()
-        }
-        configured_key_ids = {
-            self._retention_key_id(key) for key in self._retention_hmac_keys
-        }
-        if not stored_key_ids <= configured_key_ids:
-            raise StateConflictError(
-                "retention tombstones require unavailable historical HMAC keys"
-            )
+        self._validate_retention_key_registry(self._conn)
 
     def upsert_channel_account(
         self,
@@ -120,6 +119,7 @@ class DurableRuntimeRepository:
             _require_identifier(value, name)
         if default_profile_id is not None:
             _require_identifier(default_profile_id, "default_profile_id")
+        _require_opaque_credential_ref(credential_ref)
         now_value = _iso(now)
         with self._conn:
             row = self._conn.execute(
@@ -177,6 +177,7 @@ class DurableRuntimeRepository:
             (credential_ref, "credential_ref"),
         ):
             _require_identifier(value, name)
+        _require_opaque_credential_ref(credential_ref)
         conn = self._conn
         with conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -476,6 +477,7 @@ class DurableRuntimeRepository:
             raise ValueError("new inbox events must be pending and unclaimed")
         conn = self._conn
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             tombstone = self._find_retention_tombstone(
                 conn, "inbox", event.account_id, event.event_key
             )
@@ -638,6 +640,7 @@ class DurableRuntimeRepository:
             raise ValueError("new outbox obligations must be pending and unclaimed")
         conn = self._conn
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             tombstone = self._find_retention_tombstone(
                 conn, "outbox", obligation.destination, obligation.idempotency_key
             )
@@ -710,6 +713,7 @@ class DurableRuntimeRepository:
         events = to_json_value(task.get("events") or [])
         conn = self._conn
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 INSERT INTO sessions (
@@ -920,6 +924,7 @@ class DurableRuntimeRepository:
         conn = self._conn
         with conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._validate_retention_key_registry(conn)
             conn.execute(
                 """INSERT INTO retention_key_registry (key_id, first_used_at)
                    VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
@@ -955,35 +960,75 @@ class DurableRuntimeRepository:
                 (audit_cutoff, remaining),
             ).fetchall()
 
+            queue_limit = min(limit, 64)
+            queued_attachment_paths: list[str] = []
+            backlog_rows = conn.execute(
+                """SELECT backlog_id, storage_paths
+                   FROM retention_attachment_backlog
+                   ORDER BY queued_at, backlog_id LIMIT ?""",
+                (queue_limit,),
+            ).fetchall()
+            for backlog_row in backlog_rows:
+                paths = json.loads(backlog_row["storage_paths"])
+                if not isinstance(paths, list) or any(
+                    not isinstance(path, str) for path in paths
+                ):
+                    raise StateConflictError("invalid retention attachment backlog")
+                available = queue_limit - len(queued_attachment_paths)
+                if available <= 0:
+                    break
+                moving = paths[:available]
+                remaining_paths = paths[available:]
+                queued_attachment_paths.extend(moving)
+                if remaining_paths:
+                    conn.execute(
+                        """UPDATE retention_attachment_backlog SET storage_paths = ?
+                           WHERE backlog_id = ?""",
+                        (_json(remaining_paths), backlog_row["backlog_id"]),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM retention_attachment_backlog WHERE backlog_id = ?",
+                        (backlog_row["backlog_id"],),
+                    )
+
             attachment_paths: list[str] = []
-            accepted_inbox: list[sqlite3.Row] = []
-            accepted_outbox: list[sqlite3.Row] = []
             rejected_attachment_payloads = 0
-            attachment_queue_limit = min(1000, max(64, limit))
-            for entity_kind, row in (
-                *(("inbox", row) for row in inbox_rows),
-                *(("outbox", row) for row in outbox_rows),
-            ):
+            for row in (*inbox_rows, *outbox_rows):
                 paths, overflow = self._attachment_paths(
                     json.loads(row["payload"]), limit=64
                 )
                 if overflow:
                     rejected_attachment_payloads += 1
-                if len(attachment_paths) + len(paths) > attachment_queue_limit:
-                    break
                 attachment_paths.extend(paths)
-                if entity_kind == "inbox":
-                    accepted_inbox.append(row)
-                else:
-                    accepted_outbox.append(row)
-            inbox_rows = accepted_inbox
-            outbox_rows = accepted_outbox
-            inbox_ids = [row["event_id"] for row in inbox_rows]
-            outbox_ids = [row["obligation_id"] for row in outbox_rows]
-            audit_ids = [row["audit_id"] for row in audit_rows]
             attachment_paths = list(dict.fromkeys(attachment_paths))
+            available = queue_limit - len(queued_attachment_paths)
+            queued_attachment_paths.extend(attachment_paths[:available])
+            deferred_attachment_paths = attachment_paths[available:]
 
-            for row in inbox_rows:
+            inbox_retention = [
+                (
+                    row,
+                    self._retention_token("inbox-record", row["event_id"]),
+                    self._retention_token("inbox-account", row["account_id"]),
+                    self._retention_token("inbox-event-key", row["event_key"]),
+                )
+                for row in inbox_rows
+            ]
+            outbox_retention = [
+                (
+                    row,
+                    self._retention_token("outbox-record", row["obligation_id"]),
+                    self._retention_token("outbox-destination", row["destination"]),
+                    self._retention_token(
+                        "outbox-idempotency", row["idempotency_key"]
+                    ),
+                )
+                for row in outbox_rows
+            ]
+            audit_ids = [row["audit_id"] for row in audit_rows]
+
+            for row, retained_id, _, _ in inbox_retention:
                 conn.execute(
                     """INSERT INTO runtime_retention_tombstones (
                            entity_kind, scope_digest, idempotency_digest, key_id,
@@ -995,12 +1040,12 @@ class DurableRuntimeRepository:
                         self._retention_digest(row["account_id"]),
                         self._retention_digest(row["event_key"]),
                         self._retention_key_id(self._retention_hmac_keys[0]),
-                        row["event_id"],
+                        retained_id,
                         row["state"],
                         now_value,
                     ),
                 )
-            for row in outbox_rows:
+            for row, retained_id, _, _ in outbox_retention:
                 conn.execute(
                     """INSERT INTO runtime_retention_tombstones (
                            entity_kind, scope_digest, idempotency_digest, key_id,
@@ -1012,12 +1057,12 @@ class DurableRuntimeRepository:
                         self._retention_digest(row["destination"]),
                         self._retention_digest(row["idempotency_key"]),
                         self._retention_key_id(self._retention_hmac_keys[0]),
-                        row["obligation_id"],
+                        retained_id,
                         row["state"],
                         now_value,
                     ),
                 )
-            for storage_path in attachment_paths:
+            for storage_path in queued_attachment_paths:
                 conn.execute(
                     """INSERT INTO retention_attachment_queue (
                            queue_id, storage_path, queued_at, next_attempt_at
@@ -1029,29 +1074,58 @@ class DurableRuntimeRepository:
                         now_value,
                     ),
                 )
+            for offset in range(0, len(deferred_attachment_paths), 64):
+                conn.execute(
+                    """INSERT INTO retention_attachment_backlog (
+                           backlog_id, storage_paths, queued_at
+                       ) VALUES (?, ?, ?)""",
+                    (
+                        f"backlog:{uuid.uuid4().hex}",
+                        _json(deferred_attachment_paths[offset : offset + 64]),
+                        now_value,
+                    ),
+                )
 
-            if inbox_ids:
+            if inbox_retention:
                 conn.executemany(
                     """UPDATE inbox_events
-                        SET event_key = ?, conversation_id = 'retained',
+                        SET event_id = ?, event_key = ?, account_id = ?,
+                            conversation_id = 'retained',
                             payload = '{}', last_error = NULL,
                             next_attempt_at = NULL, claim_owner = NULL,
                             claim_expires_at = NULL, retained_at = ?
                         WHERE event_id = ?""",
-                    ((f"retained:{event_id}", now_value, event_id) for event_id in inbox_ids),
+                    (
+                        (
+                            retained_id,
+                            retained_event_key,
+                            retained_account,
+                            now_value,
+                            row["event_id"],
+                        )
+                        for row, retained_id, retained_account, retained_event_key
+                        in inbox_retention
+                    ),
                 )
-            if outbox_ids:
+            if outbox_retention:
                 conn.executemany(
                     """UPDATE outbox_obligations
-                        SET destination = ?, idempotency_key = ?, payload = '{}',
+                        SET obligation_id = ?, destination = ?, idempotency_key = ?,
+                            payload = '{}',
                             last_error = NULL, acknowledgement = NULL,
                             next_attempt_at = NULL, claim_owner = NULL,
                             claim_expires_at = NULL, retained_at = ?
                         WHERE obligation_id = ?""",
                     (
-                        (f"retained:{obligation_id}", f"retained:{obligation_id}",
-                         now_value, obligation_id)
-                        for obligation_id in outbox_ids
+                        (
+                            retained_id,
+                            retained_destination,
+                            retained_idempotency,
+                            now_value,
+                            row["obligation_id"],
+                        )
+                        for row, retained_id, retained_destination, retained_idempotency
+                        in outbox_retention
                     ),
                 )
             if audit_ids:
@@ -1062,17 +1136,25 @@ class DurableRuntimeRepository:
                 )
 
             result = {
-                "inbox_redacted": len(inbox_ids),
-                "outbox_redacted": len(outbox_ids),
+                "inbox_redacted": len(inbox_retention),
+                "outbox_redacted": len(outbox_retention),
                 "audit_deleted": len(audit_ids),
                 "attachment_paths": (),
             }
-            if inbox_ids or outbox_ids or audit_ids or rejected_attachment_payloads:
+            if (
+                inbox_retention
+                or outbox_retention
+                or audit_ids
+                or rejected_attachment_payloads
+                or queued_attachment_paths
+                or deferred_attachment_paths
+            ):
                 audit_payload = {
                     "inbox_redacted": result["inbox_redacted"],
                     "outbox_redacted": result["outbox_redacted"],
                     "audit_deleted": result["audit_deleted"],
-                    "attachments_queued": len(attachment_paths),
+                    "attachments_queued": len(queued_attachment_paths),
+                    "attachments_deferred": len(deferred_attachment_paths),
                     "attachment_payloads_rejected": rejected_attachment_payloads,
                 }
                 conn.execute(
@@ -1088,7 +1170,7 @@ class DurableRuntimeRepository:
             """SELECT storage_path FROM retention_attachment_queue
                WHERE next_attempt_at <= ?
                ORDER BY next_attempt_at, queue_id LIMIT ?""",
-            (now_value, limit),
+            (now_value, min(limit, 64)),
         ).fetchall()
         return {**result, "attachment_paths": tuple(row["storage_path"] for row in pending)}
 
@@ -1195,6 +1277,24 @@ class DurableRuntimeRepository:
             raise StateConflictError("retention HMAC key is unavailable")
         return self._retention_digest_with_key(value, self._retention_hmac_keys[0])
 
+    def _retention_token(self, domain: str, value: str) -> str:
+        return f"retained:{self._retention_digest(f'{domain}:{value}')}"
+
+    def _validate_retention_key_registry(self, conn: sqlite3.Connection) -> None:
+        stored_key_ids = {
+            row[0]
+            for row in conn.execute(
+                "SELECT key_id FROM retention_key_registry LIMIT 9"
+            ).fetchall()
+        }
+        configured_key_ids = {
+            self._retention_key_id(key) for key in self._retention_hmac_keys
+        }
+        if not stored_key_ids <= configured_key_ids:
+            raise StateConflictError(
+                "retention tombstones require unavailable historical HMAC keys"
+            )
+
     def _find_retention_tombstone(
         self,
         conn: sqlite3.Connection,
@@ -1202,6 +1302,7 @@ class DurableRuntimeRepository:
         scope: str,
         idempotency_key: str,
     ) -> sqlite3.Row | None:
+        self._validate_retention_key_registry(conn)
         if not self._retention_hmac_keys:
             existing = conn.execute(
                 "SELECT 1 FROM runtime_retention_tombstones LIMIT 1"

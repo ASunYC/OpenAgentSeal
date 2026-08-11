@@ -423,6 +423,12 @@ class ControlPlane:
                 last_error TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS retention_attachment_backlog (
+                backlog_id TEXT PRIMARY KEY,
+                storage_paths TEXT NOT NULL,
+                queued_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_inbox_state_due
                 ON inbox_events(state, next_attempt_at, created_at);
             CREATE INDEX IF NOT EXISTS idx_outbox_state_due
