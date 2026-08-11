@@ -79,12 +79,13 @@ def seed_expired_records(repository, attachment_path="payload.bin"):
     )
 
 
-def policy(batch_limit=100):
+def policy(batch_limit=100, attachment_max_attempts=5):
     return RetentionPolicy(
         inbox_payload_ttl=timedelta(days=30),
         outbox_delivery_ttl=timedelta(days=30),
         audit_ttl=timedelta(days=30),
         batch_limit=batch_limit,
+        attachment_max_attempts=attachment_max_attempts,
     )
 
 
@@ -444,6 +445,118 @@ def test_full_retry_queue_defers_backlog_until_ack_releases_slots(runtime, monke
     assert len(set(attempted)) == 80
 
 
+def test_terminal_attachment_failures_release_capacity_and_can_be_requeued(
+    runtime, monkeypatch
+):
+    _, repository, attachment_root = runtime
+    for index in range(80):
+        repository.enqueue_inbox(
+            InboxEvent(
+                f"event-dead-letter-{index}",
+                f"key-dead-letter-{index}",
+                "account-a",
+                "private",
+                {"attachments": [{"storage_path": f"dead-letter-{index}.bin"}]},
+                created_at=OLD,
+                updated_at=OLD,
+            )
+        )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute("UPDATE inbox_events SET state = 'succeeded'")
+    worker = RetentionWorker(
+        repository,
+        policy(batch_limit=80, attachment_max_attempts=2),
+        attachment_root,
+    )
+    monkeypatch.setattr(worker, "_delete_managed_attachment", lambda path: "failed")
+
+    worker.run_once(NOW)
+    persisted_retry = conn.execute(
+        "SELECT attempt, next_attempt_at FROM retention_attachment_queue LIMIT 1"
+    ).fetchone()
+    assert persisted_retry["attempt"] == 1
+    assert datetime.fromisoformat(persisted_retry["next_attempt_at"]) == (
+        NOW + timedelta(seconds=2)
+    )
+
+    worker.run_once(NOW + timedelta(seconds=2))
+
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 0
+    dead_letters = repository.list_retention_attachment_dead_letters(limit=100)
+    assert len(dead_letters) == 64
+    assert {item["attempt"] for item in dead_letters} == {2}
+    assert all(item["storage_path"] not in item["dead_letter_id"] for item in dead_letters)
+    audit_payloads = [
+        json.loads(row[0])
+        for row in conn.execute(
+            "SELECT payload FROM runtime_audit_events WHERE action = 'attachment_retention'"
+        )
+    ]
+    assert any(payload.get("attachments_quarantined") == 64 for payload in audit_payloads)
+
+    worker.run_once(NOW + timedelta(seconds=3))
+
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 16
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_backlog").fetchone()[0] == 0
+    live_paths = {
+        row[0]
+        for row in conn.execute(
+            "SELECT storage_path FROM retention_attachment_queue"
+        )
+    }
+    dead_paths = {
+        item["storage_path"]
+        for item in repository.list_retention_attachment_dead_letters(limit=100)
+    }
+    assert len(live_paths | dead_paths) == 80
+
+    for item in dead_letters[:48]:
+        assert repository.requeue_retention_attachment(
+            item["dead_letter_id"], actor_id="operator-a", now=NOW + timedelta(seconds=4)
+        )
+    blocked = dead_letters[48]
+    assert not repository.requeue_retention_attachment(
+        blocked["dead_letter_id"], actor_id="operator-a", now=NOW + timedelta(seconds=4)
+    )
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 64
+
+    released_path = conn.execute(
+        "SELECT storage_path FROM retention_attachment_queue LIMIT 1"
+    ).fetchone()[0]
+    repository.complete_retention_attachments(
+        {released_path: "deleted"}, now=NOW + timedelta(seconds=5)
+    )
+    assert repository.requeue_retention_attachment(
+        blocked["dead_letter_id"], actor_id="operator-a", now=NOW + timedelta(seconds=5)
+    )
+    assert not repository.requeue_retention_attachment(
+        blocked["dead_letter_id"], actor_id="operator-a", now=NOW + timedelta(seconds=5)
+    )
+    active_paths = [
+        row[0]
+        for row in conn.execute(
+            "SELECT storage_path FROM retention_attachment_queue"
+        )
+    ]
+    assert len(active_paths) == 64
+    assert len(set(active_paths)) == 64
+
+
+def test_dead_letter_controls_reject_invalid_attempts_and_untrusted_ids(runtime):
+    _, repository, _ = runtime
+
+    with pytest.raises(ValueError, match="max_attempts"):
+        repository.complete_retention_attachments({}, now=NOW, max_attempts=0)
+    with pytest.raises(ValueError, match="dead_letter_id"):
+        repository.requeue_retention_attachment(
+            "alice@example.com", actor_id="operator-a", now=NOW
+        )
+    assert repository.list_audit_events(
+        "retention_attachment_dead_letter", "alice@example.com"
+    ) == []
+
+
 def test_failed_attachment_backoff_does_not_starve_newer_due_work(runtime, monkeypatch):
     _, repository, attachment_root = runtime
     for index, path in enumerate(("blocked.bin", "new.bin")):
@@ -625,6 +738,9 @@ def test_attachment_cleanup_rejects_non_relative_managed_paths(runtime, unsafe_p
         {"batch_limit": 0},
         {"batch_limit": 1001},
         {"batch_limit": True},
+        {"attachment_max_attempts": 0},
+        {"attachment_max_attempts": 101},
+        {"attachment_max_attempts": True},
     ],
 )
 def test_retention_policy_rejects_invalid_or_unbounded_configuration(change):
@@ -633,6 +749,7 @@ def test_retention_policy_rejects_invalid_or_unbounded_configuration(change):
         "outbox_delivery_ttl": timedelta(days=30),
         "audit_ttl": timedelta(days=30),
         "batch_limit": 100,
+        "attachment_max_attempts": 5,
     }
     values.update(change)
     with pytest.raises((TypeError, ValueError)):

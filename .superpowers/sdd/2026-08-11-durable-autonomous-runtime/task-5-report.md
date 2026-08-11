@@ -157,3 +157,30 @@ Planned conventional commit: `feat: secure channel credentials and retention`.
 - Final Tasks 1-5 compatibility run: 258 passed with one upstream
   `python_multipart` deprecation warning.
 - Final security-focused run: 109 passed.
+
+## Formal review fix round 3
+
+- RED: 64 deletion failures remained active indefinitely, kept global occupancy at 64,
+  and prevented the 16-path bounded backlog from ever advancing.
+- GREEN: `RetentionPolicy.attachment_max_attempts` now defaults to a finite 5 and is
+  validated as an integer from 1 through 100. The worker passes it to repository outcome
+  completion; attempts and exponential `next_attempt_at` remain persisted in the active
+  queue.
+- When the limit is reached, the active row moves atomically into
+  `retention_attachment_dead_letters` with its HMAC identifier, recoverable managed path,
+  terminal attempt, sanitized error, and quarantine timestamp. The active row is deleted
+  only after the quarantine insert succeeds, and the attachment audit records the
+  quarantine count. Operator listing is indexed and bounded.
+- `requeue_retention_attachment` requires a strict HMAC dead-letter identifier and actor,
+  revalidates HMAC keys, serializes with `BEGIN IMMEDIATE`, rejects duplicates, and
+  inserts only when global active occupancy is below 64. Success, capacity refusal,
+  duplicate, and not-found outcomes are audited without copying the deletion path into
+  audit data.
+- The regression drives 64 paths through the configured two-attempt limit, proves the
+  16-path backlog then fills released slots without loss, fills active occupancy back to
+  64 through explicit operator requeue, proves capacity refusal, releases one slot, and
+  proves exactly one idempotent requeue succeeds.
+- Final focused run: 43 passed; `credentials.py` 82%, `retention.py` 93%, combined 86%.
+- Final Tasks 1-5 compatibility run: 263 passed with one upstream
+  `python_multipart` deprecation warning.
+- Final security-focused run: 114 passed.

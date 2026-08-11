@@ -429,6 +429,14 @@ class ControlPlane:
                 queued_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS retention_attachment_dead_letters (
+                dead_letter_id TEXT PRIMARY KEY,
+                storage_path TEXT NOT NULL UNIQUE,
+                attempt INTEGER NOT NULL,
+                last_error TEXT NOT NULL,
+                quarantined_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_inbox_state_due
                 ON inbox_events(state, next_attempt_at, created_at);
             CREATE INDEX IF NOT EXISTS idx_outbox_state_due
@@ -493,6 +501,8 @@ class ControlPlane:
                 WHERE state IN ('acknowledged', 'dead_letter', 'delivery_unknown');
             CREATE INDEX IF NOT EXISTS idx_attachment_retention_due
                 ON retention_attachment_queue(next_attempt_at, queue_id);
+            CREATE INDEX IF NOT EXISTS idx_attachment_dead_letter_time
+                ON retention_attachment_dead_letters(quarantined_at, dead_letter_id);
             CREATE INDEX IF NOT EXISTS idx_retention_tombstone_key_id
                 ON runtime_retention_tombstones(key_id);
             """

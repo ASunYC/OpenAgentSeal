@@ -18,6 +18,7 @@ class RetentionPolicy:
     outbox_delivery_ttl: timedelta
     audit_ttl: timedelta
     batch_limit: int = 100
+    attachment_max_attempts: int = 5
 
     def __post_init__(self) -> None:
         for name in (
@@ -36,6 +37,14 @@ class RetentionPolicy:
             or not 1 <= self.batch_limit <= 1000
         ):
             raise ValueError("batch_limit must be an integer between 1 and 1000")
+        if (
+            isinstance(self.attachment_max_attempts, bool)
+            or not isinstance(self.attachment_max_attempts, int)
+            or not 1 <= self.attachment_max_attempts <= 100
+        ):
+            raise ValueError(
+                "attachment_max_attempts must be an integer between 1 and 100"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +100,11 @@ class RetentionWorker:
                 rejected += 1
             elif outcome == "failed":
                 failed += 1
-        self._repository.complete_retention_attachments(outcomes, now=now)
+        self._repository.complete_retention_attachments(
+            outcomes,
+            now=now,
+            max_attempts=self._policy.attachment_max_attempts,
+        )
         self._repository.secure_checkpoint()
         return RetentionSummary(
             inbox_redacted=batch["inbox_redacted"],

@@ -58,6 +58,7 @@ def _require_limit(limit: int) -> None:
 
 
 _OPAQUE_CREDENTIAL_REF = re.compile(r"oas-cred:[0-9a-f]{32}\Z")
+_RETENTION_DIGEST_ID = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _require_opaque_credential_ref(value: str | None) -> None:
@@ -65,6 +66,11 @@ def _require_opaque_credential_ref(value: str | None) -> None:
         not isinstance(value, str) or _OPAQUE_CREDENTIAL_REF.fullmatch(value) is None
     ):
         raise ValueError("credential_ref must be an opaque credential reference")
+
+
+def _require_retention_digest_id(value: str, name: str) -> None:
+    if not isinstance(value, str) or _RETENTION_DIGEST_ID.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a retention digest identifier")
 
 
 def _iso(value: datetime) -> str:
@@ -1183,8 +1189,15 @@ class DurableRuntimeRepository:
         outcomes: Mapping[str, str],
         *,
         now: datetime,
+        max_attempts: int = 5,
     ) -> None:
         """Acknowledge safe deletion outcomes while retaining transient failures for retry."""
+        if (
+            isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or not 1 <= max_attempts <= 100
+        ):
+            raise ValueError("max_attempts must be an integer between 1 and 100")
         if not outcomes:
             return
         if len(outcomes) > 1000:
@@ -1193,8 +1206,10 @@ class DurableRuntimeRepository:
         if any(outcome not in allowed for outcome in outcomes.values()):
             raise ValueError("unsupported attachment retention outcome")
         now_value = _iso(now)
-        counts = {name: 0 for name in allowed}
-        with self._conn:
+        counts = {name: 0 for name in (*allowed, "quarantined")}
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
             for storage_path, outcome in outcomes.items():
                 counts[outcome] += 1
                 queue_ids = tuple(
@@ -1205,14 +1220,47 @@ class DurableRuntimeRepository:
                     raise StateConflictError("retention HMAC key is unavailable")
                 placeholders = ",".join("?" for _ in queue_ids)
                 if outcome == "failed":
-                    row = self._conn.execute(
-                        f"""SELECT MAX(attempt) FROM retention_attachment_queue
-                            WHERE queue_id IN ({placeholders})""",
+                    row = conn.execute(
+                        f"""SELECT storage_path, attempt
+                            FROM retention_attachment_queue
+                            WHERE queue_id IN ({placeholders})
+                            ORDER BY attempt DESC LIMIT 1""",
                         queue_ids,
                     ).fetchone()
-                    attempt = int(row[0] or 0) + 1
+                    if row is None:
+                        continue
+                    attempt = int(row["attempt"]) + 1
+                    if attempt >= max_attempts:
+                        conn.execute(
+                            """INSERT INTO retention_attachment_dead_letters (
+                                   dead_letter_id, storage_path, attempt, last_error,
+                                   quarantined_at
+                               ) VALUES (?, ?, ?, 'delete_failed', ?)
+                               ON CONFLICT(storage_path) DO UPDATE SET
+                                   attempt = MAX(
+                                       retention_attachment_dead_letters.attempt,
+                                       excluded.attempt
+                                   ),
+                                   last_error = excluded.last_error,
+                                   quarantined_at = excluded.quarantined_at""",
+                            (
+                                self._retention_digest(
+                                    f"dead-letter:{row['storage_path']}"
+                                ),
+                                row["storage_path"],
+                                attempt,
+                                now_value,
+                            ),
+                        )
+                        conn.execute(
+                            f"""DELETE FROM retention_attachment_queue
+                                WHERE queue_id IN ({placeholders})""",
+                            queue_ids,
+                        )
+                        counts["quarantined"] += 1
+                        continue
                     retry_at = _iso(now + timedelta(seconds=min(2**attempt, 3600)))
-                    self._conn.execute(
+                    conn.execute(
                         f"""UPDATE retention_attachment_queue
                            SET attempt = attempt + 1, last_error = 'delete_failed',
                                next_attempt_at = ?
@@ -1220,12 +1268,12 @@ class DurableRuntimeRepository:
                         (retry_at, *queue_ids),
                     )
                 else:
-                    self._conn.execute(
+                    conn.execute(
                         f"""DELETE FROM retention_attachment_queue
                             WHERE queue_id IN ({placeholders})""",
                         queue_ids,
                     )
-            self._conn.execute(
+            conn.execute(
                 """INSERT INTO runtime_audit_events (
                        audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
                    ) VALUES (?, 'retention', 'runtime', 'attachment_retention',
@@ -1236,6 +1284,108 @@ class DurableRuntimeRepository:
                     now_value,
                 ),
             )
+
+    def list_retention_attachment_dead_letters(
+        self, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return a bounded operator view of terminal attachment deletion failures."""
+        _require_limit(limit)
+        rows = self._conn.execute(
+            """SELECT dead_letter_id, storage_path, attempt, last_error, quarantined_at
+               FROM retention_attachment_dead_letters
+               ORDER BY quarantined_at, dead_letter_id LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "dead_letter_id": row["dead_letter_id"],
+                "storage_path": row["storage_path"],
+                "attempt": row["attempt"],
+                "last_error": row["last_error"],
+                "quarantined_at": datetime.fromisoformat(row["quarantined_at"]),
+            }
+            for row in rows
+        ]
+
+    def requeue_retention_attachment(
+        self,
+        dead_letter_id: str,
+        *,
+        actor_id: str,
+        now: datetime,
+    ) -> bool:
+        """Explicitly move one quarantined deletion back to the capped active queue."""
+        _require_retention_digest_id(dead_letter_id, "dead_letter_id")
+        _require_identifier(actor_id, "actor_id")
+        now_value = _iso(now)
+        conn = self._conn
+        result = "not_found"
+        prior_attempt: int | None = None
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._validate_retention_key_registry(conn)
+            row = conn.execute(
+                """SELECT storage_path, attempt
+                   FROM retention_attachment_dead_letters
+                   WHERE dead_letter_id = ?""",
+                (dead_letter_id,),
+            ).fetchone()
+            if row is not None:
+                prior_attempt = int(row["attempt"])
+                queue_ids = tuple(
+                    self._retention_digest_with_key(row["storage_path"], key)
+                    for key in self._retention_hmac_keys
+                )
+                if not queue_ids:
+                    raise StateConflictError("retention HMAC key is unavailable")
+                placeholders = ",".join("?" for _ in queue_ids)
+                duplicate = conn.execute(
+                    f"""SELECT 1 FROM retention_attachment_queue
+                        WHERE queue_id IN ({placeholders}) LIMIT 1""",
+                    queue_ids,
+                ).fetchone()
+                occupancy = conn.execute(
+                    "SELECT COUNT(*) FROM retention_attachment_queue"
+                ).fetchone()[0]
+                if duplicate is not None:
+                    result = "already_active"
+                elif occupancy >= 64:
+                    result = "capacity_full"
+                else:
+                    conn.execute(
+                        """INSERT INTO retention_attachment_queue (
+                               queue_id, storage_path, queued_at, next_attempt_at
+                           ) VALUES (?, ?, ?, ?)""",
+                        (
+                            self._retention_digest(row["storage_path"]),
+                            row["storage_path"],
+                            now_value,
+                            now_value,
+                        ),
+                    )
+                    conn.execute(
+                        """DELETE FROM retention_attachment_dead_letters
+                           WHERE dead_letter_id = ?""",
+                        (dead_letter_id,),
+                    )
+                    result = "requeued"
+            audit_payload: dict[str, Any] = {"result": result}
+            if prior_attempt is not None:
+                audit_payload["prior_attempt"] = prior_attempt
+            conn.execute(
+                """INSERT INTO runtime_audit_events (
+                       audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
+                   ) VALUES (?, 'retention_attachment_dead_letter', ?,
+                             'retention_attachment_requeue', ?, ?, ?)""",
+                (
+                    f"retention-requeue:{uuid.uuid4().hex}",
+                    dead_letter_id,
+                    actor_id,
+                    _json(audit_payload),
+                    now_value,
+                ),
+            )
+        return result == "requeued"
 
     def secure_checkpoint(self) -> None:
         """Remove securely-deleted content from WAL before reporting retention complete."""
