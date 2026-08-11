@@ -1,0 +1,1 @@
+{"op":0,"s":42,"t":"MESSAGE_CREATE","d":{"id":"d-1","channel_id":"d-chat","guild_id":"d-guild","author":{"id":"d-user"},"content":"<@999> hello","mentions":[{"id":"999"}],"message_reference":{"message_id":"d-bot-message"},"referenced_message":{"author":{"id":"999","bot":true}}}}

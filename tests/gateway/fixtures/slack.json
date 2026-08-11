@@ -1,0 +1,1 @@
+{"type":"event_callback","team_id":"T1","event_id":"Ev1","event":{"type":"app_mention","channel":"C1","user":"U1","text":"<@B1> hello","ts":"1.01","thread_ts":"1.00","parent_user_id":"B1"}}

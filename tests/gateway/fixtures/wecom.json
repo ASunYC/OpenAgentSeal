@@ -1,0 +1,1 @@
+{"cmd":"aibot_msg_callback","headers":{"req_id":"wx-1"},"body":{"msgid":"wx-msg-1","chattype":"group","chatid":"wx-chat","from":{"userid":"wx-user"},"text":{"content":"@Seal hello"},"mentioned_bot":true,"quote":{"msgid":"wx-bot-msg","from_bot":true}}}

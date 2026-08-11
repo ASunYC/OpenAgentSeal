@@ -1,0 +1,1 @@
+{"op":0,"s":7,"t":"GROUP_AT_MESSAGE_CREATE","id":"qq-event-1","d":{"id":"qq-msg-1","group_openid":"qq-group","author":{"member_openid":"qq-user"},"content":"<@!qq-bot> hello","timestamp":"2026-08-11T00:00:00Z"}}

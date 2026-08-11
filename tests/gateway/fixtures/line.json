@@ -1,0 +1,1 @@
+{"destination":"line-bot","events":[{"type":"message","webhookEventId":"line-1","timestamp":1,"source":{"type":"group","groupId":"line-group","userId":"line-user"},"replyToken":"reply-1","message":{"id":"line-msg-1","type":"text","text":"hello","mention":{"mentionees":[{"type":"user","userId":"line-bot","isSelf":true}]}},"quotedMessageId":"line-bot-msg"}]}
