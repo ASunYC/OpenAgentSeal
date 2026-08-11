@@ -6,8 +6,24 @@ Following CoPaw's architecture pattern for session management.
 
 from datetime import datetime
 from typing import Optional, List, Any, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 import uuid
+
+
+class StrictOperationalModel(BaseModel):
+    """Strict boundary model used by authenticated operational endpoints."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+
+class OperationalMeta(StrictOperationalModel):
+    next_cursor: str | None = None
+
+
+class OperationalResponse(StrictOperationalModel):
+    success: bool = True
+    data: Any
+    meta: OperationalMeta | None = None
 
 
 class ChatSpec(BaseModel):

@@ -19,11 +19,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from open_agent.app.runner.models import AgentRequest, AgentEvent, Message
+from open_agent.app.runner.auth import require_authenticated
 from open_agent.app.runner.manager import get_chat_manager
 from open_agent.app.runner.runner import get_runner
 from open_agent.app.runner.file_parser import MAX_FILE_BYTES
@@ -41,7 +42,10 @@ router = APIRouter(prefix="/api", tags=["chat"])
 
 
 @router.get("/runtime/supervisor/health")
-async def durable_runtime_supervisor_health(request: Request) -> dict:
+async def durable_runtime_supervisor_health(
+    request: Request,
+    _principal=Depends(require_authenticated),
+) -> dict:
     """Expose a secret-free lifecycle snapshot for readiness diagnostics."""
     from dataclasses import asdict
 

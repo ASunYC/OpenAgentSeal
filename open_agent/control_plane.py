@@ -436,7 +436,9 @@ class ControlPlane:
                 claim_generation INTEGER NOT NULL DEFAULT 0,
                 claim_expires_at TEXT,
                 file_identity TEXT NOT NULL,
-                file_identity_tag TEXT NOT NULL
+                file_identity_tag TEXT NOT NULL,
+                tenant_id TEXT,
+                owner_actor_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS retention_attachment_backlog (
@@ -458,7 +460,9 @@ class ControlPlane:
                 file_identity_tag TEXT NOT NULL,
                 attempt INTEGER NOT NULL,
                 last_error TEXT NOT NULL,
-                quarantined_at TEXT NOT NULL
+                quarantined_at TEXT NOT NULL,
+                tenant_id TEXT,
+                owner_actor_id TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_inbox_state_due
@@ -473,6 +477,47 @@ class ControlPlane:
                 ON runtime_audit_events(entity_kind, entity_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_runtime_audit_retention
                 ON runtime_audit_events(created_at, audit_id);
+            CREATE TABLE IF NOT EXISTS runtime_operational_ownership (
+                entity_kind TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                owner_actor_id TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(entity_kind, entity_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_runtime_operational_owner
+                ON runtime_operational_ownership(
+                    tenant_id, owner_actor_id, entity_kind, entity_id
+                );
+            CREATE TABLE IF NOT EXISTS runtime_retention_requests (
+                request_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                owner_actor_id TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS runtime_retention_policy (
+                tenant_id TEXT PRIMARY KEY,
+                inbox_days INTEGER NOT NULL,
+                outbox_days INTEGER NOT NULL,
+                audit_days INTEGER NOT NULL,
+                version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS runtime_credential_cleanup (
+                cleanup_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                credential_ref TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                attempt INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL,
+                completed_at TEXT,
+                last_error TEXT
+            );
             """
         )
         for definition in (
@@ -615,6 +660,8 @@ class ControlPlane:
             "claim_expires_at TEXT",
             "file_identity TEXT",
             "file_identity_tag TEXT",
+            "tenant_id TEXT",
+            "owner_actor_id TEXT",
         ):
             self._ensure_column(conn, "retention_attachment_queue", definition)
         for definition in (
@@ -623,6 +670,8 @@ class ControlPlane:
             "generation TEXT",
             "file_identity TEXT",
             "file_identity_tag TEXT",
+            "tenant_id TEXT",
+            "owner_actor_id TEXT",
         ):
             self._ensure_column(
                 conn, "retention_attachment_dead_letters", definition

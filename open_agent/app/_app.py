@@ -58,6 +58,10 @@ async def lifespan(app: FastAPI):
 
         composition = get_runtime_composition()
         app.state.runtime_composition = composition
+        if getattr(composition, "operational_auth", None) is not None:
+            app.state.operational_auth = composition.operational_auth
+        if getattr(composition, "credential_store", None) is not None:
+            app.state.operational_credentials = composition.credential_store
         try:
             await composition.supervisor.start()
             yield
@@ -86,12 +90,20 @@ def create_app() -> FastAPI:
     )
 
     # CORS middleware
+    allowed_origins = [
+        origin.strip()
+        for origin in os.environ.get(
+            "OPEN_AGENT_ALLOWED_ORIGINS",
+            "http://127.0.0.1:8088,http://localhost:8088",
+        ).split(",")
+        if origin.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     )
 
     # Include chat router
@@ -100,6 +112,11 @@ def create_app() -> FastAPI:
     from open_agent.app.mobile import router as mobile_router
     from open_agent.app.mobile import is_remote_api_request_allowed
     from open_agent.app.sandbox import router as sandbox_router
+    from open_agent.app.runner.gateway_api import (
+        install_operational_error_handlers,
+        router as gateway_operations_router,
+    )
+    from open_agent.app.runner.autonomics_api import router as autonomics_operations_router
 
     @app.middleware("http")
     async def remote_api_guard(request: Request, call_next):
@@ -114,6 +131,9 @@ def create_app() -> FastAPI:
     app.include_router(workspace_router)
     app.include_router(mobile_router)
     app.include_router(sandbox_router)
+    app.include_router(gateway_operations_router)
+    app.include_router(autonomics_operations_router)
+    install_operational_error_handlers(app)
     app.mount("/api/plugins/mineru-mcp", _get_mineru_mcp_app())
 
     # Include application routes not owned by the chat router.

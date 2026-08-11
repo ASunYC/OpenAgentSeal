@@ -10,6 +10,7 @@ from math import isfinite
 import os
 from pathlib import Path, PureWindowsPath
 import stat
+import threading
 import time
 from typing import Callable
 
@@ -186,6 +187,7 @@ class RetentionWorker:
     ) -> None:
         self._repository = repository
         self._policy = policy
+        self._policy_lock = threading.Lock()
         root = Path(attachment_root)
         if not root.exists() or not root.is_dir():
             raise ValueError("attachment_root must be an existing directory")
@@ -201,6 +203,8 @@ class RetentionWorker:
         started = self._monotonic()
         if not isfinite(started):
             raise ValueError("retention monotonic clock must be finite")
+        with self._policy_lock:
+            policy = self._policy
 
         def operation_now() -> datetime:
             current = self._monotonic()
@@ -211,10 +215,10 @@ class RetentionWorker:
 
         batch = self._repository.apply_retention_batch(
             now=now,
-            inbox_before=now - self._policy.inbox_payload_ttl,
-            outbox_before=now - self._policy.outbox_delivery_ttl,
-            audit_before=now - self._policy.audit_ttl,
-            limit=self._policy.batch_limit,
+            inbox_before=now - policy.inbox_payload_ttl,
+            outbox_before=now - policy.outbox_delivery_ttl,
+            audit_before=now - policy.audit_ttl,
+            limit=policy.batch_limit,
         )
         outcomes: dict[RetentionAttachmentClaim, str] = {}
         for claim in batch["attachment_claims"]:
@@ -222,7 +226,7 @@ class RetentionWorker:
         completion = self._repository.complete_retention_attachments(
             outcomes,
             now=operation_now(),
-            max_attempts=self._policy.attachment_max_attempts,
+            max_attempts=policy.attachment_max_attempts,
         )
         self._repository.secure_checkpoint()
         return RetentionSummary(
@@ -236,6 +240,12 @@ class RetentionWorker:
             attachments_fenced=completion["fenced"],
             attachments_no_op=completion["no_op"],
         )
+
+    def set_policy(self, policy: RetentionPolicy) -> None:
+        if not isinstance(policy, RetentionPolicy):
+            raise TypeError("policy must be a RetentionPolicy")
+        with self._policy_lock:
+            self._policy = policy
 
     def _delete_managed_attachment(
         self,

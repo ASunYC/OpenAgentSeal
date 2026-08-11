@@ -884,6 +884,57 @@ class DurableRuntimeRepository:
     def _conn(self) -> sqlite3.Connection:
         return self.control_plane._get_conn()
 
+    def bind_operational_owner(
+        self, *, entity_kind: str, entity_id: str, tenant_id: str, owner_actor_id: str,
+    ) -> None:
+        """Bind an entity to immutable operational authority; never stored in metadata."""
+        for value, name in (
+            (entity_kind, "entity_kind"), (entity_id, "entity_id"),
+            (tenant_id, "tenant_id"), (owner_actor_id, "owner_actor_id"),
+        ):
+            _require_identifier(value, name)
+            if len(value.encode("utf-8")) > 128:
+                raise ValueError(f"{name} exceeds the byte limit")
+        now = _iso(datetime.now(timezone.utc))
+        with self._conn:
+            row = self._conn.execute(
+                """INSERT INTO runtime_operational_ownership (
+                       entity_kind, entity_id, tenant_id, owner_actor_id, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(entity_kind, entity_id) DO UPDATE SET updated_at=excluded.updated_at
+                   WHERE tenant_id=excluded.tenant_id AND owner_actor_id=excluded.owner_actor_id
+                   RETURNING tenant_id, owner_actor_id""",
+                (entity_kind, entity_id, tenant_id, owner_actor_id, now, now),
+            ).fetchone()
+        if row is None or row["tenant_id"] != tenant_id or row["owner_actor_id"] != owner_actor_id:
+            raise StateConflictError("resource ownership is immutable")
+
+    def operational_owner_matches(
+        self, entity_kind: str, entity_id: str, tenant_id: str, owner_actor_id: str | None = None,
+    ) -> bool:
+        query = """SELECT 1 FROM runtime_operational_ownership
+                   WHERE entity_kind=? AND entity_id=? AND tenant_id=?"""
+        params: list[Any] = [entity_kind, entity_id, tenant_id]
+        if owner_actor_id is not None:
+            query += " AND owner_actor_id=?"
+            params.append(owner_actor_id)
+        return self._conn.execute(query, params).fetchone() is not None
+
+    def list_operational_ids(
+        self, *, entity_kind: str, tenant_id: str, owner_actor_id: str | None,
+        after: str = "", limit: int = 100,
+    ) -> list[str]:
+        _require_limit(limit)
+        query = """SELECT entity_id FROM runtime_operational_ownership
+                   WHERE entity_kind=? AND tenant_id=? AND entity_id>?"""
+        params: list[Any] = [entity_kind, tenant_id, after]
+        if owner_actor_id is not None:
+            query += " AND owner_actor_id=?"
+            params.append(owner_actor_id)
+        query += " ORDER BY entity_id LIMIT ?"
+        params.append(limit)
+        return [str(row["entity_id"]) for row in self._conn.execute(query, params).fetchall()]
+
     def _list_rows(self, table: str, column: str, value: str | None, order: str, limit: int) -> list[sqlite3.Row]:
         _require_limit(limit)
         predicate = "" if value is None else f" WHERE {column} = ?"
@@ -1182,6 +1233,15 @@ class DurableRuntimeRepository:
                 "SELECT * FROM inbox_events WHERE account_id = ? AND event_key = ?",
                 (event.account_id, event.event_key),
             ).fetchone()
+            conn.execute(
+                """INSERT INTO runtime_operational_ownership (
+                       entity_kind, entity_id, tenant_id, owner_actor_id, created_at, updated_at
+                   ) SELECT 'inbox', ?, tenant_id, owner_actor_id, ?, ?
+                     FROM runtime_operational_ownership
+                    WHERE entity_kind='channel_account' AND entity_id=?
+                   ON CONFLICT(entity_kind, entity_id) DO NOTHING""",
+                (row["event_id"], _iso(event.created_at), _iso(event.updated_at), event.account_id),
+            )
             if nonce is not None:
                 conn.execute(
                     """INSERT INTO webhook_nonce_receipts (
@@ -1621,6 +1681,21 @@ class DurableRuntimeRepository:
                 """,
                 (obligation.destination, obligation.idempotency_key),
             ).fetchone()
+            account_id = (
+                obligation.destination.removeprefix("channel:")
+                if obligation.destination.startswith("channel:") else None
+            )
+            if account_id:
+                conn.execute(
+                    """INSERT INTO runtime_operational_ownership (
+                           entity_kind, entity_id, tenant_id, owner_actor_id, created_at, updated_at
+                       ) SELECT 'outbox', ?, tenant_id, owner_actor_id, ?, ?
+                         FROM runtime_operational_ownership
+                        WHERE entity_kind='channel_account' AND entity_id=?
+                       ON CONFLICT(entity_kind, entity_id) DO NOTHING""",
+                    (row["obligation_id"], _iso(obligation.created_at),
+                     _iso(obligation.updated_at), account_id),
+                )
         return self._outbox(row)
 
     def persist_agent_task_with_outbox(
@@ -1798,6 +1873,15 @@ class DurableRuntimeRepository:
         if actor_id is not None:
             _require_identifier(actor_id, "actor_id")
         payload_value = to_json_value(payload)
+        source_kind = {
+            "scheduler": "scheduler_job",
+            "scheduler_run": "scheduler_run",
+            "channel_account": "channel_account",
+            "channel_route": "channel_route",
+            "goal": "goal",
+            "inbox": "inbox",
+            "outbox": "outbox",
+        }.get(entity_kind, entity_kind)
         with self._conn:
             self._conn.execute(
                 """
@@ -1814,6 +1898,15 @@ class DurableRuntimeRepository:
                     _json(payload_value),
                     _iso(now),
                 ),
+            )
+            self._conn.execute(
+                """INSERT INTO runtime_operational_ownership (
+                     entity_kind, entity_id, tenant_id, owner_actor_id, created_at, updated_at
+                   ) SELECT 'audit', ?, tenant_id, owner_actor_id, ?, ?
+                     FROM runtime_operational_ownership
+                    WHERE entity_kind=? AND entity_id=?
+                   ON CONFLICT(entity_kind, entity_id) DO NOTHING""",
+                (audit_id, _iso(now), _iso(now), source_kind, entity_id),
             )
         return {
             "audit_id": audit_id,
@@ -1892,7 +1985,11 @@ class DurableRuntimeRepository:
                 """
                 SELECT event_id, payload, account_id, event_key, state,
                        retention_attachment_paths, retention_attachment_key_id,
-                       retention_attachment_tag
+                       retention_attachment_tag,
+                       (SELECT tenant_id FROM runtime_operational_ownership o
+                         WHERE o.entity_kind='inbox' AND o.entity_id=inbox_events.event_id) AS tenant_id,
+                       (SELECT owner_actor_id FROM runtime_operational_ownership o
+                         WHERE o.entity_kind='inbox' AND o.entity_id=inbox_events.event_id) AS owner_actor_id
                 FROM inbox_events
                 WHERE retained_at IS NULL AND updated_at <= ?
                   AND state IN ('succeeded', 'dead_letter')
@@ -1910,7 +2007,11 @@ class DurableRuntimeRepository:
                 """
                 SELECT obligation_id, payload, destination, idempotency_key, state,
                        retention_attachment_paths, retention_attachment_key_id,
-                       retention_attachment_tag
+                       retention_attachment_tag,
+                       (SELECT tenant_id FROM runtime_operational_ownership o
+                         WHERE o.entity_kind='outbox' AND o.entity_id=outbox_obligations.obligation_id) AS tenant_id,
+                       (SELECT owner_actor_id FROM runtime_operational_ownership o
+                         WHERE o.entity_kind='outbox' AND o.entity_id=outbox_obligations.obligation_id) AS owner_actor_id
                 FROM outbox_obligations
                 WHERE retained_at IS NULL AND updated_at <= ?
                   AND state IN ('acknowledged', 'dead_letter', 'delivery_unknown')
@@ -1932,8 +2033,11 @@ class DurableRuntimeRepository:
                 "SELECT COUNT(*) FROM retention_attachment_queue"
             ).fetchone()[0]
             queue_limit = min(limit, 64, max(0, 64 - queue_occupancy))
-            queued_attachment_occurrences: list[tuple[str, str]] = []
+            queued_attachment_occurrences: list[
+                tuple[str, str, str | None, str | None]
+            ] = []
             queued_identities: dict[str, str] = {}
+            queued_owners: dict[str, tuple[str | None, str | None]] = {}
             backlog_rows = conn.execute(
                 """SELECT backlog_id, storage_paths, key_id, generation, backlog_tag
                    FROM retention_attachment_backlog
@@ -1944,22 +2048,31 @@ class DurableRuntimeRepository:
                 occurrences = self._authenticate_retention_attachment_backlog(
                     backlog_row
                 )
-                remaining_occurrences: list[tuple[str, str]] = []
-                for storage_path, file_identity in occurrences:
+                remaining_occurrences: list[
+                    tuple[str, str, str | None, str | None]
+                ] = []
+                for storage_path, file_identity, tenant_id, owner_actor_id in occurrences:
                     existing_identity = queued_identities.get(storage_path)
                     if existing_identity is not None:
                         if existing_identity != file_identity:
                             raise StateConflictError(
                                 "retention attachment occurrences are ambiguous"
                             )
+                        if queued_owners[storage_path] != (tenant_id, owner_actor_id):
+                            raise StateConflictError(
+                                "retention attachment ownership is ambiguous"
+                            )
                         continue
                     if len(queued_attachment_occurrences) < queue_limit:
                         queued_attachment_occurrences.append(
-                            (storage_path, file_identity)
+                            (storage_path, file_identity, tenant_id, owner_actor_id)
                         )
                         queued_identities[storage_path] = file_identity
+                        queued_owners[storage_path] = (tenant_id, owner_actor_id)
                     else:
-                        remaining_occurrences.append((storage_path, file_identity))
+                        remaining_occurrences.append(
+                            (storage_path, file_identity, tenant_id, owner_actor_id)
+                        )
                 if remaining_occurrences:
                     replacement = self._new_retention_attachment_backlog_page(
                         remaining_occurrences
@@ -2001,7 +2114,9 @@ class DurableRuntimeRepository:
                             "retention attachment backlog state changed"
                         )
 
-            attachment_occurrences: list[tuple[str, str]] = []
+            attachment_occurrences: list[
+                tuple[str, str, str | None, str | None]
+            ] = []
             attachment_identities: dict[str, str] = {}
             rejected_attachment_payloads = 0
             for row in inbox_rows:
@@ -2021,7 +2136,9 @@ class DurableRuntimeRepository:
                             "retention attachment occurrences are ambiguous"
                         )
                     if prior_identity is None:
-                        attachment_occurrences.append((storage_path, file_identity))
+                        attachment_occurrences.append(
+                            (storage_path, file_identity, row["tenant_id"], row["owner_actor_id"])
+                        )
                         attachment_identities[storage_path] = file_identity
             for row in outbox_rows:
                 occurrences = self._authenticate_retention_attachment_source(
@@ -2040,18 +2157,28 @@ class DurableRuntimeRepository:
                             "retention attachment occurrences are ambiguous"
                         )
                     if prior_identity is None:
-                        attachment_occurrences.append((storage_path, file_identity))
+                        attachment_occurrences.append(
+                            (storage_path, file_identity, row["tenant_id"], row["owner_actor_id"])
+                        )
                         attachment_identities[storage_path] = file_identity
-            source_candidates: list[tuple[str, str]] = []
-            for storage_path, file_identity in attachment_occurrences:
+            source_candidates: list[
+                tuple[str, str, str | None, str | None]
+            ] = []
+            for storage_path, file_identity, tenant_id, owner_actor_id in attachment_occurrences:
                 queued_identity = queued_identities.get(storage_path)
                 if queued_identity is not None:
                     if queued_identity != file_identity:
                         raise StateConflictError(
                             "retention attachment occurrences are ambiguous"
                         )
+                    if queued_owners[storage_path] != (tenant_id, owner_actor_id):
+                        raise StateConflictError(
+                            "retention attachment ownership is ambiguous"
+                        )
                     continue
-                source_candidates.append((storage_path, file_identity))
+                source_candidates.append(
+                    (storage_path, file_identity, tenant_id, owner_actor_id)
+                )
             available = queue_limit - len(queued_attachment_occurrences)
             queued_attachment_occurrences.extend(source_candidates[:available])
             deferred_attachment_occurrences = source_candidates[available:]
@@ -2113,7 +2240,12 @@ class DurableRuntimeRepository:
                     ),
                 )
             inserted_attachment_paths: list[str] = []
-            for storage_path, file_identity in queued_attachment_occurrences:
+            for (
+                storage_path,
+                file_identity,
+                tenant_id,
+                owner_actor_id,
+            ) in queued_attachment_occurrences:
                 existing = conn.execute(
                     """SELECT file_identity FROM retention_attachment_queue
                        WHERE storage_path = ?
@@ -2147,8 +2279,8 @@ class DurableRuntimeRepository:
                     """INSERT INTO retention_attachment_queue (
                            queue_id, storage_path, key_id, work_id, generation,
                            queued_at, next_attempt_at, file_identity,
-                           file_identity_tag
-                       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+                           file_identity_tag, tenant_id, owner_actor_id
+                       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                        WHERE NOT EXISTS (
                            SELECT 1 FROM retention_attachment_queue
                            WHERE storage_path = ?
@@ -2167,6 +2299,8 @@ class DurableRuntimeRepository:
                         now_value,
                         file_identity,
                         file_identity_tag,
+                        tenant_id,
+                        owner_actor_id,
                         storage_path,
                         storage_path,
                     ),
@@ -2266,6 +2400,7 @@ class DurableRuntimeRepository:
                     "attachments_deferred": len(deferred_attachment_occurrences),
                     "attachment_payloads_rejected": rejected_attachment_payloads,
                 }
+                retention_audit_id = f"retention:{uuid.uuid4().hex}"
                 conn.execute(
                     """
                     INSERT INTO runtime_audit_events (
@@ -2273,7 +2408,10 @@ class DurableRuntimeRepository:
                     ) VALUES (?, 'retention', 'runtime', 'retention_batch',
                               'retention-worker', ?, ?)
                     """,
-                    (f"retention:{uuid.uuid4().hex}", _json(audit_payload), now_value),
+                    (retention_audit_id, _json(audit_payload), now_value),
+                )
+                self._bind_audit_owner(
+                    conn, retention_audit_id, "__global__", "retention-worker", now_value
                 )
             claims = self._claim_due_retention_attachments(
                 conn,
@@ -2515,8 +2653,9 @@ class DurableRuntimeRepository:
                             """INSERT INTO retention_attachment_dead_letters (
                                    dead_letter_id, storage_path, key_id, work_id,
                                    generation, file_identity, file_identity_tag,
-                                   attempt, last_error, quarantined_at
-                               ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'delete_failed', ?
+                                   attempt, last_error, quarantined_at,
+                                   tenant_id, owner_actor_id
+                               ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'delete_failed', ?, ?, ?
                                WHERE NOT EXISTS (
                                    SELECT 1 FROM retention_attachment_dead_letters
                                    WHERE storage_path = ?
@@ -2531,12 +2670,24 @@ class DurableRuntimeRepository:
                                 dead_identity_tag,
                                 attempt,
                                 now_value,
+                                row["tenant_id"],
+                                row["owner_actor_id"],
                                 claim.storage_path,
                             ),
                         )
                         if inserted.rowcount != 1:
                             raise StateConflictError(
                                 "retention attachment dead-letter state changed"
+                            )
+                        if row["tenant_id"] and row["owner_actor_id"]:
+                            conn.execute(
+                                """INSERT INTO runtime_operational_ownership (
+                                     entity_kind, entity_id, tenant_id, owner_actor_id,
+                                     created_at, updated_at
+                                   ) VALUES ('retention_dead_letter', ?, ?, ?, ?, ?)
+                                   ON CONFLICT(entity_kind, entity_id) DO NOTHING""",
+                                (dead_letter_id, row["tenant_id"], row["owner_actor_id"],
+                                 now_value, now_value),
                             )
                         deleted = conn.execute(
                             f"DELETE FROM retention_attachment_queue WHERE {claim_where}",
@@ -2573,16 +2724,20 @@ class DurableRuntimeRepository:
                         counts["stale"] += 1
                         continue
                     counts[outcome] += 1
+            attachment_audit_id = f"retention-attachments:{uuid.uuid4().hex}"
             conn.execute(
                 """INSERT INTO runtime_audit_events (
                        audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
                    ) VALUES (?, 'retention', 'runtime', 'attachment_retention',
                              'retention-worker', ?, ?)""",
                 (
-                    f"retention-attachments:{uuid.uuid4().hex}",
+                    attachment_audit_id,
                     _json({f"attachments_{key}": counts[key] for key in sorted(counts)}),
                     now_value,
                 ),
+            )
+            self._bind_audit_owner(
+                conn, attachment_audit_id, "__global__", "retention-worker", now_value
             )
         return counts
 
@@ -2613,6 +2768,37 @@ class DurableRuntimeRepository:
             }
             for row in rows
         ]
+
+    def get_retention_attachment_dead_letters(
+        self, dead_letter_ids: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        ids = tuple(dict.fromkeys(dead_letter_ids))
+        if len(ids) > 100:
+            raise ValueError("at most 100 dead letters may be read")
+        if not ids:
+            return []
+        for value in ids:
+            _require_retention_digest_id(value, "dead_letter_id")
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"""SELECT * FROM retention_attachment_dead_letters
+                 WHERE dead_letter_id IN ({placeholders})""", ids
+        ).fetchall()
+        by_id = {row["dead_letter_id"]: row for row in rows}
+        result = []
+        for dead_letter_id in ids:
+            row = by_id.get(dead_letter_id)
+            if row is None:
+                continue
+            self._authenticate_retention_attachment_row(row, "dead-letter")
+            result.append({
+                "dead_letter_id": row["dead_letter_id"],
+                "storage_path": row["storage_path"],
+                "attempt": row["attempt"],
+                "last_error": row["last_error"],
+                "quarantined_at": datetime.fromisoformat(row["quarantined_at"]),
+            })
+        return result
 
     def requeue_retention_attachment(
         self,
@@ -2681,8 +2867,8 @@ class DurableRuntimeRepository:
                         """INSERT INTO retention_attachment_queue (
                                queue_id, storage_path, key_id, work_id, generation,
                                queued_at, next_attempt_at, file_identity,
-                               file_identity_tag
-                           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+                               file_identity_tag, tenant_id, owner_actor_id
+                           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                            WHERE EXISTS (
                                SELECT 1 FROM retention_attachment_dead_letters
                                WHERE dead_letter_id = ? AND storage_path = ?
@@ -2701,6 +2887,8 @@ class DurableRuntimeRepository:
                             now_value,
                             row["file_identity"],
                             queue_identity_tag,
+                            row["tenant_id"],
+                            row["owner_actor_id"],
                             dead_letter_id,
                             storage_path,
                             row["key_id"],
@@ -2729,24 +2917,47 @@ class DurableRuntimeRepository:
                         raise StateConflictError(
                             "retention attachment dead-letter state changed"
                         )
+                    conn.execute(
+                        """DELETE FROM runtime_operational_ownership
+                           WHERE entity_kind='retention_dead_letter' AND entity_id=?""",
+                        (dead_letter_id,),
+                    )
                     result = "requeued"
             audit_payload: dict[str, Any] = {"result": result}
             if prior_attempt is not None:
                 audit_payload["prior_attempt"] = prior_attempt
+            requeue_audit_id = f"retention-requeue:{uuid.uuid4().hex}"
             conn.execute(
                 """INSERT INTO runtime_audit_events (
                        audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
                    ) VALUES (?, 'retention_attachment_dead_letter', ?,
                              'retention_attachment_requeue', ?, ?, ?)""",
                 (
-                    f"retention-requeue:{uuid.uuid4().hex}",
+                    requeue_audit_id,
                     dead_letter_id,
                     actor_id,
                     _json(audit_payload),
                     now_value,
                 ),
             )
+            if row is not None and row["tenant_id"] and row["owner_actor_id"]:
+                self._bind_audit_owner(
+                    conn, requeue_audit_id, row["tenant_id"], row["owner_actor_id"], now_value
+                )
         return result == "requeued"
+
+    @staticmethod
+    def _bind_audit_owner(
+        conn: sqlite3.Connection, audit_id: str, tenant_id: str,
+        owner_actor_id: str, now_value: str,
+    ) -> None:
+        conn.execute(
+            """INSERT INTO runtime_operational_ownership (
+                 entity_kind, entity_id, tenant_id, owner_actor_id, created_at, updated_at
+               ) VALUES ('audit', ?, ?, ?, ?, ?)
+               ON CONFLICT(entity_kind, entity_id) DO NOTHING""",
+            (audit_id, tenant_id, owner_actor_id, now_value, now_value),
+        )
 
     def secure_checkpoint(self) -> None:
         """Remove securely-deleted content from WAL before reporting retention complete."""
@@ -2944,23 +3155,72 @@ class DurableRuntimeRepository:
             authenticated, key
         )
 
-    def _new_retention_attachment_backlog_page(
-        self, occurrences: Iterable[tuple[str, str]]
-    ) -> tuple[str, str, str, str, str]:
-        canonical = tuple(
-            (_canonical_attachment_storage_path(storage_path), file_identity)
-            for storage_path, file_identity in occurrences
+    @staticmethod
+    def _retention_attachment_backlog_occurrences_value(
+        occurrences: Iterable[
+            tuple[str, str, str | None, str | None]
+        ],
+    ) -> str:
+        return _json(
+            [
+                {
+                    "storage_path": storage_path,
+                    "file_identity": file_identity,
+                    "tenant_id": tenant_id,
+                    "owner_actor_id": owner_actor_id,
+                }
+                for storage_path, file_identity, tenant_id, owner_actor_id in occurrences
+            ]
         )
-        for _, file_identity in canonical:
+
+    def _new_retention_attachment_backlog_page(
+        self,
+        occurrences: Iterable[
+            tuple[str, str]
+            | tuple[str, str, str | None, str | None]
+        ],
+    ) -> tuple[str, str, str, str, str]:
+        canonical_items: list[tuple[str, str, str | None, str | None]] = []
+        for occurrence in occurrences:
+            if len(occurrence) == 2:
+                storage_path, file_identity = occurrence
+                tenant_id = owner_actor_id = None
+            elif len(occurrence) == 4:
+                storage_path, file_identity, tenant_id, owner_actor_id = occurrence
+            else:
+                raise ValueError("retention attachment backlog occurrence is invalid")
+            if (tenant_id is None) != (owner_actor_id is None):
+                raise ValueError("retention attachment backlog ownership is incomplete")
+            if tenant_id is not None and owner_actor_id is not None:
+                for value, name in (
+                    (tenant_id, "tenant_id"),
+                    (owner_actor_id, "owner_actor_id"),
+                ):
+                    _require_identifier(value, name)
+                    if len(value.encode("utf-8")) > 128:
+                        raise ValueError(f"{name} exceeds the byte limit")
+            canonical_items.append(
+                (
+                    _canonical_attachment_storage_path(storage_path),
+                    file_identity,
+                    tenant_id,
+                    owner_actor_id,
+                )
+            )
+        canonical = tuple(canonical_items)
+        for _, file_identity, _, _ in canonical:
             self._validate_retention_file_identity(file_identity)
         if (
             not 1 <= len(canonical) <= 64
-            or len({storage_path for storage_path, _ in canonical}) != len(canonical)
+            or len({storage_path for storage_path, _, _, _ in canonical})
+            != len(canonical)
         ):
             raise ValueError("retention attachment backlog page is invalid")
         if not self._retention_hmac_keys:
             raise StateConflictError("retention HMAC key is unavailable")
-        occurrences_value = self._retention_attachment_occurrences_value(canonical)
+        occurrences_value = self._retention_attachment_backlog_occurrences_value(
+            canonical
+        )
         backlog_id = f"backlog:{uuid.uuid4().hex}"
         generation = uuid.uuid4().hex
         key = self._retention_hmac_keys[0]
@@ -2972,7 +3232,7 @@ class DurableRuntimeRepository:
 
     def _authenticate_retention_attachment_backlog(
         self, row: sqlite3.Row
-    ) -> tuple[tuple[str, str], ...]:
+    ) -> tuple[tuple[str, str, str | None, str | None], ...]:
         backlog_id = row["backlog_id"]
         occurrences_value = row["storage_paths"]
         key_id = row["key_id"]
@@ -3013,22 +3273,43 @@ class DurableRuntimeRepository:
                 (
                     _canonical_attachment_storage_path(item["storage_path"]),
                     item["file_identity"],
+                    item["tenant_id"],
+                    item["owner_actor_id"],
                 )
                 for item in encoded_occurrences
                 if isinstance(item, dict)
-                and set(item) == {"storage_path", "file_identity"}
+                and set(item)
+                == {
+                    "storage_path",
+                    "file_identity",
+                    "tenant_id",
+                    "owner_actor_id",
+                }
             )
             if len(occurrences) != len(encoded_occurrences):
-                raise ValueError("invalid occurrence shape")
-            for _, file_identity in occurrences:
+                raise ValueError(
+                    "legacy ownerless retention backlog requires explicit migration"
+                )
+            for _, file_identity, tenant_id, owner_actor_id in occurrences:
                 self._validate_retention_file_identity(file_identity)
+                if (tenant_id is None) != (owner_actor_id is None):
+                    raise ValueError("incomplete ownership")
+                if tenant_id is not None and owner_actor_id is not None:
+                    for value, name in (
+                        (tenant_id, "tenant_id"),
+                        (owner_actor_id, "owner_actor_id"),
+                    ):
+                        _require_identifier(value, name)
+                        if len(value.encode("utf-8")) > 128:
+                            raise ValueError(f"{name} exceeds the byte limit")
         except (KeyError, TypeError, ValueError) as exc:
             raise StateConflictError(
                 "retention attachment backlog is not canonical"
             ) from exc
         if (
-            len({storage_path for storage_path, _ in occurrences}) != len(occurrences)
-            or self._retention_attachment_occurrences_value(occurrences)
+            len({storage_path for storage_path, _, _, _ in occurrences})
+            != len(occurrences)
+            or self._retention_attachment_backlog_occurrences_value(occurrences)
             != occurrences_value
         ):
             raise StateConflictError("retention attachment backlog is invalid")
@@ -3582,6 +3863,24 @@ class DurableRuntimeRepository:
                 or audit["payload"] != audit_payload
             ):
                 raise StateConflictError("manual resend audit id belongs to another event")
+            ownership = conn.execute(
+                """SELECT tenant_id, owner_actor_id FROM runtime_operational_ownership
+                   WHERE entity_kind='outbox' AND entity_id=?""",
+                (source_obligation_id,),
+            ).fetchone()
+            if ownership is not None:
+                for kind, entity_id in (
+                    ("outbox", resend.obligation_id),
+                    ("audit", f"audit:{resend.obligation_id}"),
+                ):
+                    conn.execute(
+                        """INSERT INTO runtime_operational_ownership (
+                             entity_kind, entity_id, tenant_id, owner_actor_id, created_at, updated_at
+                           ) VALUES (?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(entity_kind, entity_id) DO NOTHING""",
+                        (kind, entity_id, ownership["tenant_id"], ownership["owner_actor_id"],
+                         now_value, now_value),
+                    )
         return self._outbox(row)
 
     def claim_due_outbox(
@@ -3857,6 +4156,15 @@ class DurableRuntimeRepository:
             row = conn.execute(
                 "SELECT * FROM scheduler_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
+            conn.execute(
+                """INSERT INTO runtime_operational_ownership (
+                       entity_kind, entity_id, tenant_id, owner_actor_id, created_at, updated_at
+                   ) SELECT 'scheduler_run', ?, tenant_id, owner_actor_id, ?, ?
+                     FROM runtime_operational_ownership
+                    WHERE entity_kind='scheduler_job' AND entity_id=?
+                   ON CONFLICT(entity_kind, entity_id) DO NOTHING""",
+                (run_id, now_value, now_value, job_id),
+            )
         return self._scheduler_run(row)
 
     def claim_due_scheduler_runs(
@@ -4317,6 +4625,13 @@ class DurableRuntimeRepository:
                        iteration_id, goal_id, sequence, state, claim_generation, created_at, updated_at
                    ) VALUES (?, ?, 1, 'pending', 0, ?, ?)""",
                 (first_id, goal_id, now_value, now_value),
+            )
+            conn.execute(
+                """INSERT INTO runtime_operational_ownership (
+                       entity_kind, entity_id, tenant_id, owner_actor_id, created_at, updated_at
+                   ) VALUES ('goal', ?, ?, ?, ?, ?)
+                   ON CONFLICT(entity_kind, entity_id) DO NOTHING""",
+                (goal_id, principal.tenant_id, principal.actor_id, now_value, now_value),
             )
             conn.execute(
                 """INSERT INTO messages (message_id, session_id, role, content, created_at, metadata)

@@ -1606,6 +1606,65 @@ def test_full_retry_queue_defers_backlog_until_ack_releases_slots(runtime, monke
     assert len(set(attempted)) == 80
 
 
+def test_overflow_backlog_preserves_owner_through_dead_letter_and_requeue(
+    runtime, monkeypatch
+):
+    _, repository, attachment_root = runtime
+    for index in range(65):
+        event_id = f"event-owned-overflow-{index}"
+        repository.enqueue_inbox(
+            InboxEvent(
+                event_id,
+                f"key-owned-overflow-{index}",
+                "account-a",
+                "private",
+                {"attachments": [{"storage_path": f"owned-overflow-{index}.bin"}]},
+                created_at=OLD,
+                updated_at=OLD,
+            )
+        )
+        repository.bind_operational_owner(
+            entity_kind="inbox",
+            entity_id=event_id,
+            tenant_id="tenant-a",
+            owner_actor_id="alice",
+        )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute("UPDATE inbox_events SET state = 'succeeded'")
+    worker = RetentionWorker(
+        repository,
+        policy(batch_limit=65, attachment_max_attempts=1),
+        attachment_root,
+        monotonic=lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        worker, "_delete_managed_attachment", lambda claim, now: "failed"
+    )
+
+    worker.run_once(NOW)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM retention_attachment_backlog"
+    ).fetchone()[0] == 1
+    worker.run_once(NOW + timedelta(seconds=1))
+
+    owned_ids = repository.list_operational_ids(
+        entity_kind="retention_dead_letter",
+        tenant_id="tenant-a",
+        owner_actor_id=None,
+        limit=100,
+    )
+    assert len(owned_ids) == 65
+    assert len(repository.get_retention_attachment_dead_letters(owned_ids)) == 65
+    assert repository.requeue_retention_attachment(
+        owned_ids[-1], actor_id="alice", now=NOW + timedelta(seconds=2)
+    )
+    queued_owner = conn.execute(
+        "SELECT tenant_id, owner_actor_id FROM retention_attachment_queue"
+    ).fetchone()
+    assert tuple(queued_owner) == ("tenant-a", "alice")
+
+
 def test_terminal_attachment_failures_release_capacity_and_can_be_requeued(
     runtime, monkeypatch
 ):
