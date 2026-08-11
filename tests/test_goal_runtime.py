@@ -665,3 +665,112 @@ async def test_non_main_goal_uses_scoped_parent_profile_and_real_local_delivery(
     await worker.run_once(NOW + timedelta(seconds=2))
     assert repo.list_outbox()[0].state == "acknowledged"
     assert len(manager.message_repo.list_messages("s")) == 1
+
+
+def test_goal_destination_is_derived_from_persisted_session_principal(runtime):
+    cp, repo = runtime
+    cp.create_session(
+        "scoped", channel="web", user_id="user-a",
+        metadata={"profile_id": "profile-a", "parent_profile_id": "profile-a"},
+    )
+    with pytest.raises(PermissionError):
+        repo.create_goal_with_first_iteration(
+            session_id="scoped", goal_text="Ship", configuration=config().to_record(), now=NOW,
+            metadata={"profile_id": "profile-b", "parent_profile_id": "profile-b"},
+        )
+    cp.create_session(
+        "channel", channel="telegram", user_id="user-a",
+        metadata={"account_id": "account-a", "conversation_id": "conversation-a"},
+    )
+    with pytest.raises(PermissionError):
+        repo.create_goal_with_first_iteration(
+            session_id="channel", goal_text="Ship", configuration=config().to_record(), now=NOW,
+            destination="channel:account-b",
+            metadata={"account_id": "account-b", "conversation_id": "conversation-a"},
+        )
+    assert cp.list_goals() == []
+
+
+def test_sensitive_resume_consumes_persisted_operator_approval(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(
+        session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW
+    )
+    with cp._get_conn() as conn:
+        conn.execute(
+            "UPDATE goals SET status='blocked', transient_failure_count=3 WHERE goal_id=?",
+            (first.goal_id,),
+        )
+    with pytest.raises(PermissionError):
+        repo.transition_goal(
+            first.goal_id, expected_version=0, action="resume", now=NOW, reason="model",
+            operator_decision="reset_failures", operator_principal="default", approval_id="missing",
+        )
+    repo.issue_goal_operator_approval(
+        first.goal_id, approval_id="approval-1", principal_id="default",
+        decision="reset_failures", now=NOW,
+    )
+    resumed = repo.transition_goal(
+        first.goal_id, expected_version=0, action="resume", now=NOW, reason="approved",
+        operator_decision="reset_failures", operator_principal="default", approval_id="approval-1",
+    )
+    assert resumed["status"] == "running"
+    audit = cp._get_conn().execute(
+        "SELECT consumed_at FROM goal_operator_approvals WHERE approval_id='approval-1'"
+    ).fetchone()
+    assert audit["consumed_at"] is not None
+
+
+def test_guidance_enforces_atomic_pending_quota_and_bounded_pages(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(
+        session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW
+    )
+    for index in range(100):
+        repo.append_goal_guidance(first.goal_id, f"item-{index}", now=NOW)
+    with pytest.raises(ValueError):
+        repo.append_goal_guidance(first.goal_id, "overflow", now=NOW)
+    with pytest.raises(ValueError):
+        repo.append_goal_guidance(first.goal_id, "x" * 4097, now=NOW)
+    assert len(repo.list_goal_guidance(first.goal_id, limit=25)) == 25
+    assert cp._get_conn().execute(
+        "SELECT COUNT(*) FROM goal_guidance WHERE goal_id=?", (first.goal_id,)
+    ).fetchone()[0] == 100
+
+
+@pytest.mark.asyncio
+async def test_authoritative_agent_output_rejects_oversized_or_malformed_usage(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(
+        session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW
+    )
+    runner = FakeRunner([
+        AgentEvent(event="complete", session_id="s", content="x" * 65_537,
+                   result={"usage": {"total_tokens": 1}})
+    ])
+    result = await GoalRunner(
+        repo, runner, FakeJudge([]), owner_id="w", clock=lambda: NOW + timedelta(seconds=1)
+    ).run_iteration(first.goal_id)
+    assert result.state == "retry_wait"
+
+
+@pytest.mark.asyncio
+async def test_delivery_worker_does_not_persist_exception_secrets(runtime):
+    from open_agent.durable_runtime.models import OutboxObligation
+
+    class SecretDestination:
+        async def deliver(self, obligation, claim):
+            raise RuntimeError("api_key=top-secret-value")
+
+    _, repo = runtime
+    repo.enqueue_outbox(OutboxObligation(
+        obligation_id="secret-error", idempotency_key="secret-error",
+        destination="test", payload={}, created_at=NOW, updated_at=NOW,
+    ))
+    worker = DeliveryWorker(
+        repo, {"test": SecretDestination()}, owner_id="d", clock=lambda: NOW,
+    )
+    await worker.run_once(NOW)
+    stored = repo.get_outbox("secret-error")
+    assert "top-secret-value" not in (stored.last_error or "")
+    assert stored.last_error == "delivery_error"
