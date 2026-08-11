@@ -127,3 +127,116 @@ async def test_completed_agent_task_backfills_parent_session(monkeypatch, tmp_pa
     assert messages[-1].role == "assistant"
     assert "Writer result" in messages[-1].content
     assert task["metadata"]["parent_backfilled"] is True
+
+
+@pytest.mark.asyncio
+async def test_delivery_failure_cannot_reclassify_successful_agent_execution(
+    monkeypatch, tmp_path
+):
+    _isolate_home(monkeypatch, tmp_path)
+
+    import open_agent.agent_control as agent_control
+    from open_agent.app.runner.models import AgentEvent, AgentRequest
+    import open_agent.app.runner.runner as runner_module
+
+    task_id = "task_delivery_failure"
+    task = {
+        "task_id": task_id,
+        "profile_id": "writer",
+        "session_id": "session_writer_child",
+        "parent_session_id": "session_main_parent",
+        "status": "queued",
+        "result": None,
+        "error": None,
+        "events": [],
+        "instruction": "Write",
+        "metadata": {"parent_profile_id": "main"},
+    }
+    agent_control._agent_tasks[task_id] = task
+
+    class Runner:
+        async def process_message(self, request):
+            yield AgentEvent(
+                event="complete", session_id=request.session_id, content="Done"
+            )
+
+    observed_statuses = []
+
+    async def failing_delivery(task_state):
+        observed_statuses.append(task_state["status"])
+        raise RuntimeError("delivery database unavailable")
+
+    monkeypatch.setattr(runner_module, "get_runner", lambda: Runner())
+    monkeypatch.setattr(agent_control, "_persist_task", lambda state: state)
+    monkeypatch.setattr(agent_control, "_backfill_parent_session", failing_delivery)
+
+    await agent_control._consume_agent_task(
+        task_id,
+        AgentRequest(session_id=task["session_id"], messages=[]),
+    )
+
+    assert task["status"] == "completed"
+    assert task["result"] == "Done"
+    assert task["error"] is None
+    assert observed_statuses == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_delivery_failure_leaves_completed_task_and_outbox(
+    monkeypatch, tmp_path
+):
+    profiles = _isolate_home(monkeypatch, tmp_path)
+    profiles.get_agent_profile_manager().create_profile({"id": "writer", "name": "Writer"})
+
+    import open_agent.agent_control as agent_control
+    from open_agent.app.runner.manager import get_chat_manager
+    from open_agent.app.runner.models import AgentEvent, AgentRequest
+    import open_agent.app.runner.runner as runner_module
+    from open_agent.durable_runtime.delivery import DeliveryWorker
+    from open_agent.durable_runtime.repository import DurableRuntimeRepository
+
+    parent_manager = get_chat_manager()
+    await parent_manager.create_chat(
+        name="Parent",
+        user_id="default",
+        channel="web",
+        session_id="session_main_parent",
+    )
+    task_id = "task_post_commit_delivery_failure"
+    task = {
+        "task_id": task_id,
+        "profile_id": "writer",
+        "session_id": "session_writer_child",
+        "parent_session_id": "session_main_parent",
+        "status": "queued",
+        "result": None,
+        "error": None,
+        "events": [],
+        "instruction": "Write",
+        "metadata": {"parent_profile_id": "main"},
+    }
+    agent_control._agent_tasks[task_id] = task
+
+    class Runner:
+        async def process_message(self, request):
+            yield AgentEvent(
+                event="complete", session_id=request.session_id, content="Done"
+            )
+
+    async def fail_after_terminal_commit(self, now):
+        raise RuntimeError("delivery worker unavailable")
+
+    monkeypatch.setattr(runner_module, "get_runner", lambda: Runner())
+    monkeypatch.setattr(DeliveryWorker, "run_once", fail_after_terminal_commit)
+
+    await agent_control._consume_agent_task(
+        task_id,
+        AgentRequest(session_id=task["session_id"], messages=[]),
+    )
+
+    control_plane = agent_control._task_control_plane()
+    stored_task = control_plane.get_agent_task(task_id)
+    repository = DurableRuntimeRepository(control_plane)
+    assert stored_task["status"] == "completed"
+    assert stored_task["error"] is None
+    assert repository.list_outbox()[0].state == "pending"

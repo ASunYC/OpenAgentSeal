@@ -492,10 +492,17 @@ class DurableRuntimeRepository:
         resend: OutboxObligation,
         *,
         actor_id: str,
+        duplicate_risk_acknowledged: bool,
+        acknowledgement_version: str,
         now: datetime,
     ) -> OutboxObligation:
         _require_identifier(source_obligation_id, "source_obligation_id")
         _require_identifier(actor_id, "actor_id")
+        if duplicate_risk_acknowledged is not True:
+            raise ValueError("manual resend requires explicit duplicate risk acknowledgement")
+        _require_identifier(acknowledgement_version, "acknowledgement_version")
+        if acknowledgement_version != "1":
+            raise ValueError("unsupported duplicate risk acknowledgement version")
         if resend.state != "pending" or resend.claim is not None:
             raise ValueError("manual resend obligations must be pending and unclaimed")
         now_value = _iso(now)
@@ -557,7 +564,13 @@ class DurableRuntimeRepository:
                 raise StateConflictError(
                     "manual resend identity belongs to another obligation"
                 )
-            audit_payload = _json({"resend_obligation_id": resend.obligation_id})
+            audit_payload = _json(
+                {
+                    "acknowledgement_version": acknowledgement_version,
+                    "duplicate_risk_acknowledged": True,
+                    "resend_obligation_id": resend.obligation_id,
+                }
+            )
             conn.execute(
                 """
                 INSERT INTO runtime_audit_events (

@@ -134,17 +134,15 @@ class LocalSessionDestination:
             "status": status,
             "task_id": task_id,
         }
-        existing_results = list(chat.meta.get("agent_task_results", []))
-        if not any(
-            isinstance(item, Mapping)
-            and item.get("delivery_obligation_id") == obligation.obligation_id
-            for item in existing_results
-        ):
-            self._fence(obligation.obligation_id, claim)
-            updated_chat = chat.model_copy(
-                update={"meta": {**chat.meta, "agent_task_results": [*existing_results, result]}}
-            )
-            await manager.update_chat(updated_chat)
+        self._fence(obligation.obligation_id, claim)
+        updated_chat = await manager.repo.append_agent_task_result(
+            session_id,
+            obligation.obligation_id,
+            result,
+            before_write=lambda: self._fence(obligation.obligation_id, claim),
+        )
+        if updated_chat is None:
+            raise RetryableDeliveryError(f"parent session is unavailable: {session_id}")
 
         return {
             "message_id": obligation.obligation_id,
@@ -307,6 +305,8 @@ class DeliveryWorker:
         obligation_id: str,
         *,
         actor_id: str,
+        duplicate_risk_acknowledged: bool,
+        acknowledgement_version: str,
         now: datetime,
         resend_id: str | None = None,
     ) -> OutboxObligation:
@@ -323,7 +323,12 @@ class DeliveryWorker:
             updated_at=now,
         )
         return self.repository.manual_resend_outbox(
-            obligation_id, resend, actor_id=actor_id, now=now
+            obligation_id,
+            resend,
+            actor_id=actor_id,
+            duplicate_risk_acknowledged=duplicate_risk_acknowledged,
+            acknowledgement_version=acknowledgement_version,
+            now=now,
         )
 
 

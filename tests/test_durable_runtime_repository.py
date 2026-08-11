@@ -402,7 +402,14 @@ def test_manual_resend_rolls_back_if_audit_insert_fails(repository):
     )
 
     with pytest.raises(sqlite3.IntegrityError, match="audit unavailable"):
-        repo.manual_resend_outbox("source", resend, actor_id="operator", now=NOW)
+        repo.manual_resend_outbox(
+            "source",
+            resend,
+            actor_id="operator",
+            duplicate_risk_acknowledged=True,
+            acknowledgement_version="1",
+            now=NOW,
+        )
 
     assert repo.get_outbox("resend") is None
     assert repo.list_audit_events("outbox", "source") == []
@@ -470,7 +477,14 @@ def test_manual_resend_must_clone_source_payload_and_destination(repository):
     )
 
     with pytest.raises(ValueError, match="clone"):
-        repo.manual_resend_outbox("source", changed, actor_id="operator", now=NOW)
+        repo.manual_resend_outbox(
+            "source",
+            changed,
+            actor_id="operator",
+            duplicate_risk_acknowledged=True,
+            acknowledgement_version="1",
+            now=NOW,
+        )
 
     assert repo.get_outbox("resend") is None
     assert repo.list_audit_events("outbox", "source") == []

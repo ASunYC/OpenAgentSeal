@@ -6,11 +6,15 @@ Provides JSON-based persistence for chat sessions.
 
 import json
 import logging
+import os
 import sqlite3
+import tempfile
+import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Callable, Optional, List
 import asyncio
 from threading import Lock
 
@@ -51,6 +55,17 @@ class ChatRepository(ABC):
     @abstractmethod
     async def find_by_session_id(self, session_id: str) -> Optional[ChatSpec]:
         """Find chat by session ID"""
+        pass
+
+    @abstractmethod
+    async def append_agent_task_result(
+        self,
+        session_id: str,
+        obligation_id: str,
+        result: dict,
+        before_write: Callable[[], None] | None = None,
+    ) -> Optional[ChatSpec]:
+        """Append one obligation-keyed task result without overwriting peers."""
         pass
 
 
@@ -134,8 +149,63 @@ class JsonChatRepository(ChatRepository):
                 for c in chat_file.chats
             ]
         }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            if os.name != "nt":
+                directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                directory_fd = os.open(path.parent, directory_flags)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+
+    @contextmanager
+    def _metadata_file_lock(self):
+        lock_path = self.storage_dir / ".chat_metadata.lock"
+        with open(lock_path, "a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                while True:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        time.sleep(0.01)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _migrate_legacy_chats(self):
         if not self.legacy_chats_file.exists():
@@ -169,25 +239,73 @@ class JsonChatRepository(ChatRepository):
             return self._cache
 
     def _upsert_chat(self, chat: ChatSpec, touch: bool = True) -> ChatSpec:
-        if touch:
-            chat.touch()
+        with self._lock:
+            with self._metadata_file_lock():
+                if touch:
+                    chat.touch()
 
-        month_key = self._month_key(chat.created_at)
-        path = self._chat_file(month_key)
-        chat_file = self._load_file(path)
-        for i, existing in enumerate(chat_file.chats):
-            if existing.id == chat.id:
-                chat_file.chats[i] = chat
-                break
-        else:
-            chat_file.chats.append(chat)
-        self._save_file(path, chat_file)
-        self._cache = None
+                month_key = self._month_key(chat.created_at)
+                path = self._chat_file(month_key)
+                chat_file = self._load_file(path)
+                for i, existing in enumerate(chat_file.chats):
+                    if existing.id == chat.id:
+                        stored_results = list(
+                            existing.meta.get("agent_task_results", [])
+                        )
+                        incoming_results = list(
+                            chat.meta.get("agent_task_results", [])
+                        )
+                        merged_results = self._merge_agent_task_results(
+                            stored_results, incoming_results
+                        )
+                        if stored_results or incoming_results:
+                            chat = chat.model_copy(
+                                deep=True,
+                                update={
+                                    "meta": {
+                                        **chat.meta,
+                                        "agent_task_results": merged_results,
+                                    }
+                                },
+                            )
+                        chat_file.chats[i] = chat
+                        break
+                else:
+                    chat_file.chats.append(chat)
+                self._save_file(path, chat_file)
+                self._cache = None
         return chat
+
+    @staticmethod
+    def _merge_agent_task_results(stored: list, incoming: list) -> list:
+        merged = [*stored]
+        keyed = {
+            item.get("delivery_obligation_id"): item
+            for item in stored
+            if isinstance(item, dict) and item.get("delivery_obligation_id")
+        }
+        for item in incoming:
+            obligation_id = (
+                item.get("delivery_obligation_id") if isinstance(item, dict) else None
+            )
+            if not obligation_id:
+                if item not in merged:
+                    merged.append(item)
+                continue
+            existing = keyed.get(obligation_id)
+            if existing is not None:
+                if existing != item:
+                    raise ValueError(
+                        "delivery obligation already has different task result metadata"
+                    )
+                continue
+            keyed[obligation_id] = item
+            merged.append(item)
+        return merged
     
     async def list_chats(self, user_id: str = None) -> List[ChatSpec]:
         """List all chats"""
-        chats = self._load_chats()
+        chats = await asyncio.to_thread(self._load_chats)
         
         if user_id:
             chats = [c for c in chats if c.user_id == user_id]
@@ -198,44 +316,113 @@ class JsonChatRepository(ChatRepository):
     
     async def get_chat(self, chat_id: str) -> Optional[ChatSpec]:
         """Get a specific chat by ID"""
-        for chat in self._load_chats():
+        chats = await asyncio.to_thread(self._load_chats)
+        for chat in chats:
             if chat.id == chat_id:
                 return chat
         return None
     
     async def create_chat(self, chat: ChatSpec) -> ChatSpec:
         """Create a new chat"""
-        self._upsert_chat(chat, touch=False)
+        await asyncio.to_thread(self._upsert_chat, chat, False)
         logger.info(f"Created chat: {chat.id}")
         return chat
     
     async def update_chat(self, chat: ChatSpec) -> ChatSpec:
         """Update an existing chat"""
-        updated = self._upsert_chat(chat, touch=True)
+        updated = await asyncio.to_thread(self._upsert_chat, chat, True)
         logger.info(f"Updated chat: {chat.id}")
         return updated
     
     async def delete_chats(self, chat_ids: List[str]) -> bool:
         """Delete chats by IDs"""
-        deleted = False
-        ids = set(chat_ids)
-        for path in self.storage_dir.glob("chat_*.json"):
-            chat_file = self._load_file(path)
-            original_count = len(chat_file.chats)
-            chat_file.chats = [c for c in chat_file.chats if c.id not in ids]
-            if len(chat_file.chats) < original_count:
-                self._save_file(path, chat_file)
-                deleted = True
-        self._cache = None
+        deleted = await asyncio.to_thread(self._delete_chats_sync, chat_ids)
         if deleted:
             logger.info(f"Deleted {len(chat_ids)} chat(s)")
+        return deleted
+
+    def _delete_chats_sync(self, chat_ids: List[str]) -> bool:
+        deleted = False
+        ids = set(chat_ids)
+        with self._lock:
+            with self._metadata_file_lock():
+                for path in self.storage_dir.glob("chat_*.json"):
+                    chat_file = self._load_file(path)
+                    original_count = len(chat_file.chats)
+                    chat_file.chats = [c for c in chat_file.chats if c.id not in ids]
+                    if len(chat_file.chats) < original_count:
+                        self._save_file(path, chat_file)
+                        deleted = True
+                self._cache = None
         return deleted
     
     async def find_by_session_id(self, session_id: str) -> Optional[ChatSpec]:
         """Find chat by session ID"""
-        for chat in self._load_chats():
+        chats = await asyncio.to_thread(self._load_chats)
+        for chat in chats:
             if chat.session_id == session_id:
                 return chat
+        return None
+
+    async def append_agent_task_result(
+        self,
+        session_id: str,
+        obligation_id: str,
+        result: dict,
+        before_write: Callable[[], None] | None = None,
+    ) -> Optional[ChatSpec]:
+        return await asyncio.to_thread(
+            self._append_agent_task_result_sync,
+            session_id,
+            obligation_id,
+            result,
+            before_write,
+        )
+
+    def _append_agent_task_result_sync(
+        self,
+        session_id: str,
+        obligation_id: str,
+        result: dict,
+        before_write: Callable[[], None] | None = None,
+    ) -> Optional[ChatSpec]:
+        normalized = {**result, "delivery_obligation_id": obligation_id}
+        with self._lock:
+            with self._metadata_file_lock():
+                for path in sorted(self.storage_dir.glob("chat_*.json")):
+                    chat_file = self._load_file(path)
+                    for index, chat in enumerate(chat_file.chats):
+                        if chat.session_id != session_id:
+                            continue
+                        existing_results = list(chat.meta.get("agent_task_results", []))
+                        for existing in existing_results:
+                            if not isinstance(existing, dict):
+                                continue
+                            if existing.get("delivery_obligation_id") != obligation_id:
+                                continue
+                            if existing != normalized:
+                                raise ValueError(
+                                    "delivery obligation already has different task result metadata"
+                                )
+                            self._cache = None
+                            return chat
+                        if before_write is not None:
+                            before_write()
+                        updated = chat.model_copy(
+                            deep=True,
+                            update={
+                                "meta": {
+                                    **chat.meta,
+                                    "agent_task_results": [*existing_results, normalized],
+                                }
+                            },
+                        )
+                        updated.touch()
+                        chat_file.chats[index] = updated
+                        self._save_file(path, chat_file)
+                        self._cache = None
+                        return updated
+                self._cache = None
         return None
     
     def invalidate_cache(self):

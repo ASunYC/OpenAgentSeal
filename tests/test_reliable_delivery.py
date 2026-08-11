@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +21,43 @@ from open_agent.durable_runtime.repository import DurableRuntimeRepository, Stal
 
 
 NOW = datetime(2026, 8, 11, 8, 0, tzinfo=timezone.utc)
+
+
+def _append_chat_result_process(storage_dir, result, start_event, output):
+    from open_agent.app.runner.repo import JsonChatRepository
+
+    repository = JsonChatRepository(storage_dir=Path(storage_dir))
+    start_event.wait(timeout=10)
+    try:
+        updated = asyncio.run(
+            repository.append_agent_task_result(
+                "session-parent", result["delivery_obligation_id"], result
+            )
+        )
+        output.put(updated is not None)
+    except Exception as exc:
+        output.put(f"{type(exc).__name__}: {exc}")
+
+
+def _stale_update_chat_process(storage_dir, ready_event, update_event, output):
+    from open_agent.app.runner.repo import JsonChatRepository
+
+    repository = JsonChatRepository(storage_dir=Path(storage_dir))
+    chat = asyncio.run(repository.find_by_session_id("session-parent"))
+    ready_event.set()
+    update_event.wait(timeout=10)
+    chat.name = "Stale writer rename"
+    asyncio.run(repository.update_chat(chat))
+    output.put(True)
+
+
+def _hold_chat_metadata_lock_process(storage_dir, acquired_event, hold_seconds):
+    from open_agent.app.runner.repo import JsonChatRepository
+
+    repository = JsonChatRepository(storage_dir=Path(storage_dir))
+    with repository._metadata_file_lock():
+        acquired_event.set()
+        time.sleep(hold_seconds)
 
 
 def _isolate_home(monkeypatch, tmp_path):
@@ -99,6 +139,130 @@ async def test_local_destination_inserts_parent_result_once(delivery_runtime):
             "task_id": "task-1",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_processes_append_distinct_agent_task_results(tmp_path):
+    from open_agent.app.runner.models import ChatSpec
+    from open_agent.app.runner.repo import JsonChatRepository
+
+    storage_dir = tmp_path / "sessions"
+    repository = JsonChatRepository(storage_dir=storage_dir)
+    await repository.create_chat(
+        ChatSpec(name="Parent", session_id="session-parent", channel="web")
+    )
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    output = context.Queue()
+    results = [
+        {
+            "delivery_obligation_id": f"delivery-{index}",
+            "profile_id": f"writer-{index}",
+            "session_id": f"session-child-{index}",
+            "status": "completed",
+            "task_id": f"task-{index}",
+        }
+        for index in (1, 2)
+    ]
+    processes = [
+        context.Process(
+            target=_append_chat_result_process,
+            args=(str(storage_dir), result, start_event, output),
+        )
+        for result in results
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=15)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert sorted(output.get(timeout=2) for _ in processes) == [True, True]
+    fresh = JsonChatRepository(storage_dir=storage_dir)
+    chat = await fresh.find_by_session_id("session-parent")
+    assert {
+        item["delivery_obligation_id"] for item in chat.meta["agent_task_results"]
+    } == {"delivery-1", "delivery-2"}
+
+
+@pytest.mark.asyncio
+async def test_stale_cross_process_update_preserves_appended_task_result(tmp_path):
+    from open_agent.app.runner.models import ChatSpec
+    from open_agent.app.runner.repo import JsonChatRepository
+
+    storage_dir = tmp_path / "sessions"
+    repository = JsonChatRepository(storage_dir=storage_dir)
+    await repository.create_chat(
+        ChatSpec(name="Parent", session_id="session-parent", channel="web")
+    )
+    context = multiprocessing.get_context("spawn")
+    ready_event = context.Event()
+    update_event = context.Event()
+    output = context.Queue()
+    process = context.Process(
+        target=_stale_update_chat_process,
+        args=(str(storage_dir), ready_event, update_event, output),
+    )
+    process.start()
+    assert ready_event.wait(timeout=10)
+    result = {
+        "delivery_obligation_id": "delivery-1",
+        "profile_id": "writer",
+        "session_id": "session-child",
+        "status": "completed",
+        "task_id": "task-1",
+    }
+    await repository.append_agent_task_result("session-parent", "delivery-1", result)
+    update_event.set()
+    process.join(timeout=15)
+
+    assert process.exitcode == 0
+    assert output.get(timeout=2) is True
+    fresh = JsonChatRepository(storage_dir=storage_dir)
+    chat = await fresh.find_by_session_id("session-parent")
+    assert chat.name == "Stale writer rename"
+    assert chat.meta["agent_task_results"] == [result]
+
+
+@pytest.mark.asyncio
+async def test_metadata_lock_contention_does_not_block_event_loop(tmp_path):
+    from open_agent.app.runner.models import ChatSpec
+    from open_agent.app.runner.repo import JsonChatRepository
+
+    storage_dir = tmp_path / "sessions"
+    repository = JsonChatRepository(storage_dir=storage_dir)
+    await repository.create_chat(
+        ChatSpec(name="Parent", session_id="session-parent", channel="web")
+    )
+    context = multiprocessing.get_context("spawn")
+    acquired_event = context.Event()
+    process = context.Process(
+        target=_hold_chat_metadata_lock_process,
+        args=(str(storage_dir), acquired_event, 0.5),
+    )
+    process.start()
+    assert acquired_event.wait(timeout=10)
+    result = {
+        "delivery_obligation_id": "delivery-1",
+        "profile_id": "writer",
+        "session_id": "session-child",
+        "status": "completed",
+        "task_id": "task-1",
+    }
+    started = time.monotonic()
+    append_task = asyncio.create_task(
+        repository.append_agent_task_result("session-parent", "delivery-1", result)
+    )
+    await asyncio.sleep(0.02)
+    read_task = asyncio.create_task(repository.find_by_session_id("session-parent"))
+    await asyncio.sleep(0.05)
+    responsive_elapsed = time.monotonic() - started
+    await asyncio.gather(append_task, read_task)
+    process.join(timeout=10)
+
+    assert responsive_elapsed < 0.2
+    assert process.exitcode == 0
 
 
 @pytest.mark.asyncio
@@ -409,7 +573,12 @@ async def test_manual_resend_creates_new_obligation_and_audit(delivery_runtime):
     worker = DeliveryWorker(repository, {}, owner_id="worker")
 
     resent = worker.manual_resend(
-        "delivery-1", actor_id="operator-7", now=NOW + timedelta(minutes=1), resend_id="resend-1"
+        "delivery-1",
+        actor_id="operator-7",
+        duplicate_risk_acknowledged=True,
+        acknowledgement_version="1",
+        now=NOW + timedelta(minutes=1),
+        resend_id="resend-1",
     )
 
     assert resent.obligation_id == "resend-1"
@@ -422,10 +591,64 @@ async def test_manual_resend_creates_new_obligation_and_audit(delivery_runtime):
             "entity_id": "delivery-1",
             "action": "manual_resend",
             "actor_id": "operator-7",
-            "payload": {"resend_obligation_id": "resend-1"},
+            "payload": {
+                "acknowledgement_version": "1",
+                "duplicate_risk_acknowledged": True,
+                "resend_obligation_id": "resend-1",
+            },
             "created_at": NOW + timedelta(minutes=1),
         }
     ]
+
+
+@pytest.mark.parametrize("acknowledged", [False, None, 1])
+@pytest.mark.asyncio
+async def test_manual_resend_requires_explicit_duplicate_risk_acknowledgement(
+    delivery_runtime, acknowledged
+):
+    repository, _ = delivery_runtime
+    repository.enqueue_outbox(_obligation())
+    claimed = repository.claim_due_outbox("worker", NOW, NOW + timedelta(seconds=30))[0]
+    repository.mark_delivery_unknown(
+        claimed.obligation_id, claimed.claim, "ambiguous", NOW
+    )
+    worker = DeliveryWorker(repository, {}, owner_id="worker")
+
+    with pytest.raises(ValueError, match="duplicate risk"):
+        worker.manual_resend(
+            "delivery-1",
+            actor_id="operator-7",
+            duplicate_risk_acknowledged=acknowledged,
+            acknowledgement_version="1",
+            now=NOW,
+            resend_id="resend-negative",
+        )
+
+    assert repository.get_outbox("resend-negative") is None
+    assert repository.list_audit_events("outbox", "delivery-1") == []
+
+
+@pytest.mark.asyncio
+async def test_manual_resend_rejects_unknown_acknowledgement_version(delivery_runtime):
+    repository, _ = delivery_runtime
+    repository.enqueue_outbox(_obligation())
+    claimed = repository.claim_due_outbox("worker", NOW, NOW + timedelta(seconds=30))[0]
+    repository.mark_delivery_unknown(
+        claimed.obligation_id, claimed.claim, "ambiguous", NOW
+    )
+    worker = DeliveryWorker(repository, {}, owner_id="worker")
+
+    with pytest.raises(ValueError, match="version"):
+        worker.manual_resend(
+            "delivery-1",
+            actor_id="operator-7",
+            duplicate_risk_acknowledged=True,
+            acknowledgement_version="2",
+            now=NOW,
+            resend_id="resend-version",
+        )
+
+    assert repository.get_outbox("resend-version") is None
 
 
 @pytest.mark.asyncio

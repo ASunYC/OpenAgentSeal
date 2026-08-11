@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,7 @@ from open_agent.app.runner.models import AgentRequest
 
 
 _agent_tasks: dict[str, dict[str, Any]] = {}
+logger = logging.getLogger(__name__)
 
 
 def _manager_profile_id(profile_id: str | None) -> str | None:
@@ -172,17 +174,26 @@ async def _consume_agent_task(task_id: str, request: AgentRequest) -> None:
             if event.event == "complete":
                 task_state["result"] = event.content
             _persist_task(task_state)
-        if task_state.get("status") != "cancelled":
-            task_state["status"] = "completed"
-            await _backfill_parent_session(task_state)
     except asyncio.CancelledError:
         task_state["status"] = "cancelled"
-        await runner.cancel_session(request.session_id)
-        await _backfill_parent_session(task_state)
+        try:
+            await runner.cancel_session(request.session_id)
+        except Exception:
+            logger.exception("Failed to cancel agent session %s", request.session_id)
     except Exception as exc:
         task_state["status"] = "failed"
         task_state["error"] = str(exc)
+    else:
+        if task_state.get("status") == "cancelled":
+            return
+        task_state["status"] = "completed"
+
+    try:
         await _backfill_parent_session(task_state)
+    except Exception:
+        logger.exception(
+            "Failed to persist or deliver terminal agent task %s", task_id
+        )
 
 
 async def start_agent_task(
