@@ -51,6 +51,10 @@ class AuthorizedRepository:
         kwargs.setdefault("principal", self.principal)
         return self.raw.transition_goal(goal_id, **kwargs)
 
+    def claim_next_goal_iteration(self, *args, **kwargs):
+        kwargs.setdefault("principal", self.principal)
+        return self.raw.claim_next_goal_iteration(*args, **kwargs)
+
     def issue_goal_operator_approval(
         self, goal_id, *, approval_id, decision, now, budget_updates=None, **_ignored
     ):
@@ -118,7 +122,9 @@ def runtime(tmp_path: Path):
         actor_id="default", tenant_id="local", capability=goal_capability
     )
     return cp, AuthorizedRepository(
-        raw, principal, GoalOperatorService(raw, operator_capability)
+        raw, principal, GoalOperatorService(
+            raw, operator_capability, issuer_id="operator-console", tenant_id="local"
+        )
     )
 
 
@@ -990,3 +996,86 @@ def test_legacy_terminal_completion_uses_same_prewrite_validator(runtime):
             result={"content": "x" * 65_537, "usage": {"total_tokens": 1}},
         )
     assert cp.list_runtime_turns("legacy-thread")[0] == before
+
+
+def test_operator_approval_rejects_exact_expiry_and_audits_separate_issuer(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(
+        session_id="expiry", goal_text="Ship", configuration=config().to_record(), now=NOW
+    )
+    with cp._get_conn() as conn:
+        conn.execute("UPDATE goals SET status='blocked' WHERE goal_id=?", (first.goal_id,))
+    repo.operator_service.approve(
+        repo.principal, first.goal_id, approval_id="expires-exactly",
+        decision="reset_failures", expected_goal_version=0,
+        expires_at=NOW + timedelta(seconds=1), now=NOW,
+    )
+    with pytest.raises(PermissionError):
+        repo.transition_goal(
+            first.goal_id, expected_version=0, action="resume",
+            now=NOW + timedelta(seconds=1), reason="expired",
+            operator_decision="reset_failures", approval_id="expires-exactly",
+        )
+    audit = cp._get_conn().execute(
+        "SELECT issuer_id, principal_id, consumed_at FROM goal_operator_approvals WHERE approval_id=?",
+        ("expires-exactly",),
+    ).fetchone()
+    assert audit["issuer_id"] == "operator-console"
+    assert audit["principal_id"] == "default"
+    assert audit["consumed_at"] is None
+
+
+def test_controller_list_rejects_forged_or_foreign_principal(runtime, tmp_path):
+    from types import SimpleNamespace
+    from open_agent.goal_mode import GoalController
+
+    cp, repo = runtime
+    with pytest.raises(PermissionError):
+        GoalController(
+            cp, goal_repository=repo.raw,
+            request_principal=SimpleNamespace(actor_id="default", tenant_id="local"),
+        ).list_goals()
+    other_capability = object()
+    other = DurableRuntimeRepository(
+        ControlPlane(tmp_path / "other"), goal_authority_capability=other_capability
+    )
+    foreign = other.mint_goal_principal(
+        actor_id="default", tenant_id="local", capability=other_capability
+    )
+    with pytest.raises(PermissionError):
+        GoalController(cp, goal_repository=repo.raw, request_principal=foreign).list_goals()
+
+
+def test_claim_persists_real_owner_tenant_and_rejects_conflicting_thread(tmp_path):
+    cp = ControlPlane(tmp_path)
+    capability = object()
+    repo = DurableRuntimeRepository(cp, goal_authority_capability=capability)
+    principal = repo.mint_goal_principal(
+        actor_id="owner-a", tenant_id="tenant-a", capability=capability
+    )
+    first = repo.create_goal_with_first_iteration(
+        session_id="owned", goal_text="Ship", configuration=config().to_record(),
+        now=NOW, principal=principal,
+    )
+    claimed = repo.claim_next_goal_iteration(
+        "worker", NOW, NOW + timedelta(seconds=30), goal_id=first.goal_id,
+        principal=principal,
+    )
+    thread = cp.get_runtime_thread(f"goal:{first.goal_id}:thread")
+    assert thread["user_id"] == "owner-a"
+    assert thread["metadata"]["tenant_id"] == "tenant-a"
+
+    second = repo.create_goal_with_first_iteration(
+        session_id="owned-2", goal_text="Ship", configuration=config().to_record(),
+        now=NOW, principal=principal,
+    )
+    cp.create_runtime_thread(
+        session_id="owned-2", thread_id=f"goal:{second.goal_id}:thread",
+        user_id="attacker", metadata={"tenant_id": "tenant-b"},
+    )
+    with pytest.raises(Exception):
+        repo.claim_next_goal_iteration(
+            "worker", NOW, NOW + timedelta(seconds=30), goal_id=second.goal_id,
+            principal=principal,
+        )
+    assert repo.get_goal_iteration(second.iteration_id).state == "pending"
