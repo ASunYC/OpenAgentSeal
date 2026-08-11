@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from time import monotonic
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 from open_agent.agent_profiles import MAIN_AGENT_ID
 from open_agent.app.runner.manager import get_chat_manager
@@ -176,6 +176,8 @@ class DeliveryWorker:
         destinations: Mapping[str, DeliveryDestination],
         *,
         owner_id: str,
+        destination_resolver: Callable[[str], DeliveryDestination] | None = None,
+        destination_names: Callable[[], Iterable[str]] | None = None,
         lease_duration: timedelta = timedelta(seconds=30),
         delivery_timeout: float = 20.0,
         retry_base: timedelta = timedelta(seconds=5),
@@ -209,8 +211,14 @@ class DeliveryWorker:
             or not 1 <= batch_size <= 1000
         ):
             raise ValueError("batch_size must be between 1 and 1000")
+        if destination_resolver is not None and not callable(destination_resolver):
+            raise TypeError("destination_resolver must be callable")
+        if destination_names is not None and not callable(destination_names):
+            raise TypeError("destination_names must be callable")
         self.repository = repository
         self.destinations = dict(destinations)
+        self._destination_resolver = destination_resolver
+        self._destination_names = destination_names
         self.owner_id = owner_id
         self.lease_duration = lease_duration
         self.delivery_timeout = delivery_timeout
@@ -258,12 +266,17 @@ class DeliveryWorker:
         processed = 0
         for _ in range(self.batch_size):
             claim_now = current_time()
+            eligible_destinations = (
+                tuple(self._destination_names())
+                if self._destination_names is not None
+                else (None if self._destination_resolver is not None else self.destinations)
+            )
             claims = self.repository.claim_due_outbox(
                 self.owner_id,
                 claim_now,
                 claim_now + self.lease_duration,
                 limit=1,
-                destinations=self.destinations,
+                destinations=eligible_destinations,
             )
             if not claims:
                 break
@@ -281,7 +294,7 @@ class DeliveryWorker:
                     renewal_now,
                     renewal_now + self.lease_duration,
                 )
-                destination = self.destinations.get(obligation.destination)
+                destination = self._resolve_destination(obligation.destination)
                 if destination is None:
                     raise PermanentDeliveryError(
                         f"unsupported destination: {obligation.destination}"
@@ -297,7 +310,6 @@ class DeliveryWorker:
             except StaleClaimError:
                 continue
             except asyncio.TimeoutError as exc:
-                destination = self.destinations.get(obligation.destination)
                 if destination is not None and bool(
                     getattr(destination, "timeout_is_retryable", False)
                 ):
@@ -356,6 +368,15 @@ class DeliveryWorker:
                 except StaleClaimError:
                     continue
         return processed
+
+    def _resolve_destination(self, name: str) -> DeliveryDestination | None:
+        destination = self.destinations.get(name)
+        if destination is not None or self._destination_resolver is None:
+            return destination
+        try:
+            return self._destination_resolver(name)
+        except KeyError:
+            return None
 
     def manual_resend(
         self,

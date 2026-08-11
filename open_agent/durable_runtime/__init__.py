@@ -9,6 +9,12 @@ from .models import (
     SchedulerRun,
     to_json_value,
 )
+from .supervisor import (
+    DurableRuntimeSupervisor,
+    RuntimeHealthSnapshot,
+    WorkerHealth,
+    WorkerSpec,
+)
 
 __all__ = [
     "ClaimToken",
@@ -16,6 +22,10 @@ __all__ = [
     "InboxEvent",
     "OutboxObligation",
     "SchedulerRun",
+    "DurableRuntimeSupervisor",
+    "RuntimeHealthSnapshot",
+    "WorkerHealth",
+    "WorkerSpec",
     "lease_is_valid",
     "next_backoff",
     "to_json_value",

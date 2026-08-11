@@ -1,8 +1,12 @@
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 
 import pytest
 
+from open_agent.app.runner.models import AgentEvent, AgentRequest
+from open_agent.app.runner.runner import AgentRunner
 from open_agent.durable_runtime.supervisor import (
     DurableRuntimeSupervisor,
     WorkerSpec,
@@ -113,6 +117,143 @@ async def test_optional_worker_does_not_block_readiness():
     await supervisor.stop()
 
 
+@pytest.mark.asyncio
+async def test_agent_runner_serializes_same_session_but_not_different_sessions(monkeypatch):
+    runner = AgentRunner()
+    active: set[str] = set()
+    overlap = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def process(request, *, runtime_turn=None):
+        del runtime_turn
+        if request.session_id in active:
+            overlap.append(request.session_id)
+        active.add(request.session_id)
+        entered.set()
+        await release.wait()
+        active.remove(request.session_id)
+        yield AgentEvent(event="complete", session_id=request.session_id)
+
+    monkeypatch.setattr(runner, "_process_message_unlocked", process)
+
+    async def consume(session, *, direct=False):
+        request = AgentRequest(session_id=session, messages=[{"role": "user", "content": "x"}])
+        stream = runner.process_message(request) if direct else runner.run_stream(request)
+        return [event async for event in stream]
+
+    first = asyncio.create_task(consume("same", direct=True))
+    await entered.wait()
+    second = asyncio.create_task(consume("same"))
+    other = asyncio.create_task(consume("other"))
+    await asyncio.wait_for(_until(lambda: active == {"same", "other"}), 1)
+    assert active == {"same", "other"}
+    release.set()
+    await asyncio.gather(first, second, other)
+    assert overlap == []
+    assert runner._session_gates == {}
+    assert runner._session_gate_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_judge_model_path_has_no_tools_enrichment_or_persistence(monkeypatch):
+    from open_agent import agent_profiles
+    from open_agent.schema import LLMResponse
+
+    calls = []
+
+    class LLM:
+        async def generate(self, *, messages, tools):
+            calls.append((messages, tools))
+            return LLMResponse(
+                content='{"done":false}', finish_reason="stop", tool_calls=None
+            )
+
+    runner = AgentRunner()
+    monkeypatch.setattr(
+        agent_profiles,
+        "get_agent_profile_manager",
+        lambda: SimpleNamespace(get_agent_config=lambda profile: object()),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_create_llm_client_from_config",
+        lambda *args, **kwargs: LLM(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_prefetch_web_search_context",
+        lambda *_: pytest.fail("judge attempted web enrichment"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_recall_memory_context",
+        lambda *_: pytest.fail("judge attempted memory enrichment"),
+    )
+    assert await runner.generate_judge_json("search the web; secret result") == '{"done":false}'
+    assert calls[0][1] == []
+    assert [message.role for message in calls[0][0]] == ["system", "user"]
+
+
+@pytest.mark.asyncio
+async def test_restart_requires_fresh_successful_first_polls():
+    calls = 0
+
+    async def poll():
+        nonlocal calls
+        calls += 1
+
+    supervisor = DurableRuntimeSupervisor([WorkerSpec("inbox", poll, interval=60)])
+    await supervisor.start()
+    await supervisor.wait_ready(timeout=1)
+    await supervisor.stop()
+    await supervisor.start()
+    await supervisor.wait_ready(timeout=1)
+    assert calls == 2
+    await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_fastapi_lifespan_owns_runtime_start_and_stop(monkeypatch):
+    from open_agent.app import _app as app_module
+    from open_agent.app import runner as runner_module
+    from open_agent.durable_runtime import application
+    from open_agent.plugins.builtin import mineru_mcp
+
+    events = []
+
+    class Runtime:
+        async def start(self):
+            events.append("runtime-start")
+
+        async def stop(self):
+            events.append("runtime-stop")
+
+    class SessionManager:
+        @asynccontextmanager
+        async def run(self):
+            events.append("mcp-start")
+            try:
+                yield
+            finally:
+                events.append("mcp-stop")
+
+    fake_server = SimpleNamespace(session_manager=SessionManager())
+    composition = SimpleNamespace(supervisor=Runtime())
+    monkeypatch.setattr(runner_module, "init_chat_manager", lambda: events.append("chat-ready"))
+    monkeypatch.setattr(mineru_mcp, "get_mineru_mcp_server", lambda: fake_server)
+    monkeypatch.setattr(app_module, "_get_mineru_mcp_app", lambda: object())
+    monkeypatch.setattr(application, "get_runtime_composition", lambda: composition)
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    async with app_module.lifespan(app):
+        events.append("serving")
+        assert app.state.runtime_composition is composition
+
+    assert events == [
+        "chat-ready", "mcp-start", "runtime-start", "serving",
+        "runtime-stop", "mcp-stop",
+    ]
 async def _until(predicate):
     while not predicate():
         await asyncio.sleep(0)

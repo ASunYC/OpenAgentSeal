@@ -54,7 +54,15 @@ async def lifespan(app: FastAPI):
 
     _get_mineru_mcp_app()
     async with get_mineru_mcp_server().session_manager.run():
-        yield
+        from open_agent.durable_runtime.application import get_runtime_composition
+
+        composition = get_runtime_composition()
+        app.state.runtime_composition = composition
+        try:
+            await composition.supervisor.start()
+            yield
+        finally:
+            await composition.supervisor.stop()
 
     logger.info("🌐 Open Agent Web UI stopped")
 

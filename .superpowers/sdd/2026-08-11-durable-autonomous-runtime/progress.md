@@ -35,3 +35,6 @@ Task 9: fix round 3/5 (3 HIGH and 2 MEDIUM security findings addressed: session-
 Task 9: fix round 4/5 (opaque tenant principals, versioned expiring canonical operator approval, shared pre-write terminal validator and bounded transition reason addressed)
 Task 9: fix round 5/5 (principal-scoped recovery/read/list/claim, owner-bound runtime threads, immutable exact-provenance weak capability registries addressed)
 Task 9: complete (nine RED checkpoints; 506 passed and 2 skipped expanded compatibility, 85% Goal runtime coverage, final code/security 0 Critical / 0 High / 0 Medium)
+Task 10: fix round 1/5 (3 HIGH and 2 MEDIUM code findings addressed: common session gate, atomic eligible scheduler claiming, unauthenticated wake removal, protected lifespan startup, and bounded synchronous retention polling)
+Task 10: fix round 2/5 (Goal judge prompt-injection/exfiltration HIGH and unbounded session waiter MEDIUM addressed with a dedicated tool-free non-persisting model path plus bounded acquisition)
+Task 10: complete (RED b4c4724; 9 supervisor tests at 94% coverage, 242 passed and 2 skipped expanded compatibility, final code/security 0 Critical / 0 High; security 0 Medium)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -294,3 +295,70 @@ async def test_expired_claim_is_recovered_and_stale_worker_is_fenced(runtime):
     with pytest.raises(StaleClaimError):
         repository.complete_scheduler_run(stale.run_id, stale.claim, content="late", now=NOW + timedelta(seconds=2))
     assert recovered.claim.generation > stale.claim.generation
+
+
+@pytest.mark.asyncio
+async def test_run_once_scans_and_executes_oldest_due_run(runtime):
+    control, repository = runtime
+    control.create_scheduler_job(
+        "* * * * *", "run", job_id="supervised", next_run_at=NOW.isoformat()
+    )
+    result = await SchedulerWorker(
+        repository, FakeRunner(), clock=lambda: NOW, owner_id="supervisor"
+    ).run_once()
+    assert result is not None
+    assert result.job_id == "supervised"
+    assert result.state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_execute_next_skips_ineligible_head_run(runtime):
+    control, repository = runtime
+    old = NOW - timedelta(minutes=2)
+    for job_id, scheduled in (("paused-head", old), ("eligible-tail", NOW)):
+        control.create_scheduler_job(
+            "* * * * *", "run", job_id=job_id, next_run_at=scheduled.isoformat()
+        )
+        repository.create_due_scheduler_run(
+            job_id, scheduled, NOW + timedelta(minutes=1), now=NOW
+        )
+    control.update_scheduler_job_status("paused-head", "paused")
+    result = await SchedulerWorker(
+        repository, FakeRunner(), clock=lambda: NOW, owner_id="supervisor"
+    ).execute_next()
+    assert result is not None
+    assert result.job_id == "eligible-tail"
+    assert repository.list_scheduler_runs("paused-head")[0].state == "pending"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_scheduler_poll_cancels_and_awaits_agent_child(runtime):
+    control, repository = runtime
+    control.create_scheduler_job(
+        "* * * * *", "run", job_id="cancel-child", next_run_at=NOW.isoformat()
+    )
+    run = repository.create_due_scheduler_run(
+        "cancel-child", NOW, NOW + timedelta(minutes=1), now=NOW
+    )
+    entered = asyncio.Event()
+    finalized = asyncio.Event()
+
+    class BlockingRunner:
+        async def run_stream(self, request, *, runtime_turn=None):
+            del request, runtime_turn
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalized.set()
+            if False:
+                yield
+
+    task = asyncio.create_task(
+        SchedulerWorker(repository, BlockingRunner(), clock=lambda: NOW).execute_run(run.run_id)
+    )
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finalized.is_set()

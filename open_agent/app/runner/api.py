@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -38,6 +38,17 @@ from open_agent.utils.path_utils import get_data_dir
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+
+@router.get("/runtime/supervisor/health")
+async def durable_runtime_supervisor_health(request: Request) -> dict:
+    """Expose a secret-free lifecycle snapshot for readiness diagnostics."""
+    from dataclasses import asdict
+
+    composition = getattr(request.app.state, "runtime_composition", None)
+    if composition is None:
+        raise HTTPException(status_code=503, detail="Durable runtime is unavailable")
+    return asdict(composition.supervisor.snapshot())
 
 
 # Request/Response models

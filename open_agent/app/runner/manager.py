@@ -276,5 +276,9 @@ def get_chat_manager(profile_id: str | None = None) -> ChatManager:
 def init_chat_manager(repo: ChatRepository = None) -> ChatManager:
     """Initialize the global ChatManager"""
     global _chat_manager
+    if _chat_manager is not None and repo is None:
+        return _chat_manager
+    if _chat_manager is not None and repo is _chat_manager.repo:
+        return _chat_manager
     _chat_manager = ChatManager(repo)
     return _chat_manager

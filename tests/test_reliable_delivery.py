@@ -687,3 +687,30 @@ async def test_lease_loss_is_detected_before_local_side_effect(delivery_runtime)
     chat = await chat_manager.repo.find_by_session_id("session-parent")
     assert chat_manager.get_messages("session-parent") == []
     assert chat.meta.get("agent_task_results", []) == []
+
+
+@pytest.mark.asyncio
+async def test_dynamic_destination_resolver_observes_accounts_added_after_worker_start(
+    delivery_runtime,
+):
+    repository, _ = delivery_runtime
+    repository.enqueue_outbox(_obligation(destination="channel:new-account"))
+    available = {}
+
+    class Destination:
+        async def deliver(self, obligation, claim):
+            del claim
+            return {"delivered": obligation.obligation_id}
+
+    worker = DeliveryWorker(
+        repository,
+        {},
+        owner_id="dynamic-worker",
+        destination_resolver=lambda name: available[name],
+        destination_names=lambda: tuple(available),
+    )
+    assert await worker.run_once(NOW) == 0
+    assert repository.get_outbox("delivery-1").state == "pending"
+    available["channel:new-account"] = Destination()
+    assert await worker.run_once(NOW) == 1
+    assert repository.get_outbox("delivery-1").state == "acknowledged"

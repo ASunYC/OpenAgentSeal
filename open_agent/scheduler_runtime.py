@@ -143,6 +143,21 @@ class SchedulerWorker:
             job_id, request_id, now=now or self._clock()
         )
 
+    async def execute_next(self) -> SchedulerRun | None:
+        """Execute the oldest due occurrence, including retries and stale leases."""
+        now = self._clock()
+        claimed = self._repository.claim_due_scheduler_runs(
+            self._owner_id, now, now + self._lease_duration, limit=1
+        )
+        if not claimed:
+            return None
+        return await self._execute_claimed(claimed[0], now)
+
+    async def run_once(self) -> SchedulerRun | None:
+        """Perform one bounded scan/execution supervisor poll."""
+        self.scan_once(self._clock())
+        return await self.execute_next()
+
     async def execute_run(self, run_id: str) -> SchedulerRun:
         now = self._clock()
         claimed = self._repository.claim_due_scheduler_runs(
@@ -156,7 +171,9 @@ class SchedulerWorker:
             if current is None:
                 raise KeyError(f"Scheduler run not found: {run_id}")
             return current
-        run = claimed[0]
+        return await self._execute_claimed(claimed[0], now)
+
+    async def _execute_claimed(self, run: SchedulerRun, now: datetime) -> SchedulerRun:
         assert run.claim is not None
         job = self._repository.control_plane.get_scheduler_job(run.job_id)
         if job is None:
@@ -229,8 +246,13 @@ class SchedulerWorker:
                         heartbeat_now + self._lease_duration,
                     )
             complete, content, error = await runner_task
+        except asyncio.CancelledError:
+            runner_task.cancel()
+            await asyncio.gather(runner_task, return_exceptions=True)
+            raise
         except Exception as exc:
             runner_task.cancel()
+            await asyncio.gather(runner_task, return_exceptions=True)
             error = f"Agent stream failed: {type(exc).__name__}"
             complete = False
             content = ""
