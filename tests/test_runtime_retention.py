@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import sqlite3
@@ -322,7 +323,7 @@ def test_tombstones_and_attachment_queue_survive_external_hmac_key_rotation(
     seed_expired_records(repository)
     first_worker = RetentionWorker(repository, policy(), attachment_root)
     monkeypatch.setattr(
-        first_worker, "_delete_managed_attachment", lambda storage_path: "failed"
+        first_worker, "_delete_managed_attachment", lambda claim, now: "failed"
     )
     assert first_worker.run_once(NOW).attachments_failed == 1
 
@@ -597,7 +598,7 @@ def test_stale_claim_cannot_delete_or_ack_a_requeued_same_path_occurrence(runtim
     assert new_claim.generation != old_claim.generation
 
     worker = RetentionWorker(repository, policy(), attachment_root)
-    assert worker._delete_managed_attachment(old_claim) == "stale"
+    assert worker._delete_managed_attachment(old_claim, NOW) == "stale"
     stale_counts = repository.complete_retention_attachments(
         {old_claim: "deleted"}, now=NOW
     )
@@ -665,7 +666,12 @@ def test_expired_claim_is_reclaimed_with_a_new_fencing_token(runtime):
     assert replacement_claim.claim_token != stale_claim.claim_token
     assert replacement_claim.claim_owner != stale_claim.claim_owner
     worker = RetentionWorker(repository, policy(), attachment_root)
-    assert worker._delete_managed_attachment(stale_claim) == "stale"
+    assert (
+        worker._delete_managed_attachment(
+            stale_claim, NOW + timedelta(minutes=6)
+        )
+        == "stale"
+    )
     assert attachment.exists()
 
 
@@ -684,11 +690,11 @@ def test_file_identity_mismatch_fails_closed_before_handle_deletion(runtime):
     )
     claim = attachment_claims(batch)[storage_path]
     forged_identity_claim = repository.authorize_retention_attachment_deletion(
-        claim, "forged-immutable-file-identity"
+        claim, "forged-immutable-file-identity", now=NOW
     )
 
     worker = RetentionWorker(repository, policy(), attachment_root)
-    assert worker._delete_managed_attachment(forged_identity_claim) == "failed"
+    assert worker._delete_managed_attachment(forged_identity_claim, NOW) == "failed"
     assert attachment.read_bytes() == b"must survive identity mismatch"
     assert repository.claim_retention_attachments(
         now=NOW + timedelta(minutes=6), limit=1
@@ -723,6 +729,204 @@ def test_file_identity_mismatch_fails_closed_before_handle_deletion(runtime):
         "SELECT work_id FROM retention_attachment_queue WHERE storage_path = ?",
         (storage_path,),
     ).fetchone()[0] == claim.work_id
+
+
+def test_backlog_tampering_cannot_launder_a_path_into_an_authenticated_claim(
+    runtime, monkeypatch
+):
+    _, repository, attachment_root = runtime
+    original_paths = (
+        "quarantine/backlog-source-object-0001",
+        "quarantine/backlog-source-object-0002",
+    )
+    repository.enqueue_inbox(
+        InboxEvent(
+            "event-backlog-source",
+            "key-backlog-source",
+            "account-a",
+            "private",
+            {
+                "attachments": [
+                    {"storage_path": storage_path}
+                    for storage_path in original_paths
+                ]
+            },
+            created_at=OLD,
+            updated_at=OLD,
+        )
+    )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute("UPDATE inbox_events SET state = 'succeeded'")
+    first_worker = RetentionWorker(
+        repository,
+        policy(batch_limit=1, attachment_max_attempts=1),
+        attachment_root,
+    )
+    monkeypatch.setattr(
+        first_worker, "_delete_managed_attachment", lambda claim, now: "failed"
+    )
+    first_worker.run_once(NOW)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM retention_attachment_backlog"
+    ).fetchone()[0] == 1
+
+    victim_path = "quarantine/backlog-victim-object-0003"
+    victim = attachment_root / victim_path
+    victim.parent.mkdir(parents=True, exist_ok=True)
+    victim.write_bytes(b"must not be MAC-laundered")
+    with conn:
+        conn.execute(
+            "UPDATE retention_attachment_backlog SET storage_paths = ?",
+            (json.dumps([victim_path]),),
+        )
+    attempted: list[str] = []
+    second_worker = RetentionWorker(
+        repository, policy(batch_limit=1), attachment_root
+    )
+    monkeypatch.setattr(
+        second_worker,
+        "_delete_managed_attachment",
+        lambda claim, now: attempted.append(claim.storage_path) or "failed",
+    )
+
+    with pytest.raises(StateConflictError, match="backlog|authenticate"):
+        second_worker.run_once(NOW + timedelta(seconds=1))
+
+    assert attempted == []
+    assert victim.read_bytes() == b"must not be MAC-laundered"
+
+
+def test_nested_raw_storage_path_is_not_a_trusted_attachment_container(
+    runtime, monkeypatch
+):
+    _, repository, attachment_root = runtime
+    victim_path = "quarantine/nested-victim-object-0001"
+    victim = attachment_root / victim_path
+    victim.parent.mkdir(parents=True, exist_ok=True)
+    victim.write_bytes(b"nested metadata is not an attachment capability")
+    repository.enqueue_inbox(
+        InboxEvent(
+            "event-nested-untrusted-path",
+            "key-nested-untrusted-path",
+            "account-a",
+            "private",
+            {"metadata": {"storage_path": victim_path}},
+            created_at=OLD,
+            updated_at=OLD,
+        )
+    )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute(
+            "UPDATE inbox_events SET state = 'succeeded' WHERE event_id = ?",
+            ("event-nested-untrusted-path",),
+        )
+    attempted: list[str] = []
+    worker = RetentionWorker(repository, policy(), attachment_root)
+    monkeypatch.setattr(
+        worker,
+        "_delete_managed_attachment",
+        lambda claim, now: attempted.append(claim.storage_path) or "failed",
+    )
+
+    worker.run_once(NOW)
+
+    assert attempted == []
+    assert victim.read_bytes() == b"nested metadata is not an attachment capability"
+
+
+def test_worker_refreshes_operation_time_before_authorization(runtime):
+    _, repository, attachment_root = runtime
+    storage_path = "quarantine/expired-during-batch-object-0001"
+    attachment = attachment_root / storage_path
+    attachment.parent.mkdir(parents=True, exist_ok=True)
+    attachment.write_bytes(b"lease expires while batch is running")
+    seed_expired_records(repository, storage_path)
+    ticks = iter((0.0, 301.0, 301.0))
+    worker = RetentionWorker(
+        repository,
+        policy(),
+        attachment_root,
+        monotonic=lambda: next(ticks, 301.0),
+    )
+
+    summary = worker.run_once(NOW)
+
+    assert summary.attachments_deleted == 0
+    assert summary.attachments_stale == 1
+    assert attachment.read_bytes() == b"lease expires while batch is running"
+
+
+def test_pre_open_replacement_cannot_become_the_bound_file_identity(
+    runtime, monkeypatch
+):
+    _, repository, attachment_root = runtime
+    storage_path = "quarantine/pre-open-replacement-object-0001"
+    attachment = attachment_root / storage_path
+    saved_original = attachment_root / "saved-original-object-0001"
+    attachment.parent.mkdir(parents=True, exist_ok=True)
+    attachment.write_bytes(b"original occurrence")
+    seed_expired_records(repository, storage_path)
+    worker = RetentionWorker(repository, policy(), attachment_root)
+    original_delete = worker._delete_managed_attachment
+    swapped = False
+
+    def replace_before_open(claim, now):
+        nonlocal swapped
+        if not swapped:
+            attachment.replace(saved_original)
+            attachment.write_bytes(b"newer same-path occurrence")
+            swapped = True
+        return original_delete(claim, now)
+
+    monkeypatch.setattr(worker, "_delete_managed_attachment", replace_before_open)
+
+    summary = worker.run_once(NOW)
+
+    assert summary.attachments_deleted == 0
+    assert attachment.read_bytes() == b"newer same-path occurrence"
+    assert saved_original.read_bytes() == b"original occurrence"
+    row = repository.control_plane._get_conn().execute(
+        "SELECT file_identity FROM retention_attachment_queue WHERE storage_path = ?",
+        (storage_path,),
+    ).fetchone()
+    assert row is not None and row["file_identity"] is not None
+
+
+def test_posix_deletion_uses_a_private_quarantine_before_unlink():
+    source = inspect.getsource(RetentionWorker._delete_posix_handle)
+
+    assert "rename" in source
+    assert "private" in source or "quarantine" in source
+    assert source.index("rename") < source.index("unlink")
+
+
+@pytest.mark.parametrize(
+    "storage_path",
+    [
+        "quarantine//canonical-object-0001",
+        "quarantine/./canonical-object-0001",
+        "Quarantine/canonical-object-0001",
+        r"quarantine\canonical-object-0001",
+        "quarantine/canonical-object-0001.",
+    ],
+)
+def test_attachment_source_rejects_filesystem_alias_paths(runtime, storage_path):
+    _, repository, _ = runtime
+
+    with pytest.raises(ValueError, match="canonical|storage_path"):
+        repository.enqueue_inbox(
+            InboxEvent(
+                f"event-alias-{hashlib.sha256(storage_path.encode()).hexdigest()[:8]}",
+                f"key-alias-{hashlib.sha256(storage_path.encode()).hexdigest()[:8]}",
+                "account-a",
+                "private",
+                {"attachments": [{"storage_path": storage_path}]},
+                created_at=OLD,
+                updated_at=OLD,
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -881,7 +1085,7 @@ def test_attachment_enqueue_and_due_work_are_hard_capped_at_64(runtime, monkeypa
     monkeypatch.setattr(
         worker,
         "_delete_managed_attachment",
-        lambda claim: attempted.append(claim.storage_path) or "failed",
+        lambda claim, now: attempted.append(claim.storage_path) or "failed",
     )
 
     worker.run_once(NOW)
@@ -925,7 +1129,7 @@ def test_full_retry_queue_defers_backlog_until_ack_releases_slots(runtime, monke
     monkeypatch.setattr(
         worker,
         "_delete_managed_attachment",
-        lambda claim: attempted.append(claim.storage_path) or "failed",
+        lambda claim, now: attempted.append(claim.storage_path) or "failed",
     )
 
     worker.run_once(NOW)
@@ -979,7 +1183,9 @@ def test_terminal_attachment_failures_release_capacity_and_can_be_requeued(
         policy(batch_limit=80, attachment_max_attempts=2),
         attachment_root,
     )
-    monkeypatch.setattr(worker, "_delete_managed_attachment", lambda path: "failed")
+    monkeypatch.setattr(
+        worker, "_delete_managed_attachment", lambda claim, now: "failed"
+    )
 
     worker.run_once(NOW)
     persisted_retry = conn.execute(
@@ -1287,10 +1493,10 @@ def test_failed_attachment_backoff_does_not_starve_newer_due_work(runtime, monke
     monkeypatch.setattr(
         worker,
         "_delete_managed_attachment",
-        lambda claim: (
+        lambda claim, now: (
             "failed"
             if claim.storage_path == "blocked.bin"
-            else original_delete(claim)
+            else original_delete(claim, now)
         ),
     )
 
@@ -1312,12 +1518,12 @@ def test_failed_attachment_delete_is_persisted_and_retried(runtime, monkeypatch)
     original_delete = worker._delete_managed_attachment
     calls = 0
 
-    def fail_once(path):
+    def fail_once(claim, now):
         nonlocal calls
         calls += 1
         if calls == 1:
             return "failed"
-        return original_delete(path)
+        return original_delete(claim, now)
 
     monkeypatch.setattr(worker, "_delete_managed_attachment", fail_once)
 
@@ -1422,7 +1628,9 @@ def test_attachment_cleanup_rejects_traversal_and_symlink_escape(
     worker = RetentionWorker(repository, policy(), attachment_root)
     if not created_symlink:
         monkeypatch.setattr(
-            worker, "_delete_windows_handle", lambda candidate, claim: "rejected"
+            worker,
+            "_delete_windows_handle",
+            lambda candidate, claim, now: "rejected",
         )
     summary = worker.run_once(NOW)
 
@@ -1482,7 +1690,7 @@ def test_attachment_root_and_windows_path_normalization_are_defensive(runtime, t
         RetentionWorker(repository, policy(), tmp_path / "missing")
 
     worker = RetentionWorker(repository, policy(), attachment_root)
-    assert worker._delete_managed_attachment("") == "rejected"
+    assert worker._delete_managed_attachment("", NOW) == "rejected"
     assert worker._normalize_windows_handle_path(r"\\?\UNC\server\share\file") == (
         r"\\server\share\file"
     )
