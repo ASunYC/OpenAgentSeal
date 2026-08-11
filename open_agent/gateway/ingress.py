@@ -20,7 +20,8 @@ from open_agent.durable_runtime.repository import (
     StateConflictError,
 )
 
-from .contracts import ChannelAdapter, NormalizedInboundEvent
+from .contracts import AuthenticatedGatewayFrame, ChannelAdapter, GatewayConnectorCapability, NormalizedInboundEvent
+from .destinations import channel_obligation
 from .router import GatewayRouter
 from .security import (
     AttachmentGuard,
@@ -112,6 +113,7 @@ class IngressService:
         attachment_guard: AttachmentGuard | None = None,
         url_policy: OutboundUrlPolicy | None = None,
         attachment_fetcher: Callable[[Any], AttachmentUpload] | None = None,
+        gateway_capabilities: Mapping[str, GatewayConnectorCapability] | None = None,
     ) -> None:
         self._repository = repository
         self._router = router
@@ -124,6 +126,7 @@ class IngressService:
         self._attachment_guard = attachment_guard
         self._url_policy = url_policy
         self._attachment_fetcher = attachment_fetcher
+        self._gateway_capabilities = dict(gateway_capabilities or {})
 
     def accept_webhook(
         self,
@@ -150,6 +153,40 @@ class IngressService:
             raise SecurityViolation("webhook context identifier length limit exceeded")
         context = IngressContext(remote_ip, adapter.kind, account_id)
         request_digest = hashlib.sha256(raw_body).hexdigest()
+
+        official_verifier = getattr(adapter, "verify_webhook", None)
+        if adapter.capabilities.supports_webhook and callable(official_verifier):
+            def verify_official(untouched_body: bytes) -> None:
+                try:
+                    verified = official_verifier(untouched_body, headers, now=self._now())
+                except Exception as exc:
+                    raise SecurityViolation("official webhook authentication failed") from exc
+                if verified is not True:
+                    raise SecurityViolation("official webhook authentication failed")
+
+            def accept_official(untouched_body: bytes) -> IngressReceipt:
+                normalizer = getattr(adapter, "normalize_many", None)
+                events = (
+                    tuple(normalizer(untouched_body))
+                    if callable(normalizer)
+                    else (adapter.normalize(untouched_body),)
+                )
+                if not 1 <= len(events) <= 100:
+                    raise SecurityViolation("webhook event batch size is invalid")
+                receipts = tuple(
+                    self._accept_event(
+                        event,
+                        transport_mode="webhook",
+                        adapter=adapter,
+                        expected_account_id=account_id,
+                    )
+                    for event in events
+                )
+                return receipts[0]
+
+            return self._ingress_guard.process_authenticated(
+                raw_body, context, verify_official, accept_official
+            )
 
         def accept_verified(verified, untouched_body):
             receipt = self._repository.get_webhook_nonce_receipt(
@@ -183,7 +220,7 @@ class IngressService:
 
     def accept_polled_event(
         self,
-        event: NormalizedInboundEvent,
+        event: NormalizedInboundEvent | AuthenticatedGatewayFrame,
         *,
         transport_mode: str = "polling",
         cursor: str | None = None,
@@ -196,6 +233,21 @@ class IngressService:
             raise ValueError("polled transport_mode must be polling or gateway")
         if claim is None:
             raise ValueError("transport claim is required")
+        if transport_mode == "gateway":
+            if not isinstance(event, AuthenticatedGatewayFrame):
+                raise SecurityViolation("gateway ingress requires an authenticated connector frame")
+            capability = self._gateway_capabilities.get(event.event.account_id)
+            if capability is None or not capability.verifies(event):
+                raise SecurityViolation("gateway connector proof is invalid")
+            if gateway_session_id not in (None, event.gateway_session_id):
+                raise SecurityViolation("gateway session does not match authenticated frame")
+            if gateway_sequence not in (None, event.gateway_sequence):
+                raise SecurityViolation("gateway sequence does not match authenticated frame")
+            gateway_session_id = event.gateway_session_id
+            gateway_sequence = event.gateway_sequence
+            event = event.event
+        elif isinstance(event, AuthenticatedGatewayFrame):
+            raise SecurityViolation("authenticated gateway frames require gateway transport")
         return self._accept_event(
             event,
             transport_mode=transport_mode,
@@ -700,9 +752,18 @@ class IngressWorker:
         )
         if turn["status"] == "completed":
             try:
+                turn_result = turn.get("result")
+                recovered_content = (
+                    str(turn_result.get("content") or "")
+                    if isinstance(turn_result, Mapping)
+                    else ""
+                )
                 self._repository.complete_inbox_after_agent(
                     event.event_id, event.claim,
                     source_event_key=source_event_key, now=self._now(),
+                    reply_obligation=self._reply_obligation(
+                        normalized, recovered_content, source_event_key
+                    ),
                 )
             except StateConflictError as exc:
                 self._repository.retry_dispatched_inbox(
@@ -735,13 +796,17 @@ class IngressWorker:
         current_claim = event.claim
 
         saw_complete = False
+        complete_content = ""
 
         async def consume_stream() -> None:
-            nonlocal saw_complete
+            nonlocal saw_complete, complete_content
             async for emitted in self._runner.run_stream(request, runtime_turn=turn):
                 event_name = getattr(emitted, "event", None)
                 if event_name == "complete":
                     saw_complete = True
+                    emitted_content = getattr(emitted, "content", None)
+                    if isinstance(emitted_content, str):
+                        complete_content = emitted_content
                 elif event_name in {"error", "cancelled"}:
                     raise RuntimeError(
                         getattr(emitted, "error", None)
@@ -796,6 +861,9 @@ class IngressWorker:
             self._repository.complete_inbox_after_agent(
                 event.event_id, current_claim,
                 source_event_key=source_event_key, now=self._now(),
+                reply_obligation=self._reply_obligation(
+                    normalized, complete_content, source_event_key
+                ),
             )
         except StateConflictError as exc:
             self._repository.retry_dispatched_inbox(
@@ -805,6 +873,29 @@ class IngressWorker:
             raise RuntimeError(
                 "Agent completed with unresolved durable tool effects"
             ) from exc
+
+    def _reply_obligation(
+        self,
+        event: NormalizedInboundEvent,
+        content: str,
+        source_event_key: str,
+    ):
+        if not content.strip():
+            return None
+        return channel_obligation(
+            account_id=event.account_id,
+            conversation_id=event.conversation_id,
+            content=content,
+            source_event_key=source_event_key,
+            now=self._now(),
+            metadata={
+                "reply_message_id": event.metadata.get("message_id"),
+                "thread_ts": event.metadata.get("thread_ts"),
+                "qq_destination_kind": event.metadata.get("qq_destination_kind"),
+                "wecom_transport": event.metadata.get("wecom_transport"),
+                "wecom_request_id": event.metadata.get("wecom_request_id"),
+            },
+        )
 
 
 __all__ = [

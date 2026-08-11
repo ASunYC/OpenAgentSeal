@@ -375,6 +375,27 @@ async def test_retryable_failure_uses_bounded_backoff(delivery_runtime):
 
 
 @pytest.mark.asyncio
+async def test_retryable_failure_respects_provider_retry_after(delivery_runtime):
+    class ProviderRateLimit(RetryableDeliveryError):
+        retry_after = 17
+
+    repository, _ = delivery_runtime
+    repository.enqueue_outbox(_obligation())
+    worker = DeliveryWorker(
+        repository,
+        {"local_session": _FailingDestination(ProviderRateLimit("rate limited"))},
+        owner_id="worker",
+        retry_base=timedelta(seconds=5),
+        clock=lambda: NOW,
+    )
+
+    assert await worker.run_once(NOW) == 1
+    stored = repository.get_outbox("delivery-1")
+    assert stored.state == "retry_wait"
+    assert stored.next_attempt_at == NOW + timedelta(seconds=17)
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_outcome_is_not_automatically_retried(delivery_runtime):
     repository, _ = delivery_runtime
     repository.enqueue_outbox(_obligation())

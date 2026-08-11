@@ -63,6 +63,8 @@ class GatewayRouter:
 
     @staticmethod
     def _should_dispatch(policy: str, event: NormalizedInboundEvent) -> bool:
+        if event.metadata.get("sender_is_bot") is True:
+            return False
         if policy == "always":
             return True
         if policy == "never":

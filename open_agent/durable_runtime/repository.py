@@ -1341,8 +1341,8 @@ class DurableRuntimeRepository:
                     now_value,
                 ),
             ).fetchone()
-        if row is None:
-            raise StaleClaimError(f"stale inbox claim: {event_id}")
+            if row is None:
+                raise StaleClaimError(f"stale inbox claim: {event_id}")
         return self._inbox(row)
 
     def complete_inbox_after_agent(
@@ -1352,8 +1352,14 @@ class DurableRuntimeRepository:
         *,
         source_event_key: str,
         now: datetime,
+        reply_obligation: OutboxObligation | None = None,
     ) -> InboxEvent:
         """Atomically require every durable effect resolved before inbox success."""
+        if reply_obligation is not None:
+            if reply_obligation.state != "pending" or reply_obligation.claim is not None:
+                raise ValueError("channel reply obligation must be pending and unclaimed")
+            if reply_obligation.next_attempt_at is not None or reply_obligation.attempt != 0:
+                raise ValueError("channel reply obligation must not have retry state")
         now_value = _iso(now)
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -1364,6 +1370,38 @@ class DurableRuntimeRepository:
             ).fetchone()
             if unresolved is not None:
                 raise StateConflictError("inbox has unresolved tool effects")
+            if reply_obligation is not None:
+                self._conn.execute(
+                    """
+                    INSERT INTO outbox_obligations (
+                        obligation_id, idempotency_key, destination, payload, state,
+                        attempt, next_attempt_at, last_error, acknowledgement,
+                        claim_owner, claim_generation, claim_expires_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL,
+                              NULL, 0, NULL, ?, ?)
+                    ON CONFLICT(destination, idempotency_key) DO NOTHING
+                    """,
+                    (
+                        reply_obligation.obligation_id,
+                        reply_obligation.idempotency_key,
+                        reply_obligation.destination,
+                        _json(reply_obligation.payload),
+                        _iso(reply_obligation.created_at),
+                        _iso(reply_obligation.updated_at),
+                    ),
+                )
+                persisted = self._conn.execute(
+                    """SELECT * FROM outbox_obligations
+                       WHERE destination = ? AND idempotency_key = ?""",
+                    (reply_obligation.destination, reply_obligation.idempotency_key),
+                ).fetchone()
+                if (
+                    persisted is None
+                    or persisted["obligation_id"] != reply_obligation.obligation_id
+                    or persisted["payload"] != _json(reply_obligation.payload)
+                ):
+                    raise StateConflictError("channel reply idempotency conflict")
             row = self._conn.execute(
                 """UPDATE inbox_events
                    SET state = 'succeeded', claim_owner = NULL,
@@ -1378,8 +1416,8 @@ class DurableRuntimeRepository:
                     _iso(token.expires_at), now_value,
                 ),
             ).fetchone()
-        if row is None:
-            raise StaleClaimError(f"stale inbox claim: {event_id}")
+            if row is None:
+                raise StaleClaimError(f"stale inbox claim: {event_id}")
         return self._inbox(row)
 
     def retry_dispatched_inbox(

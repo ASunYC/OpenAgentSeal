@@ -15,7 +15,7 @@ from open_agent.durable_runtime.repository import (
     StaleClaimError,
     StateConflictError,
 )
-from open_agent.gateway.contracts import ChannelCapabilities, NormalizedInboundEvent
+from open_agent.gateway.contracts import ChannelCapabilities, GatewayConnectorCapability, NormalizedInboundEvent
 from open_agent.gateway.ingress import IngressLimits, IngressService, IngressWorker
 from open_agent.gateway.router import GatewayRouter
 from open_agent.gateway.security import (
@@ -83,12 +83,39 @@ class Adapter:
         raise AssertionError("ingress must not send")
 
 
+class OfficialBatchAdapter:
+    kind = "test"
+    capabilities = ChannelCapabilities(supports_webhook=True)
+
+    def __init__(self, events, order):
+        self.events = tuple(events)
+        self.order = order
+
+    def verify_webhook(self, raw_body, headers, **kwargs):
+        del headers, kwargs
+        assert raw_body == b"official-batch"
+        self.order.append("official-auth")
+        return True
+
+    def normalize_many(self, raw_body):
+        assert raw_body == b"official-batch"
+        self.order.append("batch-parse")
+        return self.events
+
+    def normalize(self, raw_body):  # pragma: no cover - batch path is required
+        raise AssertionError("batch-capable adapter must use normalize_many")
+
+    async def send(self, message):  # pragma: no cover
+        raise AssertionError("ingress must not send")
+
+
 class RecordingRunner:
-    def __init__(self, control_plane=None, *, mode: str = "complete", fail_before_stream: bool = False) -> None:
+    def __init__(self, control_plane=None, *, mode: str = "complete", fail_before_stream: bool = False, content: str | None = None) -> None:
         self.calls = []
         self.control_plane = control_plane
         self.mode = mode
         self.fail_before_stream = fail_before_stream
+        self.content = content
 
     async def run_stream(self, request, *, runtime_turn):
         self.calls.append((request, runtime_turn))
@@ -97,7 +124,7 @@ class RecordingRunner:
         if self.mode == "complete":
             if self.control_plane is not None:
                 self.control_plane.complete_runtime_turn(runtime_turn["turn_id"], status="completed")
-            yield SimpleNamespace(event="complete", error=None)
+            yield SimpleNamespace(event="complete", error=None, content=self.content)
         elif self.mode == "cancelled":
             if self.control_plane is not None:
                 self.control_plane.complete_runtime_turn(runtime_turn["turn_id"], status="cancelled")
@@ -178,6 +205,9 @@ def ingress_service(repository, *, order=None, now=lambda: NOW, limits=None, **c
     quota_snapshot = changes.pop(
         "quota_snapshot", lambda event: QuotaSnapshot(attachment_bytes=0)
     )
+    gateway_capability = GatewayConnectorCapability(
+        "test-gateway-connector", "test", "account-1"
+    )
     service = IngressService(
         repository,
         GatewayRouter(repository, now=now),
@@ -193,9 +223,35 @@ def ingress_service(repository, *, order=None, now=lambda: NOW, limits=None, **c
         quota_snapshot=quota_snapshot,
         now=now,
         limits=limits or IngressLimits(),
+        gateway_capabilities={"account-1": gateway_capability},
         **changes,
     )
+    service.test_gateway_capability = gateway_capability
     return service, ledger
+
+
+def test_official_webhook_authenticates_before_parsing_and_enqueues_entire_batch(runtime):
+    _, repository = runtime
+    order = []
+    service, _ = ingress_service(repository, order=order)
+    adapter = OfficialBatchAdapter(
+        (inbound(event_key="batch-1"), inbound(event_key="batch-2")), order
+    )
+
+    receipt = service.accept_webhook(
+        adapter,
+        b"official-batch",
+        {},
+        account_id="account-1",
+        remote_ip="203.0.113.10",
+    )
+
+    assert receipt.event_key == "batch-1"
+    assert {event.event_key for event in repository.list_inbox()} == {
+        "batch-1",
+        "batch-2",
+    }
+    assert order.index("official-auth") < order.index("batch-parse")
 
 
 def accept_owned(service, event, *, transport_mode="polling", owner_id="test-poller", **position):
@@ -203,10 +259,21 @@ def accept_owned(service, event, *, transport_mode="polling", owner_id="test-pol
         event.account_id, transport_mode, owner_id=owner_id,
         lease_duration=timedelta(seconds=30),
     )
-    receipt = service.accept_polled_event(
-        event, transport_mode=transport_mode, claim=claim, **position
-    )
+    accepted = event
+    if transport_mode == "gateway":
+        accepted = service.test_gateway_capability.authenticate(
+            event,
+            gateway_session_id=position["gateway_session_id"],
+            gateway_sequence=position["gateway_sequence"],
+        )
+    receipt = service.accept_polled_event(accepted, transport_mode=transport_mode, claim=claim, **position)
     return receipt, claim
+
+
+def authenticated_gateway(service, event, session_id, sequence):
+    return service.test_gateway_capability.authenticate(
+        event, gateway_session_id=session_id, gateway_sequence=sequence
+    )
 
 
 def test_webhook_authenticates_raw_bytes_then_admits_quota_then_enqueues_before_ack(runtime):
@@ -472,7 +539,7 @@ def test_gateway_resume_checkpoint_is_persistent_and_sequence_cannot_regress(run
         "account-1", "gateway", owner_id="gateway-1", lease_duration=timedelta(seconds=30)
     )
     receipt = service.accept_polled_event(
-        inbound(), transport_mode="gateway", gateway_session_id="discord-session-1",
+        authenticated_gateway(service, inbound(), "discord-session-1", 41), transport_mode="gateway", gateway_session_id="discord-session-1",
         gateway_sequence=41, claim=claim,
     )
 
@@ -636,7 +703,7 @@ def test_gateway_checkpoint_rejects_incomplete_expected_state_and_session_rollba
         "account-1", "gateway", owner_id="gateway", lease_duration=timedelta(seconds=30)
     )
     first = service.accept_polled_event(
-        inbound(event_key="session-a"), transport_mode="gateway",
+        authenticated_gateway(service, inbound(event_key="session-a"), "session-a", 1), transport_mode="gateway",
         gateway_session_id="session-a", gateway_sequence=1, claim=claim,
     )
     with pytest.raises(ValueError, match="incomplete"):
@@ -662,7 +729,7 @@ def test_gateway_checkpoint_rejects_incomplete_expected_state_and_session_rollba
         "account-1", "gateway", owner_id="gateway", lease_duration=timedelta(seconds=30)
     )
     second = service.accept_polled_event(
-        inbound(event_key="session-b"), transport_mode="gateway",
+        authenticated_gateway(service, inbound(event_key="session-b"), "session-b", 1), transport_mode="gateway",
         gateway_session_id="session-b", gateway_sequence=1, claim=claim,
     )
     service.commit_checkpoint(
@@ -675,7 +742,7 @@ def test_gateway_checkpoint_rejects_incomplete_expected_state_and_session_rollba
         "account-1", "gateway", owner_id="gateway", lease_duration=timedelta(seconds=30)
     )
     rollback = service.accept_polled_event(
-        inbound(event_key="session-a-again"), transport_mode="gateway",
+        authenticated_gateway(service, inbound(event_key="session-a-again"), "session-a", 2), transport_mode="gateway",
         gateway_session_id="session-a", gateway_sequence=2, claim=claim,
     )
     with pytest.raises(StateConflictError, match="roll back"):
@@ -761,6 +828,33 @@ async def test_worker_dispatches_one_event_to_one_atomic_runtime_turn(runtime):
     assert len(turns) == 1
     assert turns[0]["source_event_key"] == '["account-1","platform-event-1"]'
     assert runner.calls[0][1]["turn_id"] == turns[0]["turn_id"]
+
+
+@pytest.mark.asyncio
+async def test_completed_channel_turn_atomically_creates_origin_reply_outbox(runtime):
+    control_plane, repository = runtime
+    service, _ = ingress_service(repository)
+    receipt, _ = accept_owned(service, inbound())
+    runner = RecordingRunner(control_plane, content="channel answer")
+    worker = IngressWorker(
+        repository,
+        GatewayRouter(repository, now=lambda: NOW),
+        runner,
+        worker_id="reply-worker",
+        lease_duration=timedelta(seconds=30),
+        now=lambda: NOW,
+    )
+
+    assert (await worker.run_once()).succeeded == 1
+
+    obligations = repository.list_outbox()
+    assert len(obligations) == 1
+    reply = obligations[0]
+    assert reply.destination == "channel:account-1"
+    assert reply.payload["conversation_id"] == "conversation-1"
+    assert reply.payload["content"] == "channel answer"
+    assert reply.payload["source_event_key"] == '["account-1","platform-event-1"]'
+    assert repository.get_inbox(receipt.event_id).state == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -983,9 +1077,39 @@ def test_gateway_enqueue_rejects_polling_claim_mode_mismatch(runtime):
 
     with pytest.raises(StateConflictError, match="transport"):
         service.accept_polled_event(
-            inbound(), transport_mode="gateway", gateway_session_id="session-1",
+            authenticated_gateway(service, inbound(), "session-1", 1), transport_mode="gateway", gateway_session_id="session-1",
             gateway_sequence=1, claim=polling_claim,
         )
+
+
+def test_gateway_ingress_rejects_unauthenticated_or_wrong_connector_frame(runtime):
+    _, repository = runtime
+    service, _ = ingress_service(repository)
+    claim = service.claim_checkpoint(
+        "account-1", "gateway", owner_id="gateway", lease_duration=timedelta(seconds=30)
+    )
+    event = inbound()
+    with pytest.raises(SecurityViolation, match="authenticated connector"):
+        service.accept_polled_event(
+            event,
+            transport_mode="gateway",
+            gateway_session_id="session-1",
+            gateway_sequence=1,
+            claim=claim,
+        )
+    impostor = GatewayConnectorCapability("impostor", "test", "account-1")
+    forged = impostor.authenticate(
+        event, gateway_session_id="session-1", gateway_sequence=1
+    )
+    with pytest.raises(SecurityViolation, match="proof"):
+        service.accept_polled_event(
+            forged,
+            transport_mode="gateway",
+            gateway_session_id="session-1",
+            gateway_sequence=1,
+            claim=claim,
+        )
+    assert repository.list_inbox() == []
 
 
 def test_duplicate_and_quota_rejection_do_not_write_attachments(runtime, tmp_path):

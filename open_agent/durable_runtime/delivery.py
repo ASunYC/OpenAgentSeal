@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -214,6 +215,23 @@ class DeliveryWorker:
         )
         return now + timedelta(seconds=delay_seconds)
 
+    def _retry_at_for_error(
+        self, obligation: OutboxObligation, now: datetime, error: Exception
+    ) -> datetime:
+        scheduled = self._retry_at(obligation, now)
+        retry_after = getattr(error, "retry_after", None)
+        if (
+            isinstance(retry_after, (int, float))
+            and not isinstance(retry_after, bool)
+            and math.isfinite(float(retry_after))
+            and retry_after >= 0
+        ):
+            scheduled = max(
+                scheduled,
+                now + timedelta(seconds=min(float(retry_after), 86400.0)),
+            )
+        return scheduled
+
     async def run_once(self, now: datetime) -> int:
         started = self._monotonic()
 
@@ -263,7 +281,31 @@ class DeliveryWorker:
                 )
             except StaleClaimError:
                 continue
-            except (DeliveryOutcomeUnknown, asyncio.TimeoutError) as exc:
+            except asyncio.TimeoutError as exc:
+                destination = self.destinations.get(obligation.destination)
+                if destination is not None and bool(
+                    getattr(destination, "timeout_is_retryable", False)
+                ):
+                    try:
+                        settlement_now = current_time()
+                        self.repository.retry_outbox(
+                            obligation.obligation_id,
+                            claim,
+                            "idempotent delivery deadline expired",
+                            self._retry_at(obligation, settlement_now),
+                            settlement_now,
+                        )
+                    except StaleClaimError:
+                        continue
+                    continue
+                error = str(exc) or "delivery deadline expired with an unknown outcome"
+                try:
+                    self.repository.mark_delivery_unknown(
+                        obligation.obligation_id, claim, error, current_time()
+                    )
+                except StaleClaimError:
+                    continue
+            except DeliveryOutcomeUnknown as exc:
                 error = str(exc) or "delivery deadline expired with an unknown outcome"
                 try:
                     self.repository.mark_delivery_unknown(
@@ -292,7 +334,7 @@ class DeliveryWorker:
                         obligation.obligation_id,
                         claim,
                         str(exc),
-                        self._retry_at(obligation, settlement_now),
+                        self._retry_at_for_error(obligation, settlement_now, exc),
                         settlement_now,
                         dead_letter=exhausted,
                     )

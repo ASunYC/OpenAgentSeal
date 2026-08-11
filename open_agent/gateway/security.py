@@ -256,6 +256,19 @@ class IngressGuard:
             with self._limiter.acquire(context, ("account",)):
                 return handler(verified, raw_body)
 
+    def process_authenticated(
+        self,
+        raw_body: bytes,
+        context: IngressContext,
+        verifier: Callable[[bytes], None],
+        handler: Callable[[bytes], Any],
+    ) -> Any:
+        """Apply the same limits around an official provider's own verifier."""
+        with self._limiter.acquire(context, ("global", "ip", "adapter")):
+            verifier(raw_body)
+            with self._limiter.acquire(context, ("account",)):
+                return handler(raw_body)
+
 
 @dataclass(frozen=True, slots=True)
 class QuotaSnapshot:
