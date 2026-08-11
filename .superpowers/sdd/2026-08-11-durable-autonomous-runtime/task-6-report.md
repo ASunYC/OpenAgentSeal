@@ -87,3 +87,59 @@ returning an acknowledgement-safe receipt, and never executes the Agent inline.
   pre-existing DST repository test. Installing `tzdata==2026.3` in that venv made
   the complete Tasks 1-5 compatibility selection green; no dependency file was
   changed because scheduler dependency ownership belongs to its planned task.
+
+## Formal review fix round 1
+
+- RED checkpoint: `c8e13be test: reproduce ingress review safety gaps`.
+  Further review REDs reproduced omitted gateway position, cross-attempt tool
+  replay, uncertain post-claim effects, terminal turn overwrite, and nonce-aware
+  retention before their fixes.
+- Checkpoints now require an account/transport lease generation and exact expiry
+  fence, an exact expected-previous shape, and an event payload whose transport
+  position matches the proposed cursor or gateway session/sequence. Gateway
+  sessions cannot roll back, and one account cannot own webhook and polling/
+  gateway ingress concurrently.
+- Webhook nonce receipts are inserted in the same `BEGIN IMMEDIATE` transaction
+  as the inbox event and bind `(account, nonce)` to the authenticated SHA-256
+  request digest and receipt. Matching retries resume the receipt; mismatches
+  fail closed. Live receipts exclude inbox rows from retention; expired receipts
+  are removed before redaction, avoiding mutable inbox-PK foreign keys.
+- Body/header/context/normalized identifiers/text/metadata depth and size plus
+  attachment descriptor/count limits run at ingress boundaries. Attachments pass
+  `AttachmentGuard`; URL sources require `OutboundUrlPolicy`; only managed path,
+  size, and expiry references enter the inbox and Agent request.
+- Inbox success requires both an explicit `complete` stream event and the
+  authoritative completed turn status. Cancel/error terminal turns are preserved
+  and a retry receives a separately identified linked turn. Silent streams remain
+  retryable under the inbox fence. Terminal runtime event insertion and turn/
+  thread status update now share one idempotent SQLite transaction, closing the
+  crash gap between terminal event and status.
+- Existing `tool_calls` rows now persist an effect intent before execution with a
+  stable `(source_event_key, execution ordinal)` identity across provider call-ID
+  changes and retry turns. Name/argument mismatches fail closed, completed results
+  replay, stale idempotent claims fence the old worker, and ambiguous
+  non-idempotent outcomes become `delivery_unknown/manual_required`. Unresolved
+  effects block any new Agent attempt.
+
+### Fix-round verification
+
+- Focused GREEN:
+  `.venv\Scripts\python.exe -m pytest tests/test_gateway_ingress.py tests/test_tool_effect_recovery.py tests/test_runtime_api.py tests/test_session_recovery.py -q`
+  -> `44 passed`.
+- Tasks 1-5 compatibility GREEN:
+  durable models/repository, runtime capabilities, reliable delivery, gateway
+  core/security/credentials, runtime retention, and session recovery
+  -> `307 passed, 2 skipped`.
+- Coverage:
+  `.venv\Scripts\python.exe -m pytest tests/test_gateway_ingress.py tests/test_tool_effect_recovery.py --cov=open_agent.gateway.ingress --cov=open_agent.durable_runtime.repository --cov=open_agent.control_plane --cov-report=term-missing -q`
+  -> `31 passed`; Task 6 ingress line coverage `85%`.
+- `python -m compileall -q open_agent` and `git diff --check` passed.
+- Two independent code-review passes drove six HIGH fixes. Final approval is
+  recorded after the last cross-turn effect and atomic-terminal corrections.
+
+### Remaining concerns
+
+- The optional legacy `tests/test_agent.py` integration pair requires an
+  untracked local `open_agent/config/config.yaml`; in this worktree those two
+  tests fail at fixture setup. The remaining selected Agent/tool tests passed
+  `19/19`, and all required Task 1-6 suites above are green.

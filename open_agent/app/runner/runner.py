@@ -948,7 +948,12 @@ class AgentRunner:
         from open_agent.control_plane import get_control_plane
 
         agent_home = profile_manager.get_agent_home(manager_profile_id)
-        control_plane = get_control_plane(agent_home)
+        supplied_control_plane = request.meta.get("_runtime_control_plane")
+        control_plane = (
+            supplied_control_plane
+            if runtime_turn is not None and supplied_control_plane is not None
+            else get_control_plane(agent_home)
+        )
         runtime_thread = control_plane.get_runtime_thread_by_session(session_id)
         if runtime_turn is not None:
             supplied_turn_id = str(runtime_turn.get("turn_id") or "")
@@ -1124,6 +1129,32 @@ class AgentRunner:
                     "created_at": stored["created_at"],
                 }
             )
+
+        def persist_terminal_event(
+            event: AgentEvent,
+            *,
+            status: str,
+            result: Any = None,
+            error: str | None = None,
+        ) -> AgentEvent:
+            stored = control_plane.complete_runtime_turn_with_event(
+                thread_id=runtime_thread["thread_id"],
+                turn_id=runtime_turn["turn_id"],
+                session_id=session_id,
+                event_type=event.event,
+                payload=event.model_dump(exclude_none=True),
+                status=status,
+                result=result,
+                error=error,
+            )
+            return event.model_copy(
+                update={
+                    "thread_id": runtime_thread["thread_id"],
+                    "turn_id": runtime_turn["turn_id"],
+                    "seq": stored["seq"],
+                    "created_at": stored["created_at"],
+                }
+            )
         
         # Yield start event
         yield persist_event(AgentEvent(
@@ -1202,6 +1233,10 @@ class AgentRunner:
         agent.llm.stream_callback = stream_callback if stream_response else None
 
         # Create a task to run the agent
+        agent.runtime_control_plane = control_plane if request.meta.get("source_event_key") else None
+        agent.runtime_turn_id = runtime_turn["turn_id"]
+        agent.source_event_key = str(request.meta.get("source_event_key") or "")
+        agent.tool_effect_owner = f"runner:{runtime_turn['turn_id']}:{id(self)}"
         cancel_event = asyncio.Event()
         agent_task = asyncio.create_task(agent.run(cancel_event))
         self._active_tasks[session_id] = agent_task
@@ -1239,14 +1274,11 @@ class AgentRunner:
                 chat_manager.add_message(session_id, assistant_message)
             
             # Yield completion event
-            complete_event = persist_event(AgentEvent(
-                event="complete",
-                session_id=session_id,
-                status="idle",
-                content=last_assistant_msg,
-            ))
-            control_plane.complete_runtime_turn(
-                runtime_turn["turn_id"],
+            complete_event = persist_terminal_event(
+                AgentEvent(
+                    event="complete", session_id=session_id, status="idle",
+                    content=last_assistant_msg,
+                ),
                 status="completed",
                 result={"content": last_assistant_msg, "agent_result": str(result)},
             )
@@ -1257,23 +1289,17 @@ class AgentRunner:
         
         except asyncio.CancelledError:
             agent_task.cancel()
-            cancelled_event = persist_event(AgentEvent(
-                event="cancelled",
-                session_id=session_id,
-                status="idle",
-            ))
-            control_plane.complete_runtime_turn(runtime_turn["turn_id"], status="cancelled")
+            cancelled_event = persist_terminal_event(
+                AgentEvent(event="cancelled", session_id=session_id, status="idle"),
+                status="cancelled",
+            )
             yield cancelled_event
         except Exception as e:
             logger.error(f"Agent execution error: {e}")
-            error_event = persist_event(AgentEvent(
-                event="error",
-                session_id=session_id,
-                error=str(e),
-                status="error",
-            ))
-            control_plane.complete_runtime_turn(
-                runtime_turn["turn_id"],
+            error_event = persist_terminal_event(
+                AgentEvent(
+                    event="error", session_id=session_id, error=str(e), status="error",
+                ),
                 status="error",
                 error=str(e),
             )

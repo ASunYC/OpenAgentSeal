@@ -29,6 +29,9 @@ class Tool:
     """Base class for all tools."""
 
     context: ToolContext | None = None
+    # External effects are fail-closed unless a tool explicitly guarantees that
+    # repeating the same stable invocation is safe.
+    idempotency_mode: str = "non_idempotent"
 
     @property
     def name(self) -> str:

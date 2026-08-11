@@ -1,7 +1,7 @@
 """Channel-neutral durable messaging gateway."""
 
 from .contracts import ChannelAdapter, ChannelCapabilities, NormalizedInboundEvent, OutboundMessage
-from .ingress import IngressReceipt, IngressRunSummary, IngressService, IngressWorker
+from .ingress import IngressLimits, IngressReceipt, IngressRunSummary, IngressService, IngressWorker
 from .router import GatewayRouter, ResolvedRoute, RouteResolutionError
 
 __all__ = [
@@ -9,6 +9,7 @@ __all__ = [
     "ChannelCapabilities",
     "GatewayRouter",
     "IngressReceipt",
+    "IngressLimits",
     "IngressRunSummary",
     "IngressService",
     "IngressWorker",

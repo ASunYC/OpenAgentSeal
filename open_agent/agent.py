@@ -6,7 +6,7 @@ import os
 import platform
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Optional
@@ -101,6 +101,10 @@ class Agent:
         self.current_tool_call = None
         self.session_id: str = ""
         self.profile_id: str = "main"
+        self.runtime_control_plane: Any = None
+        self.runtime_turn_id: str = ""
+        self.source_event_key: str = ""
+        self.tool_effect_owner: str = ""
 
         # Ensure workspace exists
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -699,7 +703,7 @@ Requirements:
                 return cancel_msg
 
             # Execute tool calls
-            for tool_call in response.tool_calls:
+            for tool_index, tool_call in enumerate(response.tool_calls):
                 tool_call_id = tool_call.id
                 function_name = tool_call.function.name
                 arguments = tool_call.function.arguments
@@ -748,11 +752,72 @@ Requirements:
                     if not allowed:
                         result = ToolResult(success=False, content="", error=policy_error)
                     else:
+                        effect = None
                         try:
                             tool = self.tools[function_name]
                             self._bind_tool_context(tool)
-                            result = await tool.execute(**arguments)
+                            if (
+                                self.runtime_control_plane is not None
+                                and self.runtime_turn_id
+                                and self.source_event_key
+                            ):
+                                effect_now = datetime.now(timezone.utc)
+                                effect = self.runtime_control_plane.claim_tool_effect(
+                                    session_id=self.session_id,
+                                    turn_id=self.runtime_turn_id,
+                                    source_event_key=self.source_event_key,
+                                    platform_tool_call_id=tool_call_id,
+                                    invocation_id=f"step:{step + 1}:tool:{tool_index + 1}",
+                                    tool_name=function_name,
+                                    arguments=arguments,
+                                    idempotency_mode=getattr(
+                                        tool, "idempotency_mode", "non_idempotent"
+                                    ),
+                                    owner_id=self.tool_effect_owner
+                                    or f"agent:{self.runtime_turn_id}",
+                                    now=effect_now,
+                                    expires_at=effect_now + timedelta(minutes=5),
+                                )
+                                if effect["disposition"] == "replay":
+                                    stored_result = effect.get("result") or {}
+                                    result = ToolResult(
+                                        success=bool(stored_result.get("success", True)),
+                                        content=str(stored_result.get("content") or ""),
+                                        error=stored_result.get("error"),
+                                    )
+                                elif effect["disposition"] == "manual_reconciliation":
+                                    raise RuntimeError(
+                                        "Tool effect outcome is ambiguous; manual "
+                                        "reconciliation is required."
+                                    )
+                                else:
+                                    result = await tool.execute(**arguments)
+                                    self.runtime_control_plane.complete_tool_effect(
+                                        effect["tool_call_id"],
+                                        effect["claim"],
+                                        success=result.success,
+                                        result={
+                                            "success": result.success,
+                                            "content": result.content,
+                                            "error": result.error,
+                                        },
+                                        error=result.error,
+                                        now=datetime.now(timezone.utc),
+                                    )
+                            else:
+                                result = await tool.execute(**arguments)
                         except Exception as e:
+                            if effect is not None:
+                                if effect["disposition"] == "execute":
+                                    self.runtime_control_plane.mark_tool_effect_delivery_unknown(
+                                        effect["tool_call_id"],
+                                        effect["claim"],
+                                        now=datetime.now(timezone.utc),
+                                        reason=f"{type(e).__name__}: {e}",
+                                    )
+                                raise RuntimeError(
+                                    "Durable tool effect requires manual reconciliation"
+                                ) from e
                             # Catch all exceptions during tool execution, convert to failed ToolResult
                             import traceback
 

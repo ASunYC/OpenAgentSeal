@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -579,11 +579,46 @@ class ControlPlane:
             """
         )
         self._ensure_column(conn, "runtime_turns", "source_event_key TEXT")
+        self._ensure_column(conn, "inbox_events", "runtime_turn_id TEXT")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_turns_source_event_key
             ON runtime_turns(source_event_key) WHERE source_event_key IS NOT NULL
             """
+        )
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_nonce_receipts (
+                account_id TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                request_digest TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                event_key TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(account_id, nonce)
+            );
+            CREATE INDEX IF NOT EXISTS idx_webhook_nonce_expiry
+                ON webhook_nonce_receipts(expires_at);
+            """
+        )
+        for definition in (
+            "turn_id TEXT",
+            "source_event_key TEXT",
+            "platform_tool_call_id TEXT",
+            "invocation_id TEXT",
+            "idempotency_key TEXT",
+            "idempotency_mode TEXT NOT NULL DEFAULT 'non_idempotent'",
+            "state TEXT NOT NULL DEFAULT 'completed'",
+            "claim_owner TEXT",
+            "claim_generation INTEGER NOT NULL DEFAULT 0",
+            "claim_expires_at TEXT",
+            "reconciliation TEXT",
+        ):
+            self._ensure_column(conn, "tool_calls", definition)
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_effect_idempotency
+               ON tool_calls(idempotency_key) WHERE idempotency_key IS NOT NULL"""
         )
 
     def close(self) -> None:
@@ -823,6 +858,82 @@ class ControlPlane:
         row = conn.execute("SELECT * FROM runtime_turns WHERE turn_id = ?", (turn_id,)).fetchone()
         return self._row_to_dict(row)
 
+    def complete_runtime_turn_with_event(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        status: str,
+        result: Any = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist the sole terminal event and authoritative turn state."""
+        if event_type not in {"complete", "cancelled", "error"}:
+            raise ValueError("runtime terminal event type is invalid")
+        if status not in {"completed", "cancelled", "error"}:
+            raise ValueError("runtime terminal status is invalid")
+        now = datetime.now().isoformat()
+        event_id = f"event_{uuid.uuid4().hex[:8]}"
+        conn = self._get_conn()
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            turn = conn.execute(
+                """SELECT * FROM runtime_turns
+                   WHERE turn_id = ? AND thread_id = ? AND session_id = ?""",
+                (turn_id, thread_id, session_id),
+            ).fetchone()
+            if turn is None:
+                raise KeyError(f"Runtime turn not found: {turn_id}")
+            if turn["status"] != "running":
+                existing = conn.execute(
+                    """SELECT * FROM runtime_events
+                       WHERE turn_id = ? AND event_type IN ('complete', 'cancelled', 'error')
+                       ORDER BY seq DESC LIMIT 1""",
+                    (turn_id,),
+                ).fetchone()
+                if existing is None or turn["status"] != status:
+                    raise RuntimeError("runtime turn already has a different terminal state")
+                return self._row_to_dict(existing)
+            thread = conn.execute(
+                "SELECT latest_event_seq FROM runtime_threads WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+            if thread is None:
+                raise KeyError(f"Runtime thread not found: {thread_id}")
+            seq = int(thread["latest_event_seq"]) + 1
+            conn.execute(
+                """INSERT INTO runtime_events (
+                    event_id, thread_id, turn_id, session_id, seq, event_type,
+                    payload, created_at, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')""",
+                (
+                    event_id, thread_id, turn_id, session_id, seq, event_type,
+                    json.dumps(payload, ensure_ascii=False, default=str), now,
+                ),
+            )
+            conn.execute(
+                """UPDATE runtime_turns SET status = ?, result = ?, error = ?,
+                   completed_at = ? WHERE turn_id = ? AND status = 'running'""",
+                (
+                    status,
+                    json.dumps(result, ensure_ascii=False, default=str)
+                    if result is not None else None,
+                    error, now, turn_id,
+                ),
+            )
+            conn.execute(
+                """UPDATE runtime_threads SET latest_event_seq = ?, updated_at = ?
+                   WHERE thread_id = ?""",
+                (seq, now, thread_id),
+            )
+            stored = conn.execute(
+                "SELECT * FROM runtime_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        return self._row_to_dict(stored)
+
     def append_runtime_event(
         self,
         thread_id: str,
@@ -1023,6 +1134,181 @@ class ControlPlane:
         if row is None:
             raise KeyError(f"Tool call not found: {tool_call_id}")
         return self._row_to_dict(row)
+
+    def claim_tool_effect(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        source_event_key: str,
+        platform_tool_call_id: str,
+        invocation_id: str | None = None,
+        tool_name: str,
+        arguments: dict[str, Any],
+        idempotency_mode: str,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> dict[str, Any]:
+        """Persist and fence a tool effect before the external side effect."""
+        from open_agent.durable_runtime.models import ClaimToken
+
+        if idempotency_mode not in {"idempotent", "non_idempotent"}:
+            raise ValueError("unsupported tool idempotency mode")
+        if now.tzinfo is None or expires_at.tzinfo is None or expires_at <= now:
+            raise ValueError("tool effect lease must be a positive aware interval")
+        stable_invocation_id = invocation_id or platform_tool_call_id
+        identity = json.dumps(
+            [source_event_key, stable_invocation_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        effect_key = f"tool-effect:{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
+        tool_call_id = f"tool_{uuid.uuid5(uuid.NAMESPACE_URL, effect_key).hex}"
+        arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+        now_value = now.astimezone(timezone.utc).isoformat()
+        expires_value = expires_at.astimezone(timezone.utc).isoformat()
+        conn = self._get_conn()
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM tool_calls WHERE idempotency_key = ?", (effect_key,)
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """INSERT INTO tool_calls (
+                        tool_call_id, session_id, tool_name, arguments, created_at,
+                        metadata, turn_id, source_event_key, platform_tool_call_id,
+                        invocation_id,
+                        idempotency_key, idempotency_mode, state, claim_owner,
+                        claim_generation, claim_expires_at
+                    ) VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, 'executing', ?, 1, ?)""",
+                    (
+                        tool_call_id, session_id, tool_name, arguments_json, now_value,
+                        turn_id, source_event_key, platform_tool_call_id,
+                        stable_invocation_id, effect_key,
+                        idempotency_mode, owner_id, expires_value,
+                    ),
+                )
+                disposition = "execute"
+            else:
+                if (
+                    row["session_id"] != session_id
+                    or row["source_event_key"] != source_event_key
+                    or row["invocation_id"] != stable_invocation_id
+                    or row["tool_name"] != tool_name
+                    or row["arguments"] != arguments_json
+                    or row["idempotency_mode"] != idempotency_mode
+                ):
+                    raise RuntimeError("tool effect idempotency identity conflict")
+                if row["state"] == "completed":
+                    disposition = "replay"
+                elif row["state"] == "delivery_unknown":
+                    disposition = "manual_reconciliation"
+                elif row["claim_expires_at"] > now_value:
+                    raise RuntimeError("tool effect is owned by a live worker")
+                elif idempotency_mode == "non_idempotent":
+                    conn.execute(
+                        """UPDATE tool_calls SET state = 'delivery_unknown',
+                           reconciliation = 'manual_required', claim_owner = NULL,
+                           claim_expires_at = NULL WHERE tool_call_id = ?""",
+                        (row["tool_call_id"],),
+                    )
+                    disposition = "manual_reconciliation"
+                else:
+                    conn.execute(
+                        """UPDATE tool_calls SET state = 'executing', claim_owner = ?,
+                           claim_generation = claim_generation + 1, claim_expires_at = ?
+                           WHERE tool_call_id = ?""",
+                        (owner_id, expires_value, row["tool_call_id"]),
+                    )
+                    disposition = "execute"
+            stored = conn.execute(
+                "SELECT * FROM tool_calls WHERE idempotency_key = ?", (effect_key,)
+            ).fetchone()
+        value = self._row_to_dict(stored)
+        value["disposition"] = disposition
+        if value.get("claim_owner") and value.get("claim_expires_at"):
+            value["claim"] = ClaimToken(
+                value["claim_owner"],
+                int(value["claim_generation"]),
+                datetime.fromisoformat(value["claim_expires_at"]),
+            )
+        else:
+            value["claim"] = None
+        return value
+
+    def complete_tool_effect(
+        self,
+        tool_call_id: str,
+        claim: Any,
+        *,
+        success: bool,
+        result: Any,
+        now: datetime,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        from open_agent.durable_runtime.repository import StaleClaimError
+
+        now_value = now.astimezone(timezone.utc).isoformat()
+        conn = self._get_conn()
+        with conn:
+            row = conn.execute(
+                """UPDATE tool_calls SET state = 'completed', success = ?, result = ?,
+                   error = ?, completed_at = ?, claim_owner = NULL, claim_expires_at = NULL
+                   WHERE tool_call_id = ? AND state = 'executing'
+                     AND claim_owner = ? AND claim_generation = ?
+                     AND claim_expires_at = ? AND claim_expires_at > ?
+                   RETURNING *""",
+                (
+                    int(success), json.dumps(result, ensure_ascii=False), error, now_value,
+                    tool_call_id, claim.owner_id, claim.generation,
+                    claim.expires_at.astimezone(timezone.utc).isoformat(), now_value,
+                ),
+            ).fetchone()
+        if row is None:
+            raise StaleClaimError(f"stale tool effect claim: {tool_call_id}")
+        return self._row_to_dict(row)
+
+    def mark_tool_effect_delivery_unknown(
+        self,
+        tool_call_id: str,
+        claim: Any,
+        *,
+        now: datetime,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Fence an ambiguous claimed effect into manual reconciliation."""
+        from open_agent.durable_runtime.repository import StaleClaimError
+
+        now_value = now.astimezone(timezone.utc).isoformat()
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """UPDATE tool_calls SET state = 'delivery_unknown',
+                   reconciliation = 'manual_required', error = ?, completed_at = ?,
+                   claim_owner = NULL, claim_expires_at = NULL
+                   WHERE tool_call_id = ? AND state = 'executing'
+                     AND claim_owner = ? AND claim_generation = ?
+                     AND claim_expires_at = ? AND claim_expires_at > ?
+                   RETURNING *""",
+                (
+                    str(reason)[:500], now_value, tool_call_id, claim.owner_id,
+                    claim.generation,
+                    claim.expires_at.astimezone(timezone.utc).isoformat(), now_value,
+                ),
+            ).fetchone()
+        if row is None:
+            raise StaleClaimError(f"stale tool effect claim: {tool_call_id}")
+        return self._row_to_dict(row)
+
+    def has_unresolved_tool_effect(self, source_event_key: str) -> bool:
+        row = self._get_conn().execute(
+            """SELECT 1 FROM tool_calls
+               WHERE source_event_key = ? AND state = 'delivery_unknown'
+               LIMIT 1""",
+            (source_event_key,),
+        ).fetchone()
+        return row is not None
 
     def create_scheduler_job(
         self,

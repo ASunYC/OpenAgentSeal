@@ -3,23 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 from open_agent.app.runner.models import AgentRequest
-from open_agent.durable_runtime.models import InboxEvent, to_json_value
+from open_agent.durable_runtime.models import ClaimToken, InboxEvent, to_json_value
 from open_agent.durable_runtime.repository import DurableRuntimeRepository
 
 from .contracts import ChannelAdapter, NormalizedInboundEvent
 from .router import GatewayRouter
 from .security import (
+    AttachmentGuard,
+    AttachmentUpload,
     IngressContext,
     IngressGuard,
+    OutboundUrlPolicy,
     QuotaLedger,
     QuotaSnapshot,
     ResourceQuotaPolicy,
@@ -50,6 +54,42 @@ class IngressRunSummary:
     failed: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class IngressLimits:
+    max_body_bytes: int = 1024 * 1024
+    max_header_count: int = 64
+    max_header_name_chars: int = 128
+    max_header_value_chars: int = 4096
+    max_identifier_chars: int = 256
+    max_text_chars: int = 20000
+    max_metadata_bytes: int = 65536
+    max_nesting_depth: int = 8
+    max_attachment_count: int = 16
+    max_attachment_name_chars: int = 256
+    max_attachment_url_chars: int = 2048
+
+    def __post_init__(self) -> None:
+        for name in self.__dataclass_fields__:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+class _BytesStream:
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+        self._offset = 0
+
+    def read(self, max_bytes: int, deadline: float) -> bytes | None:
+        del deadline
+        if self._offset >= len(self._content):
+            return None
+        end = min(self._offset + max_bytes, len(self._content))
+        chunk = self._content[self._offset:end]
+        self._offset = end
+        return chunk
+
+
 class IngressService:
     """Authenticate/normalize/admit/enqueue without running an Agent inline."""
 
@@ -63,6 +103,10 @@ class IngressService:
         quota_ledger: QuotaLedger,
         quota_snapshot: Callable[[NormalizedInboundEvent], QuotaSnapshot],
         now: Callable[[], datetime] = _utc_now,
+        limits: IngressLimits = IngressLimits(),
+        attachment_guard: AttachmentGuard | None = None,
+        url_policy: OutboundUrlPolicy | None = None,
+        attachment_fetcher: Callable[[Any], AttachmentUpload] | None = None,
     ) -> None:
         self._repository = repository
         self._router = router
@@ -71,6 +115,10 @@ class IngressService:
         self._quota_ledger = quota_ledger
         self._quota_snapshot = quota_snapshot
         self._now = now
+        self._limits = limits
+        self._attachment_guard = attachment_guard
+        self._url_policy = url_policy
+        self._attachment_fetcher = attachment_fetcher
 
     def accept_webhook(
         self,
@@ -84,23 +132,48 @@ class IngressService:
         """Return only after untouched bytes authenticate and the inbox commit succeeds."""
         if not isinstance(raw_body, bytes):
             raise TypeError("raw_body must be bytes")
+        self._validate_envelope(raw_body, headers)
         if not isinstance(account_id, str) or not account_id.strip():
             raise ValueError("account_id must be a non-empty string")
         if not isinstance(remote_ip, str) or not remote_ip.strip():
             raise ValueError("remote_ip must be a non-empty string")
+        if (
+            len(account_id) > self._limits.max_identifier_chars
+            or len(remote_ip) > self._limits.max_identifier_chars
+            or len(adapter.kind) > self._limits.max_identifier_chars
+        ):
+            raise SecurityViolation("webhook context identifier length limit exceeded")
         context = IngressContext(remote_ip, adapter.kind, account_id)
-        event = self._ingress_guard.process(
+        request_digest = hashlib.sha256(raw_body).hexdigest()
+
+        def accept_verified(verified, untouched_body):
+            receipt = self._repository.get_webhook_nonce_receipt(
+                verified.account_id, verified.nonce
+            )
+            if receipt is not None:
+                if receipt["request_digest"] != request_digest:
+                    raise SecurityViolation("webhook nonce digest mismatch")
+                stored = self._repository.get_inbox(receipt["event_id"])
+                if stored is None:
+                    raise SecurityViolation("webhook nonce receipt is orphaned")
+                return IngressReceipt(stored.event_id, stored.event_key, stored.account_id)
+            event = adapter.normalize(untouched_body)
+            return self._accept_event(
+                event,
+                transport_mode="webhook",
+                adapter=adapter,
+                expected_account_id=account_id,
+                nonce=verified.nonce,
+                request_digest=request_digest,
+                nonce_expires_at=verified.expires_at,
+            )
+
+        return self._ingress_guard.process_durable(
             raw_body,
             headers,
             context,
-            adapter.normalize,
+            accept_verified,
             self._now(),
-        )
-        return self._accept_event(
-            event,
-            transport_mode="webhook",
-            adapter=adapter,
-            expected_account_id=account_id,
         )
 
     def accept_polled_event(
@@ -108,11 +181,22 @@ class IngressService:
         event: NormalizedInboundEvent,
         *,
         transport_mode: str = "polling",
+        cursor: str | None = None,
+        gateway_session_id: str | None = None,
+        gateway_sequence: int | None = None,
     ) -> IngressReceipt:
         """Durably store a normalized poll/gateway event before a cursor is advanced."""
         if transport_mode not in {"polling", "gateway"}:
             raise ValueError("polled transport_mode must be polling or gateway")
-        return self._accept_event(event, transport_mode=transport_mode)
+        return self._accept_event(
+            event,
+            transport_mode=transport_mode,
+            transport_position={
+                "cursor": cursor,
+                "gateway_session_id": gateway_session_id,
+                "gateway_sequence": gateway_sequence,
+            },
+        )
 
     def _accept_event(
         self,
@@ -121,6 +205,10 @@ class IngressService:
         transport_mode: str,
         adapter: ChannelAdapter | None = None,
         expected_account_id: str | None = None,
+        nonce: str | None = None,
+        request_digest: str | None = None,
+        nonce_expires_at: datetime | None = None,
+        transport_position: Mapping[str, Any] | None = None,
     ) -> IngressReceipt:
         if not isinstance(event, NormalizedInboundEvent):
             raise TypeError("adapter must return a NormalizedInboundEvent")
@@ -128,6 +216,7 @@ class IngressService:
             raise SecurityViolation("normalized adapter kind mismatch")
         if expected_account_id is not None and event.account_id != expected_account_id:
             raise SecurityViolation("normalized webhook account mismatch")
+        event = self._prepare_event(event)
         snapshot = self._quota_snapshot(event)
         if not isinstance(snapshot, QuotaSnapshot):
             raise TypeError("quota_snapshot must return QuotaSnapshot")
@@ -138,7 +227,7 @@ class IngressService:
         ):
             event_id = self._event_id(event.account_id, event.event_key)
             existing = self._repository.get_inbox(event_id)
-            if existing is not None:
+            if existing is not None and nonce is None:
                 return IngressReceipt(
                     existing.event_id, existing.event_key, existing.account_id
                 )
@@ -161,18 +250,47 @@ class IngressService:
                         "should_dispatch": route.should_dispatch,
                     },
                     "transport_mode": transport_mode,
+                    "transport_position": dict(transport_position or {}),
                 },
                 created_at=self._now(),
                 updated_at=self._now(),
             )
-            stored = self._repository.enqueue_inbox(proposed)
+            if nonce is None:
+                stored = self._repository.enqueue_inbox(proposed)
+            else:
+                stored = self._repository.enqueue_inbox_with_nonce(
+                    proposed,
+                    nonce=nonce,
+                    request_digest=request_digest,
+                    nonce_expires_at=nonce_expires_at,
+                )
         return IngressReceipt(stored.event_id, stored.event_key, stored.account_id)
+
+    def claim_checkpoint(
+        self,
+        account_id: str,
+        transport_mode: str,
+        *,
+        owner_id: str,
+        lease_duration: timedelta,
+    ) -> ClaimToken:
+        now = self._now()
+        claimed = self._repository.claim_ingress_checkpoint(
+            account_id=account_id,
+            transport_mode=transport_mode,
+            owner_id=owner_id,
+            now=now,
+            expires_at=now + lease_duration,
+        )
+        return claimed["claim"]
 
     def commit_checkpoint(
         self,
         account_id: str,
         transport_mode: str,
         *,
+        claim: ClaimToken,
+        expected_previous: Mapping[str, Any],
         cursor: str | None = None,
         gateway_session_id: str | None = None,
         gateway_sequence: int | None = None,
@@ -183,6 +301,8 @@ class IngressService:
         return self._repository.commit_ingress_checkpoint(
             account_id=account_id,
             transport_mode=transport_mode,
+            token=claim,
+            expected_previous=expected_previous,
             cursor=cursor,
             gateway_session_id=gateway_session_id,
             gateway_sequence=gateway_sequence,
@@ -191,6 +311,98 @@ class IngressService:
             processed_event_key=processed_event_key,
             now=self._now(),
         )
+
+    def _validate_envelope(self, raw_body: bytes, headers: Mapping[str, str]) -> None:
+        if len(raw_body) > self._limits.max_body_bytes:
+            raise SecurityViolation("webhook body size limit exceeded")
+        if not isinstance(headers, Mapping) or len(headers) > self._limits.max_header_count:
+            raise SecurityViolation("webhook header count limit exceeded")
+        for name, value in headers.items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise SecurityViolation("webhook headers must be strings")
+            if len(name) > self._limits.max_header_name_chars:
+                raise SecurityViolation("webhook header name limit exceeded")
+            if len(value) > self._limits.max_header_value_chars:
+                raise SecurityViolation("webhook header value limit exceeded")
+
+    def _prepare_event(self, event: NormalizedInboundEvent) -> NormalizedInboundEvent:
+        identifiers = (
+            event.event_key, event.adapter_kind, event.account_id,
+            event.conversation_id, event.sender_id,
+        )
+        if any(len(value) > self._limits.max_identifier_chars for value in identifiers):
+            raise SecurityViolation("normalized identifier length limit exceeded")
+        if len(event.text) > self._limits.max_text_chars:
+            raise SecurityViolation("normalized text length limit exceeded")
+        metadata_value = to_json_value(event.metadata)
+        if self._value_depth(metadata_value) > self._limits.max_nesting_depth:
+            raise SecurityViolation("normalized metadata depth limit exceeded")
+        encoded = json.dumps(metadata_value, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > self._limits.max_metadata_bytes:
+            raise SecurityViolation("normalized metadata size limit exceeded")
+        if not event.attachments:
+            return event
+        if len(event.attachments) > self._limits.max_attachment_count:
+            raise SecurityViolation("attachment count limit exceeded")
+        if self._attachment_guard is None:
+            raise SecurityViolation("attachment guard is required")
+        uploads: list[AttachmentUpload] = []
+        for raw in event.attachments:
+            value = to_json_value(raw)
+            if not isinstance(value, Mapping):
+                raise SecurityViolation("invalid attachment descriptor")
+            if value.get("url"):
+                if not isinstance(value["url"], str):
+                    raise SecurityViolation("attachment URL must be a string")
+                if len(value["url"]) > self._limits.max_attachment_url_chars:
+                    raise SecurityViolation("attachment URL length limit exceeded")
+                if self._url_policy is None or self._attachment_fetcher is None:
+                    raise SecurityViolation("URL attachment policy is unavailable")
+                validated = self._url_policy.validate(value["url"])
+                uploads.append(self._attachment_fetcher(validated))
+                continue
+            content = value.get("content")
+            if not isinstance(content, bytes):
+                raise SecurityViolation("attachment content must be guarded bytes")
+            filename = value.get("filename") or "attachment"
+            claimed_content_type = value.get("claimed_content_type") or ""
+            if not isinstance(filename, str) or not isinstance(claimed_content_type, str):
+                raise SecurityViolation("attachment names and content types must be strings")
+            if (
+                len(filename) > self._limits.max_attachment_name_chars
+                or len(claimed_content_type) > self._limits.max_header_name_chars
+            ):
+                raise SecurityViolation("attachment descriptor length limit exceeded")
+            uploads.append(
+                AttachmentUpload(
+                    filename=filename,
+                    claimed_content_type=claimed_content_type,
+                    chunks=_BytesStream(content),
+                )
+            )
+        stored = self._attachment_guard.ingest(uploads)
+        managed = tuple(
+            {
+                "storage_path": item.storage_path,
+                "size": item.size,
+                "expires_at": item.expires_at.isoformat(),
+            }
+            for item in stored
+        )
+        return replace(event, attachments=managed)
+
+    @staticmethod
+    def _value_depth(value: Any) -> int:
+        maximum = 0
+        pending = [(value, 0)]
+        while pending:
+            current, depth = pending.pop()
+            maximum = max(maximum, depth)
+            if isinstance(current, Mapping):
+                pending.extend((item, depth + 1) for item in current.values())
+            elif isinstance(current, (list, tuple)):
+                pending.extend((item, depth + 1) for item in current)
+        return maximum
 
     def get_checkpoint(self, account_id: str, transport_mode: str) -> dict[str, Any] | None:
         return self.get_persisted_checkpoint(self._repository, account_id, transport_mode)
@@ -308,6 +520,10 @@ class IngressWorker:
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        if self._repository.control_plane.has_unresolved_tool_effect(source_event_key):
+            raise RuntimeError(
+                "Inbox event requires manual tool-effect reconciliation"
+            )
         turn = self._repository.dispatch_inbox_with_turn(
             event.event_id,
             event.claim,
@@ -340,15 +556,23 @@ class IngressWorker:
                 "source_event_key": source_event_key,
                 "source_inbox_event_id": event.event_id,
                 "channel_adapter": normalized.adapter_kind,
+                "_runtime_control_plane": self._repository.control_plane,
             },
         )
         current_claim = event.claim
 
+        saw_complete = False
+
         async def consume_stream() -> None:
+            nonlocal saw_complete
             async for emitted in self._runner.run_stream(request, runtime_turn=turn):
-                if getattr(emitted, "event", None) == "error":
+                event_name = getattr(emitted, "event", None)
+                if event_name == "complete":
+                    saw_complete = True
+                elif event_name in {"error", "cancelled"}:
                     raise RuntimeError(
-                        getattr(emitted, "error", None) or "Agent execution failed"
+                        getattr(emitted, "error", None)
+                        or f"Agent stream terminated with {event_name}"
                     )
 
         runner_task = asyncio.create_task(consume_stream())
@@ -371,14 +595,32 @@ class IngressWorker:
             await runner_task
         except BaseException:
             runner_task.cancel()
-            with suppress(asyncio.CancelledError):
+            with suppress(asyncio.CancelledError, Exception):
                 await runner_task
+            self._repository.retry_dispatched_inbox(
+                event.event_id,
+                current_claim,
+                self._now(),
+                error="Agent stream failed before authoritative completion",
+            )
             raise
+        authoritative = self._repository.control_plane._get_conn().execute(
+            "SELECT status FROM runtime_turns WHERE turn_id = ?", (turn["turn_id"],)
+        ).fetchone()
+        if not saw_complete or authoritative is None or authoritative["status"] != "completed":
+            self._repository.retry_dispatched_inbox(
+                event.event_id,
+                current_claim,
+                self._now(),
+                error="Agent stream ended without an authoritative complete event",
+            )
+            raise RuntimeError("Agent stream ended without authoritative completion")
         self._repository.complete_inbox(event.event_id, current_claim, self._now())
 
 
 __all__ = [
     "IngressReceipt",
+    "IngressLimits",
     "IngressRunSummary",
     "IngressService",
     "IngressWorker",

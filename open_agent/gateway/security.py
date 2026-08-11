@@ -239,6 +239,22 @@ class IngressGuard:
                 verified.claim_nonce()
                 return parser(raw_body)
 
+    def process_durable(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        context: IngressContext,
+        handler: Callable[[VerifiedWebhook, bytes], Any],
+        now: datetime,
+    ) -> Any:
+        """Authenticate under ingress limits; durable handler owns nonce receipt."""
+        with self._limiter.acquire(context, ("global", "ip", "adapter")):
+            verified = self._authenticator.authenticate(raw_body, headers, now)
+            if verified.account_id != context.account:
+                raise SecurityViolation("authenticated account mismatch")
+            with self._limiter.acquire(context, ("account",)):
+                return handler(verified, raw_body)
+
 
 @dataclass(frozen=True, slots=True)
 class QuotaSnapshot:

@@ -25,12 +25,17 @@ def control_plane(tmp_path):
         value.close()
 
 
-def claim(control_plane, owner, now, *, mode="non_idempotent"):
+def claim(
+    control_plane, owner, now, *, mode="non_idempotent",
+    platform_tool_call_id="call-1", invocation_id="step:1:tool:1",
+    turn_id="turn-1",
+):
     return control_plane.claim_tool_effect(
         session_id="session-1",
-        turn_id="turn-1",
+        turn_id=turn_id,
         source_event_key='["account-1","event-1"]',
-        platform_tool_call_id="call-1",
+        platform_tool_call_id=platform_tool_call_id,
+        invocation_id=invocation_id,
         tool_name="external_write",
         arguments={"value": 1},
         idempotency_mode=mode,
@@ -93,3 +98,39 @@ def test_completed_tool_effect_replays_persisted_result_without_execution(contro
 
     assert replay["disposition"] == "replay"
     assert replay["result"] == {"content": "stable-result"}
+
+
+def test_stable_invocation_replays_when_provider_changes_tool_call_id(control_plane):
+    first = claim(control_plane, "worker-1", NOW, mode="idempotent")
+    control_plane.complete_tool_effect(
+        first["tool_call_id"], first["claim"], success=True,
+        result={"content": "once"}, now=NOW + timedelta(seconds=1),
+    )
+
+    replay = claim(
+        control_plane, "worker-2", NOW + timedelta(seconds=2), mode="idempotent",
+        platform_tool_call_id="provider-generated-a-different-id",
+    )
+
+    assert replay["tool_call_id"] == first["tool_call_id"]
+    assert replay["disposition"] == "replay"
+
+    retry_turn_replay = claim(
+        control_plane, "worker-3", NOW + timedelta(seconds=3), mode="idempotent",
+        platform_tool_call_id="yet-another-provider-id", turn_id="turn-retry-2",
+    )
+    assert retry_turn_replay["tool_call_id"] == first["tool_call_id"]
+    assert retry_turn_replay["disposition"] == "replay"
+
+
+def test_uncertain_claimed_effect_is_fenced_for_manual_reconciliation(control_plane):
+    effect = claim(control_plane, "worker-1", NOW)
+
+    unknown = control_plane.mark_tool_effect_delivery_unknown(
+        effect["tool_call_id"], effect["claim"], now=NOW + timedelta(seconds=1),
+        reason="connection closed after request write",
+    )
+
+    assert unknown["state"] == "delivery_unknown"
+    assert unknown["reconciliation"] == "manual_required"
+    assert claim(control_plane, "worker-2", NOW + timedelta(seconds=2))["disposition"] == "manual_reconciliation"

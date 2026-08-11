@@ -531,22 +531,85 @@ class DurableRuntimeRepository:
         ).fetchone()
         return self._ingress_checkpoint(row) if row is not None else None
 
+    def claim_ingress_checkpoint(
+        self,
+        *,
+        account_id: str,
+        transport_mode: str,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> dict[str, Any]:
+        self._validate_lease_window(now, expires_at)
+        _require_identifier(account_id, "account_id")
+        _require_identifier(owner_id, "owner_id")
+        self._validate_transport_mode(transport_mode)
+        now_value = _iso(now)
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conflicting = conn.execute(
+                """SELECT transport_mode FROM channel_ingress_checkpoints
+                   WHERE account_id = ? AND transport_mode != ? LIMIT 1""",
+                (account_id, transport_mode),
+            ).fetchone()
+            if conflicting is not None:
+                raise StateConflictError("channel ingress transport is already owned")
+            account = conn.execute(
+                "SELECT enabled FROM channel_accounts WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if account is None or not bool(account["enabled"]):
+                raise StateConflictError("channel account is missing or disabled")
+            conn.execute(
+                """INSERT INTO channel_ingress_checkpoints (
+                    account_id, transport_mode, replay_state, claim_generation,
+                    reconnect_metadata, updated_at
+                ) VALUES (?, ?, '{}', 0, '{}', ?)
+                ON CONFLICT(account_id, transport_mode) DO NOTHING""",
+                (account_id, transport_mode, now_value),
+            )
+            row = conn.execute(
+                """UPDATE channel_ingress_checkpoints
+                   SET claim_owner = ?, claim_generation = claim_generation + 1,
+                       claim_expires_at = ?, updated_at = ?
+                   WHERE account_id = ? AND transport_mode = ?
+                     AND (claim_owner IS NULL OR claim_expires_at <= ?)
+                   RETURNING *""",
+                (
+                    owner_id, _iso(expires_at), now_value,
+                    account_id, transport_mode, now_value,
+                ),
+            ).fetchone()
+        if row is None:
+            raise StateConflictError("ingress checkpoint has a live owner")
+        value = self._ingress_checkpoint(row)
+        value["claim"] = ClaimToken(
+            row["claim_owner"], int(row["claim_generation"]),
+            datetime.fromisoformat(row["claim_expires_at"]),
+        )
+        return value
+
     def commit_ingress_checkpoint(
         self,
         *,
         account_id: str,
         transport_mode: str,
         now: datetime,
+        token: ClaimToken,
+        expected_previous: Mapping[str, Any],
         cursor: str | None = None,
         gateway_session_id: str | None = None,
         gateway_sequence: int | None = None,
         replay_state: Mapping[str, Any] | None = None,
         reconnect_metadata: Mapping[str, Any] | None = None,
-        processed_event_key: str | None = None,
+        processed_event_key: str,
     ) -> dict[str, Any]:
         """Persist a transport resume point after its referenced event is durable."""
         _require_identifier(account_id, "account_id")
         self._validate_transport_mode(transport_mode)
+        if transport_mode == "webhook":
+            raise ValueError("webhook ownership has no resumable checkpoint")
         if cursor is not None:
             _require_identifier(cursor, "cursor")
         if gateway_session_id is not None:
@@ -557,8 +620,15 @@ class DurableRuntimeRepository:
             or gateway_sequence < 0
         ):
             raise ValueError("gateway_sequence must be a non-negative integer")
-        if processed_event_key is not None:
-            _require_identifier(processed_event_key, "processed_event_key")
+        if transport_mode == "polling" and cursor is None:
+            raise ValueError("polling cursor position is required")
+        if transport_mode == "gateway" and (
+            gateway_session_id is None or gateway_sequence is None
+        ):
+            raise ValueError("gateway session and sequence position are required")
+        _require_identifier(processed_event_key, "processed_event_key")
+        if not isinstance(expected_previous, Mapping) or not expected_previous:
+            raise ValueError("expected_previous checkpoint is required")
         for value, name in (
             (replay_state, "replay_state"),
             (reconnect_metadata, "reconnect_metadata"),
@@ -575,34 +645,75 @@ class DurableRuntimeRepository:
             ).fetchone()
             if account is None or not bool(account["enabled"]):
                 raise StateConflictError("channel account is missing or disabled")
-            if processed_event_key is not None:
-                durable = conn.execute(
-                    """SELECT 1 FROM inbox_events
+            durable = conn.execute(
+                    """SELECT * FROM inbox_events
                        WHERE account_id = ? AND event_key = ?""",
                     (account_id, processed_event_key),
                 ).fetchone()
-                if durable is None:
-                    raise StateConflictError(
-                        "checkpoint cannot advance before its event is durable"
-                    )
+            if durable is None:
+                raise StateConflictError(
+                    "checkpoint cannot advance before its event is durable"
+                )
             current = conn.execute(
                 """SELECT * FROM channel_ingress_checkpoints
                    WHERE account_id = ? AND transport_mode = ?""",
                 (account_id, transport_mode),
             ).fetchone()
+            if current is None:
+                raise StateConflictError("ingress checkpoint must be claimed before commit")
             if (
-                current is not None
-                and gateway_sequence is not None
+                current["claim_owner"] != token.owner_id
+                or int(current["claim_generation"]) != token.generation
+                or current["claim_expires_at"] != _iso(token.expires_at)
+                or current["claim_expires_at"] <= now_value
+            ):
+                raise StaleClaimError("stale ingress checkpoint claim")
+            current_value = self._ingress_checkpoint(current)
+            allowed_expected = {"cursor", "gateway_session_id", "gateway_sequence"}
+            if any(key not in allowed_expected for key in expected_previous):
+                raise ValueError("unsupported expected checkpoint field")
+            required_expected = {
+                "polling": {"cursor"},
+                "gateway": {"gateway_session_id", "gateway_sequence"},
+                "webhook": set(),
+            }[transport_mode]
+            if set(expected_previous) != required_expected:
+                raise ValueError("expected_previous checkpoint proof is incomplete")
+            if any(current_value.get(key) != value for key, value in expected_previous.items()):
+                raise StateConflictError("checkpoint does not match expected previous state")
+            if (
+                gateway_sequence is not None
                 and current["gateway_sequence"] is not None
                 and current["gateway_session_id"] == gateway_session_id
                 and gateway_sequence < int(current["gateway_sequence"])
             ):
                 raise ValueError("gateway sequence cannot regress within a session")
-            replay_value = _json(
-                replay_state
-                if replay_state is not None
-                else (json.loads(current["replay_state"]) if current is not None else {})
-            )
+            event_payload = json.loads(durable["payload"])
+            proof = event_payload.get("transport_position") or {}
+            proposed_position = {
+                "cursor": cursor,
+                "gateway_session_id": gateway_session_id,
+                "gateway_sequence": gateway_sequence,
+            }
+            for key, value in proposed_position.items():
+                if value is not None and proof.get(key) != value:
+                    raise StateConflictError("checkpoint position is not bound to processed event")
+            if event_payload.get("transport_mode") != transport_mode:
+                raise StateConflictError("checkpoint transport does not match processed event")
+            current_replay = json.loads(current["replay_state"])
+            merged_replay = dict(replay_state or current_replay)
+            if transport_mode == "gateway":
+                seen_sessions = list(current_replay.get("seen_gateway_sessions", []))
+                current_session = current["gateway_session_id"]
+                if (
+                    gateway_session_id != current_session
+                    and gateway_session_id in seen_sessions
+                ):
+                    raise StateConflictError("gateway session cannot roll back")
+                if current_session is not None and current_session not in seen_sessions:
+                    seen_sessions.append(current_session)
+                merged_replay["seen_gateway_sessions"] = seen_sessions
+            replay_value = _json(merged_replay)
             reconnect_value = _json(
                 reconnect_metadata
                 if reconnect_metadata is not None
@@ -625,6 +736,7 @@ class DurableRuntimeRepository:
                     gateway_sequence=excluded.gateway_sequence,
                     replay_state=excluded.replay_state,
                     reconnect_metadata=excluded.reconnect_metadata,
+                    claim_owner=NULL, claim_expires_at=NULL,
                     updated_at=excluded.updated_at
                 RETURNING *
                 """,
@@ -677,6 +789,47 @@ class DurableRuntimeRepository:
         return self._conn.execute(query, params).fetchall()
 
     def enqueue_inbox(self, event: InboxEvent) -> InboxEvent:
+        return self._enqueue_inbox(event)
+
+    def get_webhook_nonce_receipt(
+        self, account_id: str, nonce: str
+    ) -> dict[str, Any] | None:
+        _require_identifier(account_id, "account_id")
+        _require_identifier(nonce, "nonce")
+        row = self._conn.execute(
+            """SELECT * FROM webhook_nonce_receipts
+               WHERE account_id = ? AND nonce = ?""",
+            (account_id, nonce),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def enqueue_inbox_with_nonce(
+        self,
+        event: InboxEvent,
+        *,
+        nonce: str,
+        request_digest: str,
+        nonce_expires_at: datetime,
+    ) -> InboxEvent:
+        _require_identifier(nonce, "nonce")
+        if not re.fullmatch(r"[0-9a-f]{64}", request_digest):
+            raise ValueError("request_digest must be a SHA-256 hex digest")
+        _require_aware(nonce_expires_at, "nonce_expires_at")
+        return self._enqueue_inbox(
+            event,
+            nonce=nonce,
+            request_digest=request_digest,
+            nonce_expires_at=nonce_expires_at,
+        )
+
+    def _enqueue_inbox(
+        self,
+        event: InboxEvent,
+        *,
+        nonce: str | None = None,
+        request_digest: str | None = None,
+        nonce_expires_at: datetime | None = None,
+    ) -> InboxEvent:
         if event.state != "pending" or event.claim is not None:
             raise ValueError("new inbox events must be pending and unclaimed")
         attachment_paths, attachment_key_id, attachment_tag = (
@@ -687,6 +840,43 @@ class DurableRuntimeRepository:
         conn = self._conn
         with conn:
             conn.execute("BEGIN IMMEDIATE")
+            if nonce is not None:
+                conflicting_transport = conn.execute(
+                    """SELECT transport_mode FROM channel_ingress_checkpoints
+                       WHERE account_id = ? AND transport_mode != 'webhook'
+                       LIMIT 1""",
+                    (event.account_id,),
+                ).fetchone()
+                if conflicting_transport is not None:
+                    raise StateConflictError(
+                        "channel account is already owned by another ingress transport"
+                    )
+                conn.execute(
+                    """INSERT INTO channel_ingress_checkpoints (
+                        account_id, transport_mode, cursor, gateway_session_id,
+                        gateway_sequence, replay_state, claim_owner,
+                        claim_generation, claim_expires_at, reconnect_metadata,
+                        updated_at
+                    ) VALUES (?, 'webhook', NULL, NULL, NULL, '{}', NULL, 0,
+                              NULL, '{}', ?)
+                    ON CONFLICT(account_id, transport_mode) DO NOTHING""",
+                    (event.account_id, _iso(event.created_at)),
+                )
+                receipt = conn.execute(
+                    """SELECT * FROM webhook_nonce_receipts
+                       WHERE account_id = ? AND nonce = ?""",
+                    (event.account_id, nonce),
+                ).fetchone()
+                if receipt is not None:
+                    if receipt["request_digest"] != request_digest:
+                        raise StateConflictError("webhook nonce digest mismatch")
+                    row = conn.execute(
+                        "SELECT * FROM inbox_events WHERE event_id = ?",
+                        (receipt["event_id"],),
+                    ).fetchone()
+                    if row is None:
+                        raise StateConflictError("webhook nonce receipt is orphaned")
+                    return self._inbox(row)
             tombstone = self._find_retention_tombstone(
                 conn, "inbox", event.account_id, event.event_key
             )
@@ -740,6 +930,22 @@ class DurableRuntimeRepository:
                 "SELECT * FROM inbox_events WHERE account_id = ? AND event_key = ?",
                 (event.account_id, event.event_key),
             ).fetchone()
+            if nonce is not None:
+                conn.execute(
+                    """INSERT INTO webhook_nonce_receipts (
+                        account_id, nonce, request_digest, event_id, event_key,
+                        expires_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        event.account_id,
+                        nonce,
+                        request_digest,
+                        row["event_id"],
+                        row["event_key"],
+                        _iso(nonce_expires_at),
+                        _iso(event.created_at),
+                    ),
+                )
         return self._inbox(row)
 
     def get_inbox(self, event_id: str) -> InboxEvent | None:
@@ -773,7 +979,8 @@ class DurableRuntimeRepository:
                 WHERE event_id = ?
                   AND (
                         state IN ('pending', 'retry_wait')
-                        OR (state IN ('claimed', 'dispatched') AND claim_expires_at <= ?)
+                        OR (state IN ('claimed', 'dispatched')
+                            AND (claim_owner IS NULL OR claim_expires_at <= ?))
                   )
                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                 RETURNING *
@@ -807,7 +1014,8 @@ class DurableRuntimeRepository:
                         SELECT event_id FROM inbox_events
                         WHERE (
                             state IN ('pending', 'retry_wait')
-                            OR (state IN ('claimed', 'dispatched') AND claim_expires_at <= ?)
+                            OR (state IN ('claimed', 'dispatched')
+                                AND (claim_owner IS NULL OR claim_expires_at <= ?))
                         )
                         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                         ORDER BY COALESCE(next_attempt_at, created_at), created_at, event_id
@@ -863,10 +1071,17 @@ class DurableRuntimeRepository:
                 raise StaleClaimError(f"stale inbox claim: {event_id}")
             source_event_key = _json([event_row["account_id"], event_row["event_key"]])
             if event_row["state"] == "dispatched":
-                turn_row = conn.execute(
-                    "SELECT * FROM runtime_turns WHERE source_event_key = ?",
-                    (source_event_key,),
-                ).fetchone()
+                turn_row = None
+                if event_row["runtime_turn_id"] is not None:
+                    turn_row = conn.execute(
+                        "SELECT * FROM runtime_turns WHERE turn_id = ?",
+                        (event_row["runtime_turn_id"],),
+                    ).fetchone()
+                if turn_row is None:
+                    turn_row = conn.execute(
+                        "SELECT * FROM runtime_turns WHERE source_event_key = ?",
+                        (source_event_key,),
+                    ).fetchone()
                 if turn_row is None:
                     raise StateConflictError("dispatched inbox event has no runtime turn")
                 if (
@@ -875,11 +1090,18 @@ class DurableRuntimeRepository:
                     or turn_row["user_input"] != user_input
                 ):
                     raise StateConflictError("replayed dispatch does not match its runtime turn")
-                return self.control_plane._row_to_dict(turn_row)
+                if turn_row["status"] not in {"error", "cancelled"}:
+                    return self.control_plane._row_to_dict(turn_row)
+                source_event_key = _json(
+                    [
+                        event_row["account_id"], event_row["event_key"],
+                        "attempt", int(event_row["attempt"]),
+                    ]
+                )
             updated = conn.execute(
                 """
                 UPDATE inbox_events SET state = 'dispatched', updated_at = ?
-                WHERE event_id = ? AND state = 'claimed'
+                WHERE event_id = ? AND state IN ('claimed', 'dispatched')
                   AND claim_owner = ? AND claim_generation = ?
                   AND claim_expires_at = ? AND claim_expires_at > ?
                 """,
@@ -923,6 +1145,11 @@ class DurableRuntimeRepository:
                     f"thread {thread_id} does not belong to session {session_id}"
                 )
             conn.execute(
+                """UPDATE inbox_events SET runtime_turn_id = ?
+                   WHERE event_id = ? AND claim_owner = ? AND claim_generation = ?""",
+                (turn_id, event_id, token.owner_id, token.generation),
+            )
+            conn.execute(
                 "UPDATE runtime_threads SET status = 'active', updated_at = ? WHERE thread_id = ?",
                 (now_value, thread_id),
             )
@@ -957,6 +1184,36 @@ class DurableRuntimeRepository:
                     token.generation,
                     _iso(token.expires_at),
                     now_value,
+                ),
+            ).fetchone()
+        if row is None:
+            raise StaleClaimError(f"stale inbox claim: {event_id}")
+        return self._inbox(row)
+
+    def retry_dispatched_inbox(
+        self,
+        event_id: str,
+        token: ClaimToken,
+        now: datetime,
+        *,
+        error: str,
+        next_attempt_at: datetime | None = None,
+    ) -> InboxEvent:
+        now_value = _iso(now)
+        retry_value = _iso(next_attempt_at or now)
+        safe_error = str(error or "Agent stream did not complete")[:500]
+        with self._conn:
+            row = self._conn.execute(
+                """UPDATE inbox_events
+                   SET state = 'dispatched', last_error = ?, next_attempt_at = ?,
+                       claim_owner = NULL, claim_expires_at = NULL, updated_at = ?
+                   WHERE event_id = ? AND state = 'dispatched'
+                     AND claim_owner = ? AND claim_generation = ?
+                     AND claim_expires_at = ? AND claim_expires_at > ?
+                   RETURNING *""",
+                (
+                    safe_error, retry_value, now_value, event_id,
+                    token.owner_id, token.generation, _iso(token.expires_at), now_value,
                 ),
             ).fetchone()
         if row is None:
@@ -1293,6 +1550,10 @@ class DurableRuntimeRepository:
                    VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
                 (self._retention_key_id(self._retention_hmac_keys[0]), now_value),
             )
+            conn.execute(
+                "DELETE FROM webhook_nonce_receipts WHERE expires_at <= ?",
+                (now_value,),
+            )
             inbox_rows = conn.execute(
                 """
                 SELECT event_id, payload, account_id, event_key, state,
@@ -1301,9 +1562,14 @@ class DurableRuntimeRepository:
                 FROM inbox_events
                 WHERE retained_at IS NULL AND updated_at <= ?
                   AND state IN ('succeeded', 'dead_letter')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM webhook_nonce_receipts AS receipt
+                      WHERE receipt.event_id = inbox_events.event_id
+                        AND receipt.expires_at > ?
+                  )
                 ORDER BY updated_at, event_id LIMIT ?
                 """,
-                (inbox_cutoff, limit),
+                (inbox_cutoff, now_value, limit),
             ).fetchall()
             remaining = limit - len(inbox_rows)
             outbox_rows = conn.execute(
@@ -1595,7 +1861,7 @@ class DurableRuntimeRepository:
                             conversation_id = 'retained',
                             payload = '{}', last_error = NULL,
                             next_attempt_at = NULL, claim_owner = NULL,
-                            claim_expires_at = NULL, retained_at = ?,
+                            claim_expires_at = NULL, runtime_turn_id = NULL, retained_at = ?,
                             retention_attachment_paths = NULL,
                             retention_attachment_key_id = NULL,
                             retention_attachment_tag = NULL

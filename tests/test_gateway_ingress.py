@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ from open_agent.gateway.security import (
     QuotaSnapshot,
     ResourceQuotaPolicy,
     SecurityViolation,
+    StoredAttachment,
     WebhookAuthenticator,
 )
 
@@ -195,13 +197,13 @@ def test_webhook_authenticates_raw_bytes_then_admits_quota_then_enqueues_before_
     order: list[str] = []
     service, ledger = ingress_service(repository, order=order)
     adapter = Adapter(inbound(), order)
-    original_enqueue = repository.enqueue_inbox
+    original_enqueue = repository.enqueue_inbox_with_nonce
 
-    def recording_enqueue(event):
+    def recording_enqueue(event, **kwargs):
         order.append("enqueue")
-        return original_enqueue(event)
+        return original_enqueue(event, **kwargs)
 
-    repository.enqueue_inbox = recording_enqueue
+    repository.enqueue_inbox_with_nonce = recording_enqueue
     body = b'{"text":"hello"}'
 
     receipt = service.accept_webhook(
@@ -261,7 +263,7 @@ def test_webhook_does_not_ack_when_durable_enqueue_fails(runtime):
     _, repository = runtime
     service, ledger = ingress_service(repository)
     adapter = Adapter(inbound())
-    repository.enqueue_inbox = lambda event: (_ for _ in ()).throw(OSError("disk full"))
+    repository.enqueue_inbox_with_nonce = lambda event, **kwargs: (_ for _ in ()).throw(OSError("disk full"))
     body = b'{"text":"hello"}'
 
     with pytest.raises(OSError, match="disk full"):
@@ -340,6 +342,33 @@ def test_body_and_header_limits_run_before_authentication_or_parsing(runtime):
     assert adapter.normalize_calls == 0
 
 
+@pytest.mark.parametrize(
+    ("event", "limits", "message"),
+    [
+        (inbound(event_key="12345"), IngressLimits(max_identifier_chars=4), "identifier"),
+        (inbound(text="12345"), IngressLimits(max_text_chars=4), "text"),
+        (
+            inbound(metadata={"a": {"b": {"c": 1}}}),
+            IngressLimits(max_nesting_depth=2),
+            "depth",
+        ),
+        (
+            inbound(attachments=({"content": b"one"}, {"content": b"two"})),
+            IngressLimits(max_attachment_count=1),
+            "count",
+        ),
+    ],
+)
+def test_normalized_input_limits_fail_before_route_or_enqueue(runtime, event, limits, message):
+    _, repository = runtime
+    service, _ = ingress_service(repository, limits=limits)
+
+    with pytest.raises(SecurityViolation, match=message):
+        service.accept_polled_event(event)
+
+    assert repository.list_inbox() == []
+
+
 def test_duplicate_platform_event_is_one_durable_inbox_item(runtime):
     _, repository = runtime
     first_service, _ = ingress_service(repository)
@@ -357,6 +386,13 @@ def test_duplicate_platform_event_is_one_durable_inbox_item(runtime):
 
     assert second.event_id == first.event_id
     assert len(repository.list_inbox()) == 1
+    changed = b'{"text":"other"}'
+    with pytest.raises(SecurityViolation, match="nonce"):
+        second_service.accept_webhook(
+            Adapter(inbound(text="other")), changed,
+            signed_headers(changed, nonce="nonce-2"),
+            account_id="account-1", remote_ip="203.0.113.7",
+        )
 
 
 def test_polling_cursor_is_committed_only_after_event_is_durable_and_survives_restart(tmp_path):
@@ -406,7 +442,7 @@ def test_checkpoint_cannot_advance_before_referenced_event_is_durable(runtime):
             processed_event_key="missing-event",
         )
 
-    assert service.get_checkpoint("account-1", "polling") is None
+    assert service.get_checkpoint("account-1", "polling")["cursor"] is None
 
 
 def test_gateway_resume_checkpoint_is_persistent_and_sequence_cannot_regress(runtime):
@@ -509,6 +545,161 @@ def test_webhook_and_polling_ownership_are_mutually_exclusive(runtime):
         service.claim_checkpoint(
             "account-1", "polling", owner_id="poller", lease_duration=timedelta(seconds=30)
         )
+
+
+def test_durable_webhook_receipt_claims_transport_before_ack(runtime):
+    _, repository = runtime
+    service, _ = ingress_service(repository)
+    body = b'{"text":"hello"}'
+
+    service.accept_webhook(
+        Adapter(inbound()), body, signed_headers(body),
+        account_id="account-1", remote_ip="203.0.113.7",
+    )
+
+    with pytest.raises(StateConflictError, match="transport"):
+        service.claim_checkpoint(
+            "account-1", "polling", owner_id="poller", lease_duration=timedelta(seconds=30)
+        )
+
+
+def test_retention_waits_for_live_nonce_receipt_then_redacts_safely(tmp_path):
+    control_plane = ControlPlane(tmp_path)
+    repository = DurableRuntimeRepository(
+        control_plane, retention_hmac_key=b"task6-retention-hmac-key-at-least-32-bytes"
+    )
+    repository.upsert_channel_account(
+        account_id="account-1", adapter_kind="test", default_profile_id="main", now=NOW
+    )
+    try:
+        service, _ = ingress_service(repository)
+        body = b'{"text":"hello"}'
+        receipt = service.accept_webhook(
+            Adapter(inbound()), body, signed_headers(body),
+            account_id="account-1", remote_ip="203.0.113.7",
+        )
+        claimed = repository.claim_due_inbox(
+            "retention-worker", NOW, NOW + timedelta(seconds=30), limit=1
+        )[0]
+        repository.complete_inbox(claimed.event_id, claimed.claim, NOW)
+
+        repository.apply_retention_batch(
+            now=NOW, inbox_before=NOW, outbox_before=NOW,
+            audit_before=NOW, limit=10,
+        )
+        assert control_plane._get_conn().execute(
+            "SELECT retained_at FROM inbox_events WHERE event_id = ?", (receipt.event_id,)
+        ).fetchone()["retained_at"] is None
+        assert repository.get_webhook_nonce_receipt("account-1", "nonce-1") is not None
+
+        repository.apply_retention_batch(
+            now=NOW + timedelta(minutes=6), inbox_before=NOW + timedelta(minutes=6),
+            outbox_before=NOW + timedelta(minutes=6),
+            audit_before=NOW + timedelta(minutes=6), limit=10,
+        )
+        assert repository.get_webhook_nonce_receipt("account-1", "nonce-1") is None
+        assert control_plane._get_conn().execute(
+            "SELECT retained_at FROM inbox_events"
+        ).fetchone()["retained_at"] is not None
+    finally:
+        control_plane.close()
+
+
+def test_gateway_checkpoint_rejects_incomplete_expected_state_and_session_rollback(runtime):
+    _, repository = runtime
+    service, _ = ingress_service(repository)
+    first = service.accept_polled_event(
+        inbound(event_key="session-a"), transport_mode="gateway",
+        gateway_session_id="session-a", gateway_sequence=1,
+    )
+    claim = service.claim_checkpoint(
+        "account-1", "gateway", owner_id="gateway", lease_duration=timedelta(seconds=30)
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        service.commit_checkpoint(
+            "account-1", "gateway", claim=claim,
+            expected_previous={"gateway_sequence": None},
+            gateway_session_id="session-a", gateway_sequence=1,
+            processed_event_key=first.event_key,
+        )
+    with pytest.raises(ValueError, match="session.*sequence"):
+        service.commit_checkpoint(
+            "account-1", "gateway", claim=claim,
+            expected_previous={"gateway_session_id": None, "gateway_sequence": None},
+            processed_event_key=first.event_key,
+        )
+    service.commit_checkpoint(
+        "account-1", "gateway", claim=claim,
+        expected_previous={"gateway_session_id": None, "gateway_sequence": None},
+        gateway_session_id="session-a", gateway_sequence=1,
+        processed_event_key=first.event_key,
+    )
+    second = service.accept_polled_event(
+        inbound(event_key="session-b"), transport_mode="gateway",
+        gateway_session_id="session-b", gateway_sequence=1,
+    )
+    claim = service.claim_checkpoint(
+        "account-1", "gateway", owner_id="gateway", lease_duration=timedelta(seconds=30)
+    )
+    service.commit_checkpoint(
+        "account-1", "gateway", claim=claim,
+        expected_previous={"gateway_session_id": "session-a", "gateway_sequence": 1},
+        gateway_session_id="session-b", gateway_sequence=1,
+        processed_event_key=second.event_key,
+    )
+    rollback = service.accept_polled_event(
+        inbound(event_key="session-a-again"), transport_mode="gateway",
+        gateway_session_id="session-a", gateway_sequence=2,
+    )
+    claim = service.claim_checkpoint(
+        "account-1", "gateway", owner_id="gateway", lease_duration=timedelta(seconds=30)
+    )
+    with pytest.raises(StateConflictError, match="roll back"):
+        service.commit_checkpoint(
+            "account-1", "gateway", claim=claim,
+            expected_previous={"gateway_session_id": "session-b", "gateway_sequence": 1},
+            gateway_session_id="session-a", gateway_sequence=2,
+            processed_event_key=rollback.event_key,
+        )
+
+
+@pytest.mark.asyncio
+async def test_attachments_are_guarded_and_only_managed_references_reach_runner(runtime):
+    control_plane, repository = runtime
+
+    class RecordingAttachmentGuard:
+        def __init__(self):
+            self.uploads = ()
+
+        def ingest(self, uploads):
+            self.uploads = tuple(uploads)
+            assert self.uploads[0].chunks.read(1024, 0) == b"%PDF-safe"
+            assert self.uploads[0].chunks.read(1024, 0) is None
+            return (StoredAttachment("managed/attachment-1", 9, NOW + timedelta(days=1)),)
+
+    attachment_guard = RecordingAttachmentGuard()
+    service, _ = ingress_service(repository, attachment_guard=attachment_guard)
+    receipt = service.accept_polled_event(
+        inbound(attachments=({
+            "filename": "evidence.pdf",
+            "claimed_content_type": "application/pdf",
+            "content": b"%PDF-safe",
+        },))
+    )
+    stored = repository.get_inbox(receipt.event_id)
+    managed = stored.payload["normalized_event"]["attachments"][0]
+    assert managed == {
+        "storage_path": "managed/attachment-1",
+        "size": 9,
+        "expires_at": (NOW + timedelta(days=1)).isoformat(),
+    }
+    runner = RecordingRunner(control_plane)
+    worker = IngressWorker(
+        repository, GatewayRouter(repository, now=lambda: NOW), runner,
+        worker_id="attachment-worker", lease_duration=timedelta(seconds=30), now=lambda: NOW,
+    )
+    assert (await worker.run_once()).succeeded == 1
+    assert runner.calls[0][0].messages[0]["attachments"] == [managed]
 
 
 @pytest.mark.asyncio
@@ -634,6 +825,95 @@ async def test_worker_retries_cancelled_or_silent_agent_stream(runtime, mode):
     assert summary.failed == 1
     assert stored.state == "dispatched"
     assert stored.last_error is not None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_turn_retry_uses_a_new_attempt_without_overwriting_terminal(runtime):
+    control_plane, repository = runtime
+    service, _ = ingress_service(repository)
+    receipt = service.accept_polled_event(inbound())
+    cancelled = IngressWorker(
+        repository, GatewayRouter(repository, now=lambda: NOW),
+        RecordingRunner(control_plane, mode="cancelled"),
+        worker_id="cancelled-worker", now=lambda: NOW,
+    )
+    assert (await cancelled.run_once()).failed == 1
+
+    completed = IngressWorker(
+        repository, GatewayRouter(repository, now=lambda: NOW),
+        RecordingRunner(control_plane), worker_id="retry-worker", now=lambda: NOW,
+    )
+    assert (await completed.run_once()).succeeded == 1
+
+    route = repository.get_inbox(receipt.event_id).payload["route"]
+    turns = control_plane.list_runtime_turns(route["thread_id"])
+    assert {turn["status"] for turn in turns} == {"cancelled", "completed"}
+    assert turns[0]["turn_id"] != turns[1]["turn_id"]
+    assert turns[0]["source_event_key"] != turns[1]["source_event_key"]
+
+
+@pytest.mark.asyncio
+async def test_manual_tool_reconciliation_blocks_a_new_agent_attempt(runtime):
+    control_plane, repository = runtime
+    service, _ = ingress_service(repository)
+    receipt = service.accept_polled_event(inbound())
+    source_event_key = json.dumps(
+        [receipt.account_id, receipt.event_key], separators=(",", ":")
+    )
+    effect = control_plane.claim_tool_effect(
+        session_id=repository.get_inbox(receipt.event_id).payload["route"]["session_id"],
+        turn_id="turn-before-crash", source_event_key=source_event_key,
+        platform_tool_call_id="provider-call", invocation_id="step:1:tool:1",
+        tool_name="external_write", arguments={"value": 1},
+        idempotency_mode="non_idempotent", owner_id="crashed-worker",
+        now=NOW, expires_at=NOW + timedelta(seconds=30),
+    )
+    control_plane.mark_tool_effect_delivery_unknown(
+        effect["tool_call_id"], effect["claim"], now=NOW + timedelta(seconds=1),
+        reason="crash after delivery",
+    )
+    runner = RecordingRunner(control_plane)
+    worker = IngressWorker(
+        repository, GatewayRouter(repository, now=lambda: NOW + timedelta(seconds=1)),
+        runner, worker_id="recovery-worker", now=lambda: NOW + timedelta(seconds=1),
+    )
+
+    summary = await worker.run_once()
+
+    assert summary.failed == 1
+    assert runner.calls == []
+
+
+def test_runtime_terminal_event_and_status_are_one_idempotent_commit(runtime):
+    control_plane, _ = runtime
+    control_plane.create_session("terminal-session")
+    control_plane.create_runtime_thread(
+        session_id="terminal-session", thread_id="terminal-thread", user_id="user"
+    )
+    control_plane.start_runtime_turn(
+        "terminal-thread", session_id="terminal-session",
+        turn_id="terminal-turn", user_input="hello",
+    )
+    first = control_plane.complete_runtime_turn_with_event(
+        thread_id="terminal-thread", turn_id="terminal-turn",
+        session_id="terminal-session", event_type="complete",
+        payload={"event": "complete"}, status="completed",
+        result={"content": "done"},
+    )
+    replay = control_plane.complete_runtime_turn_with_event(
+        thread_id="terminal-thread", turn_id="terminal-turn",
+        session_id="terminal-session", event_type="complete",
+        payload={"event": "complete"}, status="completed",
+        result={"content": "done"},
+    )
+
+    assert replay["event_id"] == first["event_id"]
+    assert control_plane.list_runtime_turns("terminal-thread")[0]["status"] == "completed"
+    terminal_events = [
+        event for event in control_plane.list_runtime_events("terminal-thread")
+        if event["event_type"] in {"complete", "cancelled", "error"}
+    ]
+    assert len(terminal_events) == 1
 
 
 def test_stale_dispatch_owner_cannot_complete_after_recovery(runtime):
