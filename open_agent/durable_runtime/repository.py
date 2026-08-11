@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import re
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from math import isfinite
@@ -960,7 +961,10 @@ class DurableRuntimeRepository:
                 (audit_cutoff, remaining),
             ).fetchall()
 
-            queue_limit = min(limit, 64)
+            queue_occupancy = conn.execute(
+                "SELECT COUNT(*) FROM retention_attachment_queue"
+            ).fetchone()[0]
+            queue_limit = min(limit, 64, max(0, 64 - queue_occupancy))
             queued_attachment_paths: list[str] = []
             backlog_rows = conn.execute(
                 """SELECT backlog_id, storage_paths
@@ -1235,9 +1239,12 @@ class DurableRuntimeRepository:
 
     def secure_checkpoint(self) -> None:
         """Remove securely-deleted content from WAL before reporting retention complete."""
-        row = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        if row is None or row[0] != 0:
-            raise StateConflictError("secure WAL checkpoint is busy")
+        for _ in range(100):
+            row = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if row is not None and row[0] == 0:
+                return
+            time.sleep(0.01)
+        raise StateConflictError("secure WAL checkpoint is busy")
 
     @staticmethod
     def _attachment_paths(payload: Any, *, limit: int) -> tuple[list[str], bool]:

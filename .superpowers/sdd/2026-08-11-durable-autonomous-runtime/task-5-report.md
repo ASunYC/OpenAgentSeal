@@ -138,3 +138,22 @@ Planned conventional commit: `feat: secure channel credentials and retention`.
 
 - The formal reviewer classified the `put_async` ledger concern as deferred and outside
   this fix loop; no behavior change was made for it in round 1.
+
+## Formal review fix round 2
+
+- RED: after a first run filled 64 queue rows with failed deletions and deferred 16
+  paths, a second invocation drained the backlog into the already-full queue. The
+  regression observed 80 live queue rows instead of the promised global cap of 64.
+- GREEN: while holding the existing `BEGIN IMMEDIATE` transaction, retention now counts
+  all live deletion queue rows and computes its enqueue budget as the minimum of the
+  requested batch limit, 64, and the remaining global occupancy slots. A full queue
+  leaves the 16 paths in bounded backlog storage; after acknowledgement removes the 64
+  rows, the next run moves all 16 paths into the queue with no loss or duplication.
+- The required security suite exposed an existing concurrent migration checkpoint race:
+  two successful migrators could concurrently receive SQLite `busy` from WAL truncate.
+  `secure_checkpoint` now performs a bounded one-second retry, retaining fail-closed
+  behavior if checkpoint contention does not clear.
+- Final focused run: 38 passed; `credentials.py` 82%, `retention.py` 93%, combined 86%.
+- Final Tasks 1-5 compatibility run: 258 passed with one upstream
+  `python_multipart` deprecation warning.
+- Final security-focused run: 109 passed.

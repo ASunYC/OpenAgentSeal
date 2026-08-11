@@ -389,6 +389,61 @@ def test_attachment_enqueue_and_due_work_are_hard_capped_at_64(runtime, monkeypa
     assert any(payload.get("attachments_deferred") == 16 for payload in audit_payloads)
 
 
+def test_full_retry_queue_defers_backlog_until_ack_releases_slots(runtime, monkeypatch):
+    _, repository, attachment_root = runtime
+    for index in range(80):
+        repository.enqueue_inbox(
+            InboxEvent(
+                f"event-occupancy-{index}",
+                f"key-occupancy-{index}",
+                "account-a",
+                "private",
+                {"attachments": [{"storage_path": f"occupancy-{index}.bin"}]},
+                created_at=OLD,
+                updated_at=OLD,
+            )
+        )
+    conn = repository.control_plane._get_conn()
+    with conn:
+        conn.execute("UPDATE inbox_events SET state = 'succeeded'")
+    attempted = []
+    worker = RetentionWorker(repository, policy(batch_limit=80), attachment_root)
+    monkeypatch.setattr(
+        worker,
+        "_delete_managed_attachment",
+        lambda path: attempted.append(path) or "failed",
+    )
+
+    worker.run_once(NOW)
+    worker.run_once(NOW + timedelta(seconds=1))
+
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 64
+    assert sum(
+        len(json.loads(row[0]))
+        for row in conn.execute(
+            "SELECT storage_paths FROM retention_attachment_backlog"
+        )
+    ) == 16
+    assert len(attempted) == 64
+
+    queued_paths = [
+        row[0]
+        for row in conn.execute(
+            "SELECT storage_path FROM retention_attachment_queue"
+        )
+    ]
+    repository.complete_retention_attachments(
+        {path: "deleted" for path in queued_paths},
+        now=NOW + timedelta(seconds=2),
+    )
+    worker.run_once(NOW + timedelta(seconds=3))
+
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_queue").fetchone()[0] == 16
+    assert conn.execute("SELECT COUNT(*) FROM retention_attachment_backlog").fetchone()[0] == 0
+    assert len(attempted) == 80
+    assert len(set(attempted)) == 80
+
+
 def test_failed_attachment_backoff_does_not_starve_newer_due_work(runtime, monkeypatch):
     _, repository, attachment_root = runtime
     for index, path in enumerate(("blocked.bin", "new.bin")):
