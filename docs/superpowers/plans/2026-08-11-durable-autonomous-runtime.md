@@ -112,7 +112,7 @@
 - [ ] **Step 5: Implement fail-closed security primitives** with dependency-injected DNS/time/secret lookup so tests never use the network.
 - [ ] **Step 6: Run** the two test files with coverage and commit `feat: add secure messaging gateway core`.
 
-### Task 4A: Credential store and data retention
+### Task 5: Credential store and data retention
 
 **Files:**
 - Create: `open_agent/gateway/credentials.py`
@@ -130,7 +130,7 @@
 - [ ] **Step 5: Implement retention as bounded, audited batches** and ensure symlink-safe attachment deletion never escapes the managed attachment root.
 - [ ] **Step 6: Run** both test files with coverage and commit `feat: secure channel credentials and retention`.
 
-### Task 5: Webhook/polling ingress and AgentRunner dispatch
+### Task 6: Webhook/polling ingress and AgentRunner dispatch
 
 **Files:**
 - Create: `open_agent/gateway/ingress.py`
@@ -147,7 +147,7 @@
 - [ ] **Step 4: Run** `pytest tests/test_gateway_ingress.py tests/test_runtime_api.py tests/test_session_recovery.py -v`.
 - [ ] **Step 5: Commit** `git commit -m "feat: dispatch durable channel ingress"`.
 
-### Task 6: Nine official channel adapters
+### Task 7: Nine official channel adapters
 
 **Files:**
 - Create: `open_agent/gateway/adapters/base_http.py`
@@ -174,7 +174,7 @@
 - [ ] **Step 5: Run** `pytest tests/gateway -v --cov=open_agent.gateway.adapters --cov-report=term-missing` and the full gateway tests.
 - [ ] **Step 6: Commit** `git commit -m "feat: add official messaging channel adapters"`.
 
-### Task 7: Executable cron scheduler
+### Task 8: Executable cron scheduler
 
 **Files:**
 - Create: `open_agent/scheduler_runtime.py`
@@ -192,7 +192,7 @@
 - [ ] **Step 5: Run** `pytest tests/test_scheduler_runtime.py tests/test_autonomics.py tests/test_runtime_api.py -v`.
 - [ ] **Step 6: Commit** `git commit -m "feat: execute durable scheduled jobs"`.
 
-### Task 8: Continuous Goal Runner
+### Task 9: Continuous Goal Runner
 
 **Files:**
 - Create: `open_agent/goal_runtime.py`
@@ -210,7 +210,7 @@
 - [ ] **Step 5: Run** `pytest tests/test_goal_runtime.py tests/test_goal_mode.py tests/test_agent.py tests/test_session_recovery.py -v`.
 - [ ] **Step 6: Commit** `git commit -m "feat: run goals continuously to acceptance"`.
 
-### Task 9: Supervisor lifecycle and application wiring
+### Task 10: Supervisor lifecycle and application wiring
 
 **Files:**
 - Create: `open_agent/durable_runtime/supervisor.py`
@@ -227,7 +227,7 @@
 - [ ] **Step 4: Run** supervisor, runtime API and session recovery tests.
 - [ ] **Step 5: Commit** `git commit -m "feat: supervise autonomous runtime workers"`.
 
-### Task 10: Authenticated operational APIs
+### Task 11: Authenticated operational APIs
 
 **Files:**
 - Create: `open_agent/app/runner/gateway_api.py`
@@ -245,7 +245,7 @@
 - [ ] **Step 4: Run** API, gateway and runtime integration tests.
 - [ ] **Step 5: Commit** `git commit -m "feat: expose autonomous runtime operations"`.
 
-### Task 11: Web administration UI
+### Task 12: Web administration UI
 
 **Files:**
 - Create: `open_agent/app/web/src/api/autonomics.ts`
@@ -256,7 +256,7 @@
 - Test: `open_agent/app/web/scripts/test-autonomics-model.mjs`
 
 **Interfaces:**
-- Consumes Task 10 APIs; produces typed projections for channel health/routes, delivery states, scheduler runs and Goal iterations.
+- Consumes Task 11 APIs; produces typed projections for channel health/routes, delivery states, scheduler runs and Goal iterations.
 
 - [ ] **Step 1: Write failing pure-model tests** for status projection, redacted secret fields, delivery-unknown warning, run attempts, budget progress and legal actions.
 - [ ] **Step 2: Run** `npm run test:autonomics` from `open_agent/app/web` after adding the package script and verify failure.
@@ -264,7 +264,7 @@
 - [ ] **Step 4: Run** `npm run test:autonomics && npm run build:check`.
 - [ ] **Step 5: Commit** `git commit -m "feat: administer channels and autonomous runs"`.
 
-### Task 12: Cross-system E2E, security and packaging verification
+### Task 13: Cross-system E2E, security and packaging verification
 
 **Files:**
 - Create: `tests/e2e/test_autonomous_runtime.py`
@@ -272,7 +272,7 @@
 - Modify: `README.md`
 
 **Interfaces:**
-- Verifies the complete contracts from Tasks 1 through 11; adds no alternate runtime path.
+- Verifies the complete contracts from Tasks 1 through 12; adds no alternate runtime path.
 
 - [ ] **Step 1: Add failing E2E scenarios** for one inbound event/one reply, restart between send/ack, cron origin delivery, multi-turn Goal restart/completion, invalid signature, replay, exhausted budget, ambiguous delivery and cancellation.
 - [ ] **Step 2: Run** `pytest tests/e2e/test_autonomous_runtime.py -v` and verify failures expose integration gaps.
