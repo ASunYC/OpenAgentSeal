@@ -279,8 +279,35 @@ class DurableRuntimeRepository:
             principal = (
                 row["sender_id"]
                 if row["sender_id"]
-                else f"gateway:{account_id}:{conversation_id}"
+                else self._gateway_id("principal", account_id, conversation_id)
             )
+            if not row["sender_id"] and session_was_bound and thread_was_bound:
+                legacy_principal = f"gateway:{account_id}:{conversation_id}"
+                legacy_session_row = conn.execute(
+                    "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                legacy_thread_row = conn.execute(
+                    "SELECT * FROM runtime_threads WHERE thread_id = ?", (thread_id,)
+                ).fetchone()
+                if legacy_session_row is not None and legacy_thread_row is not None:
+                    legacy_session = self.control_plane._row_to_dict(legacy_session_row)
+                    legacy_thread = self.control_plane._row_to_dict(legacy_thread_row)
+                    if (
+                        legacy_session["channel"] == "gateway"
+                        and legacy_session["user_id"] == legacy_principal
+                        and legacy_session["metadata"].get("route_id") == route_id
+                        and legacy_thread["session_id"] == session_id
+                        and legacy_thread["user_id"] == legacy_principal
+                        and legacy_thread["metadata"].get("route_id") == route_id
+                    ):
+                        conn.execute(
+                            "UPDATE sessions SET user_id = ?, updated_at = ? WHERE session_id = ?",
+                            (principal, now_value, session_id),
+                        )
+                        conn.execute(
+                            "UPDATE runtime_threads SET user_id = ?, updated_at = ? WHERE thread_id = ?",
+                            (principal, now_value, thread_id),
+                        )
             inserted_session = conn.execute(
                 """
                 INSERT INTO sessions (
@@ -363,7 +390,7 @@ class DurableRuntimeRepository:
 
     @staticmethod
     def _gateway_id(prefix: str, *parts: str) -> str:
-        value = "\x1f".join(parts)
+        value = _json([prefix, *parts])
         return f"{prefix}_{uuid.uuid5(uuid.NAMESPACE_URL, value).hex}"
 
     @property

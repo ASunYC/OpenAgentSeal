@@ -123,8 +123,12 @@ class LimitRule:
     concurrency: int
 
     def __post_init__(self) -> None:
-        if self.requests < 1 or self.concurrency < 1 or self.window <= timedelta(0):
-            raise ValueError("limit rules must be positive")
+        if type(self.requests) is not int or not 1 <= self.requests <= 1_000_000:
+            raise ValueError("requests must be an integer between 1 and 1000000")
+        if type(self.concurrency) is not int or not 1 <= self.concurrency <= 100_000:
+            raise ValueError("concurrency must be an integer between 1 and 100000")
+        if type(self.window) is not timedelta or not timedelta(0) < self.window <= timedelta(days=1):
+            raise ValueError("window must be a timedelta between 0 and 1 day")
 
 
 class _IngressLease:

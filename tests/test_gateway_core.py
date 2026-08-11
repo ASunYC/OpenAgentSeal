@@ -1,11 +1,16 @@
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
+import uuid
 
 import pytest
 
 from open_agent.control_plane import ControlPlane
 from open_agent.durable_runtime.repository import DurableRuntimeRepository
-from open_agent.gateway.contracts import NormalizedInboundEvent
+from open_agent.gateway.contracts import (
+    ChannelCapabilities,
+    NormalizedInboundEvent,
+    OutboundMessage,
+)
 from open_agent.gateway.router import GatewayRouter, RouteResolutionError
 
 
@@ -61,6 +66,60 @@ def test_normalized_event_ids_and_nested_metadata_are_immutable():
         event(mentioned_bot="false")
     with pytest.raises(TypeError, match="replies_to_bot"):
         event(replies_to_bot=1)
+
+
+def test_contract_values_are_recursively_copied_into_a_strict_immutable_domain():
+    mutable_bytes = bytearray(b"safe")
+    inbound = event(
+        metadata={"blob": mutable_bytes, "nested": [{"enabled": True}]},
+        attachments=[{"attachment_id": "file-1"}],
+    )
+    mutable_bytes[:] = b"evil"
+
+    assert inbound.metadata["blob"] == b"safe"
+    assert inbound.metadata["nested"][0]["enabled"] is True
+    assert inbound.attachments[0]["attachment_id"] == "file-1"
+    with pytest.raises(TypeError):
+        inbound.attachments[0]["attachment_id"] = "changed"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"metadata": None},
+        {"metadata": {1: "numeric key"}},
+        {"metadata": {type("StringKey", (str,), {})("derived"): "bad key"}},
+        {"metadata": {"custom": object()}},
+        {"metadata": {"set": {"mutable"}}},
+        {"metadata": {"nan": float("nan")}},
+        {"attachments": None},
+        {"attachments": "file-1"},
+    ],
+)
+def test_contracts_reject_values_outside_the_immutable_json_like_domain(changes):
+    with pytest.raises(TypeError):
+        event(**changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"supports_threads": 1},
+        {"supports_replies": "false"},
+        {"max_message_chars": True},
+        {"max_message_chars": 1.5},
+    ],
+)
+def test_channel_capabilities_require_exact_booleans_and_non_bool_integer_limits(changes):
+    with pytest.raises((TypeError, ValueError)):
+        ChannelCapabilities(**changes)
+
+
+def test_outbound_contract_applies_the_same_metadata_and_attachment_validation():
+    with pytest.raises(TypeError):
+        OutboundMessage("account", "conversation", "hello", metadata={1: "bad"})
+    with pytest.raises(TypeError):
+        OutboundMessage("account", "conversation", "hello", attachments="file")
 
 
 @pytest.mark.parametrize(
@@ -126,6 +185,72 @@ def test_route_mapping_is_stable_and_persisted_in_runtime_tables(repository):
     assert repository.control_plane.get_runtime_thread(first.thread_id)["session_id"] == first.session_id
 
 
+def test_composite_gateway_ids_and_shared_principals_are_unambiguous(repository):
+    first_id = repository._gateway_id("route", "a\x1fb", "c", "")
+    second_id = repository._gateway_id("route", "a", "b\x1fc", "")
+    assert first_id != second_id
+
+    configure_account(repository, account_id="a:b")
+    configure_account(repository, account_id="a")
+    router = GatewayRouter(repository, now=lambda: NOW)
+    first = router.resolve(
+        event(account_id="a:b", conversation_id="c", sender_id="sender")
+    )
+    second = router.resolve(
+        event(account_id="a", conversation_id="b:c", sender_id="sender")
+    )
+    first_session = repository.control_plane.get_session(first.session_id)
+    second_session = repository.control_plane.get_session(second.session_id)
+
+    assert first.session_id != second.session_id
+    assert first_session["user_id"] != second_session["user_id"]
+
+
+def test_legacy_shared_route_principal_is_migrated_atomically(repository):
+    configure_account(repository)
+
+    def legacy_id(prefix, *parts):
+        value = "\x1f".join(parts)
+        return f"{prefix}_{uuid.uuid5(uuid.NAMESPACE_URL, value).hex}"
+
+    route_id = legacy_id("route", "account-1", "conversation-1", "")
+    session_id = legacy_id("session", route_id)
+    thread_id = legacy_id("thread", route_id)
+    legacy_principal = "gateway:account-1:conversation-1"
+    repository.control_plane.create_session(
+        session_id=session_id,
+        channel="gateway",
+        user_id=legacy_principal,
+        metadata={"route_id": route_id},
+    )
+    repository.control_plane.create_runtime_thread(
+        session_id=session_id,
+        thread_id=thread_id,
+        user_id=legacy_principal,
+        metadata={"route_id": route_id},
+    )
+    with repository.control_plane._get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO channel_routes (
+                route_id, account_id, conversation_id, sender_id, profile_id,
+                trigger_policy, session_id, thread_id, created_at, updated_at, metadata
+            ) VALUES (?, 'account-1', 'conversation-1', '', NULL,
+                      'default', ?, ?, ?, ?, '{}')
+            """,
+            (route_id, session_id, thread_id, NOW.isoformat(), NOW.isoformat()),
+        )
+
+    resolved = GatewayRouter(repository, now=lambda: NOW).resolve(event())
+    expected_principal = repository._gateway_id(
+        "principal", "account-1", "conversation-1"
+    )
+
+    assert resolved.session_id == session_id
+    assert repository.control_plane.get_session(session_id)["user_id"] == expected_principal
+    assert repository.control_plane.get_runtime_thread(thread_id)["user_id"] == expected_principal
+
+
 def test_account_validation_and_route_provisioning_share_an_explicit_transaction(repository):
     configure_account(repository)
     observed = []
@@ -178,8 +303,9 @@ def test_shared_conversation_route_uses_conversation_principal_not_first_sender(
     assert first.session_id == second.session_id
     session = repository.control_plane.get_session(first.session_id)
     thread = repository.control_plane.get_runtime_thread(first.thread_id)
-    assert session["user_id"] == "gateway:account-1:conversation-1"
-    assert thread["user_id"] == "gateway:account-1:conversation-1"
+    principal = repository._gateway_id("principal", "account-1", "conversation-1")
+    assert session["user_id"] == principal
+    assert thread["user_id"] == principal
 
 
 @pytest.mark.parametrize("collision", ["session", "thread", "matching"])
@@ -188,6 +314,7 @@ def test_route_provisioning_rejects_precreated_id_collisions(repository, collisi
     route_id = repository._gateway_id("route", "account-1", "conversation-1", "")
     session_id = repository._gateway_id("session", route_id)
     thread_id = repository._gateway_id("thread", route_id)
+    principal = repository._gateway_id("principal", "account-1", "conversation-1")
     if collision == "session":
         repository.control_plane.create_session(
             session_id=session_id, channel="attacker", user_id="attacker"
@@ -196,13 +323,13 @@ def test_route_provisioning_rejects_precreated_id_collisions(repository, collisi
         repository.control_plane.create_session(
             session_id=session_id,
             channel="gateway",
-            user_id="gateway:account-1:conversation-1",
+            user_id=principal,
             metadata={"route_id": route_id},
         )
         repository.control_plane.create_runtime_thread(
             session_id=session_id,
             thread_id=thread_id,
-            user_id="gateway:account-1:conversation-1",
+            user_id=principal,
             metadata={"route_id": route_id},
         )
     else:

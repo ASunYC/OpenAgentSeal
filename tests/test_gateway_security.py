@@ -123,6 +123,33 @@ def ingress_limiter(**overrides):
     return HierarchicalIngressLimiter(rules, now=lambda: NOW)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("requests", True),
+        ("requests", 1.5),
+        ("requests", float("nan")),
+        ("requests", float("inf")),
+        ("requests", 1_000_001),
+        ("concurrency", False),
+        ("concurrency", 2.5),
+        ("concurrency", float("nan")),
+        ("concurrency", float("inf")),
+        ("concurrency", 100_001),
+        ("window", True),
+        ("window", 1.5),
+        ("window", float("nan")),
+        ("window", float("inf")),
+        ("window", timedelta(days=2)),
+    ],
+)
+def test_limit_rules_reject_non_integer_non_finite_and_unbounded_values(field, value):
+    values = {"requests": 10, "window": timedelta(minutes=1), "concurrency": 10}
+    values[field] = value
+    with pytest.raises(ValueError):
+        LimitRule(**values)
+
+
 @pytest.mark.parametrize("dimension", ["global", "ip", "adapter", "account"])
 def test_each_request_limit_rejects_before_payload_parsing(dimension):
     limiter = ingress_limiter(**{dimension: LimitRule(1, timedelta(minutes=1), 10)})

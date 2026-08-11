@@ -133,3 +133,63 @@ contracts: nonce claim and quota reservation must be atomic across workers; atta
 streams must enforce the passed absolute deadline; attachment `put_batch` must be
 exclusive and all-or-nothing; outbound clients must connect to and verify the pinned peer
 IP. Those integrations are intentionally outside this channel-neutral core task.
+
+## Fix round 1/5: unambiguous identities and strict contracts/limits
+
+Status: DONE.
+
+### Findings addressed
+
+- Replaced delimiter-based route/session/thread IDs and shared principals with UUIDv5 over
+  canonical JSON arrays, so delimiter and control characters cannot alias distinct tuples.
+  Added collision regressions for both durable IDs and shared conversation principals.
+- Added an atomic compatibility migration for already-persisted shared routes using the
+  legacy principal. Migration requires exact session/thread route ownership metadata and
+  updates both principals inside the existing `BEGIN IMMEDIATE` transaction; forged or
+  partially bound records still fail closed.
+- Restricted contract metadata/attachments to recursively immutable JSON-like values:
+  exact string keys, finite scalar values, immutable tuples/mapping proxies, and copied
+  `bytearray` values. `None`, custom mutable objects, sets, non-string/string-subclass keys,
+  and invalid attachment containers reject at construction.
+- Enforced exact booleans for channel capability and trigger fields, and exact positive
+  non-boolean integers for message limits.
+- Enforced bounded exact positive non-boolean integers for request/concurrency limits and
+  a bounded positive `timedelta` window; floats, booleans, NaN, infinity, and excessive
+  values reject before limiter state can be created.
+
+### RED evidence
+
+- Identity/contract/limit regression selection: 23 failed, 2 passed before implementation.
+- Exact-string-key regression: 1 failed, 7 passed before tightening key type validation.
+- Legacy shared-principal compatibility regression: 1 failed before adding the atomic
+  ownership-checked migration.
+- Earlier Python-review HIGH findings were independently reproduced RED: forged ZIP
+  declarations exceeded the actual decompression budget, and failure of a later attachment
+  left earlier writes committed. They remain fixed by bounded actual decompression and the
+  exclusive all-or-nothing `put_batch` contract, respectively.
+
+### GREEN and compatibility evidence
+
+- `pytest tests/test_gateway_core.py tests/test_gateway_security.py -q --cov=open_agent.gateway --cov-report=term-missing`: 102 passed; gateway coverage 90%.
+- Tasks 1-3 compatibility union (`test_durable_runtime_models.py`,
+  `test_durable_runtime_repository.py`, `test_reliable_delivery.py`, `test_goal_mode.py`,
+  `test_autonomics.py`, `test_agent_profiles.py`): 126 passed, 1 third-party deprecation
+  warning.
+- `python -m compileall -q open_agent/gateway open_agent/durable_runtime/repository.py`:
+  passed.
+- `git diff --check`: passed.
+
+### Targeted re-review
+
+Code and Python reviewers re-reviewed the current worktree after the compatibility fix.
+Both reported no remaining HIGH/CRITICAL findings; the Python reviewer confirmed the
+forged-ZIP and multi-attachment rollback fixes are present in the reviewed version.
+
+### Fix commit
+
+`fix: harden gateway identity and contracts` (this fix commit)
+
+### Remaining concerns
+
+Production integration contracts remain as above. Repository file-size refactoring is
+ledger-deferred by the formal review and intentionally not included in this fix round.
