@@ -397,7 +397,15 @@ def test_blocked_resume_requires_explicit_operator_reset(runtime):
         conn.execute("UPDATE goals SET status='blocked', transient_failure_count=3 WHERE goal_id=?", (first.goal_id,))
     with pytest.raises(Exception):
         repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="try")
-    resumed = repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="operator", operator_decision="reset_failures")
+    repo.issue_goal_operator_approval(
+        first.goal_id, approval_id="blocked-approval", principal_id="default",
+        decision="reset_failures", now=NOW,
+    )
+    resumed = repo.transition_goal(
+        first.goal_id, expected_version=0, action="resume", now=NOW, reason="operator",
+        operator_decision="reset_failures", operator_principal="default",
+        approval_id="blocked-approval",
+    )
     assert resumed["transient_failure_count"] == 0
 
 
@@ -408,7 +416,15 @@ def test_budget_resume_requires_atomic_budget_increase(runtime):
         conn.execute("UPDATE goals SET status='paused', consumed_tokens=10, metadata=? WHERE goal_id=?", ('{"pause_kind":"budget"}', first.goal_id))
     with pytest.raises(Exception):
         repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="try")
-    resumed = repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="operator", operator_decision="increase_budget", budget_updates={"max_tokens": 20})
+    repo.issue_goal_operator_approval(
+        first.goal_id, approval_id="budget-approval", principal_id="default",
+        decision="increase_budget", now=NOW,
+    )
+    resumed = repo.transition_goal(
+        first.goal_id, expected_version=0, action="resume", now=NOW, reason="operator",
+        operator_decision="increase_budget", operator_principal="default",
+        approval_id="budget-approval", budget_updates={"max_tokens": 20},
+    )
     assert resumed["max_tokens"] == 20
 
 
@@ -567,6 +583,10 @@ async def test_malformed_slow_judge_settles_with_latest_renewed_claim(runtime):
 @pytest.mark.asyncio
 async def test_channel_goal_uses_channel_destination_payload(runtime):
     cp, repo = runtime
+    cp.create_session(
+        "s", channel="telegram", user_id="default",
+        metadata={"account_id": "account-1", "conversation_id": "conversation-1"},
+    )
     first = repo.create_goal_with_first_iteration(
         session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW,
         destination="channel:account-1",
@@ -650,6 +670,10 @@ async def test_non_main_goal_uses_scoped_parent_profile_and_real_local_delivery(
     cp, repo = runtime
     manager = ChatManager(storage_dir=tmp_path / "profile-a")
     await manager.create_chat(session_id="s")
+    cp.create_session(
+        "s", channel="web", user_id="default",
+        metadata={"profile_id": "profile-a", "parent_profile_id": "profile-a"},
+    )
     monkeypatch.setattr("open_agent.durable_runtime.delivery.get_chat_manager", lambda profile: manager if profile == "profile-a" else None)
     first = repo.create_goal_with_first_iteration(
         session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW,
@@ -736,6 +760,13 @@ def test_guidance_enforces_atomic_pending_quota_and_bounded_pages(runtime):
     assert cp._get_conn().execute(
         "SELECT COUNT(*) FROM goal_guidance WHERE goal_id=?", (first.goal_id,)
     ).fetchone()[0] == 100
+    second = repo.create_goal_with_first_iteration(
+        session_id="s2", goal_text="Ship", configuration=config().to_record(), now=NOW
+    )
+    for _ in range(16):
+        repo.append_goal_guidance(second.goal_id, "x" * 4096, now=NOW)
+    with pytest.raises(ValueError):
+        repo.append_goal_guidance(second.goal_id, "x", now=NOW)
 
 
 @pytest.mark.asyncio
@@ -752,6 +783,52 @@ async def test_authoritative_agent_output_rejects_oversized_or_malformed_usage(r
         repo, runner, FakeJudge([]), owner_id="w", clock=lambda: NOW + timedelta(seconds=1)
     ).run_iteration(first.goal_id)
     assert result.state == "retry_wait"
+    malformed = repo.create_goal_with_first_iteration(
+        session_id="s2", goal_text="Ship", configuration=config().to_record(), now=NOW
+    )
+    result = await GoalRunner(
+        repo,
+        FakeRunner([AgentEvent(event="complete", session_id="s2", content="x",
+                               result={"usage": {"total_tokens": True}})]),
+        FakeJudge([]), owner_id="w2", clock=lambda: NOW + timedelta(seconds=1),
+    ).run_iteration(malformed.goal_id)
+    assert result.state == "retry_wait"
+
+
+@pytest.mark.asyncio
+async def test_goal_delivery_rechecks_profile_acl_after_obligation_creation(runtime, tmp_path, monkeypatch):
+    from open_agent.app.runner.manager import ChatManager
+    from open_agent.durable_runtime.delivery import LocalSessionDestination
+
+    cp, repo = runtime
+    manager = ChatManager(storage_dir=tmp_path / "profile-a")
+    await manager.create_chat(session_id="s")
+    monkeypatch.setattr("open_agent.durable_runtime.delivery.get_chat_manager", lambda _: manager)
+    cp.create_session(
+        "s", channel="web", user_id="user-a",
+        metadata={"profile_id": "profile-a", "parent_profile_id": "profile-a"},
+    )
+    first = repo.create_goal_with_first_iteration(
+        session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW,
+        metadata={"profile_id": "profile-a", "parent_profile_id": "profile-a"},
+    )
+    await GoalRunner(
+        repo, FakeRunner([AgentEvent(event="complete", session_id="s", content="done",
+                                    result={"usage": {"total_tokens": 1}})]),
+        FakeJudge([JudgeResult(True, 1, "done", "", criterion_evidence=satisfied())]),
+        owner_id="g", clock=lambda: NOW + timedelta(seconds=1),
+    ).run_iteration(first.goal_id)
+    cp.create_session(
+        "s", channel="web", user_id="user-b",
+        metadata={"profile_id": "profile-b", "parent_profile_id": "profile-b"},
+    )
+    worker = DeliveryWorker(
+        repo, {"local_session": LocalSessionDestination(repo, clock=lambda: NOW + timedelta(seconds=2))},
+        owner_id="d", clock=lambda: NOW + timedelta(seconds=2),
+    )
+    await worker.run_once(NOW + timedelta(seconds=2))
+    assert repo.list_outbox()[0].state == "dead_letter"
+    assert manager.message_repo.list_messages("s") == []
 
 
 @pytest.mark.asyncio
@@ -774,3 +851,57 @@ async def test_delivery_worker_does_not_persist_exception_secrets(runtime):
     stored = repo.get_outbox("secret-error")
     assert "top-secret-value" not in (stored.last_error or "")
     assert stored.last_error == "delivery_error"
+
+
+def test_goal_authority_requires_opaque_capability_and_tenant_owner(tmp_path):
+    cp = ControlPlane(tmp_path)
+    authority = object()
+    operator_authority = object()
+    repo = DurableRuntimeRepository(
+        cp, goal_authority_capability=authority,
+        operator_authority_capability=operator_authority,
+    )
+    cp.create_session("victim", user_id="victim-user", metadata={"tenant_id": "tenant-a"})
+    with pytest.raises(PermissionError):
+        repo.mint_goal_principal(
+            actor_id="attacker", tenant_id="tenant-a", capability=object()
+        )
+    attacker = repo.mint_goal_principal(
+        actor_id="attacker", tenant_id="tenant-a", capability=authority
+    )
+    with pytest.raises(PermissionError):
+        repo.create_goal_with_first_iteration(
+            session_id="victim", goal_text="Ship", configuration=config().to_record(),
+            now=NOW, principal=attacker,
+        )
+    assert cp.list_goals() == []
+
+
+def test_terminal_validation_precedes_any_control_plane_write(runtime):
+    cp, _ = runtime
+    cp.create_runtime_thread(session_id="s", thread_id="thread")
+    cp.start_runtime_turn("thread", "x", turn_id="turn")
+    before = cp.get_runtime_turn("turn")
+    with pytest.raises(ValueError):
+        cp.complete_runtime_turn_with_event(
+            thread_id="thread", turn_id="turn", session_id="s", event_type="complete",
+            payload={"event": "complete", "content": "x" * 65_537}, status="completed",
+            result={"content": "x" * 65_537, "usage": {"total_tokens": 1}},
+        )
+    assert cp.get_runtime_turn("turn") == before
+    assert cp.list_runtime_events("thread") == []
+
+
+def test_transition_reason_byte_limit_has_zero_residual_writes(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(
+        session_id="reason", goal_text="Ship", configuration=config().to_record(), now=NOW
+    )
+    before_messages = cp.list_messages("reason")
+    with pytest.raises(ValueError):
+        repo.transition_goal(
+            first.goal_id, expected_version=0, action="pause", now=NOW,
+            reason="x" * 4097,
+        )
+    assert cp.get_goal(first.goal_id)["runtime_version"] == 0
+    assert cp.list_messages("reason") == before_messages
