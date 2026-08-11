@@ -605,3 +605,63 @@ async def test_slow_none_judge_settles_with_latest_renewed_claim(runtime):
         NoneJudge(), owner_id="w", clock=clock, lease_duration=timedelta(seconds=1),
     ).run_iteration(first.goal_id)
     assert result.state == "retry_wait" and repo.get_goal_iteration(first.iteration_id).state == "retry_wait"
+
+
+def test_destination_and_channel_account_are_bounded_before_write(runtime):
+    cp, repo = runtime
+    for destination, metadata in (
+        ("channel:" + "a" * 129, {"conversation_id": "c"}),
+        ("channel:a" + "x" * 300, {"conversation_id": "c"}),
+    ):
+        with pytest.raises(ValueError):
+            repo.create_goal_with_first_iteration(
+                session_id="s", goal_text="Ship", configuration=config().to_record(),
+                now=NOW, destination=destination, metadata=metadata,
+            )
+    assert cp.get_session("s") is None and cp.list_goals() == []
+
+
+def test_judge_from_json_requires_exact_typed_object():
+    valid = {"done": False, "confidence": 0.5, "reason": "more", "next_action": "next", "criterion_evidence": {}}
+    assert JudgeResult.from_json(valid).reason == "more"
+    for invalid in (
+        [], {**valid, "extra": 1}, {key: value for key, value in valid.items() if key != "reason"},
+        {**valid, "reason": 7}, {**valid, "criterion_evidence": []},
+    ):
+        with pytest.raises(ValueError):
+            JudgeResult.from_json(invalid)
+
+
+def test_goal_acceptance_rejects_string_coercion_and_bounds():
+    with pytest.raises(ValueError):
+        GoalAcceptance(criteria="not-a-sequence-of-criteria")
+    with pytest.raises(ValueError):
+        GoalAcceptance(criteria=(123,))
+    with pytest.raises(ValueError):
+        GoalAcceptance(criteria=("x" * 4097,))
+    with pytest.raises(ValueError):
+        GoalAcceptance(criteria=tuple(str(index) for index in range(101)))
+
+
+@pytest.mark.asyncio
+async def test_non_main_goal_uses_scoped_parent_profile_and_real_local_delivery(runtime, tmp_path, monkeypatch):
+    from open_agent.app.runner.manager import ChatManager
+    from open_agent.durable_runtime.delivery import LocalSessionDestination
+    cp, repo = runtime
+    manager = ChatManager(storage_dir=tmp_path / "profile-a")
+    await manager.create_chat(session_id="s")
+    monkeypatch.setattr("open_agent.durable_runtime.delivery.get_chat_manager", lambda profile: manager if profile == "profile-a" else None)
+    first = repo.create_goal_with_first_iteration(
+        session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW,
+        metadata={"profile_id": "profile-a", "parent_profile_id": "profile-a"},
+    )
+    await GoalRunner(
+        repo, FakeRunner([AgentEvent(event="complete", session_id="s", content="done", result={"usage": {"total_tokens": 1}})]),
+        FakeJudge([JudgeResult(True, 1, "done", "", criterion_evidence=satisfied())]),
+        owner_id="g", clock=lambda: NOW + timedelta(seconds=1),
+    ).run_iteration(first.goal_id)
+    destination = LocalSessionDestination(repo, clock=lambda: NOW + timedelta(seconds=2))
+    worker = DeliveryWorker(repo, {"local_session": destination}, owner_id="d", clock=lambda: NOW + timedelta(seconds=2))
+    await worker.run_once(NOW + timedelta(seconds=2))
+    assert repo.list_outbox()[0].state == "acknowledged"
+    assert len(manager.message_repo.list_messages("s")) == 1
