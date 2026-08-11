@@ -43,6 +43,7 @@ output/
 .codex-*.log
 .codex-run/
 .codegraph/
+.worktrees/
 
 # Workspace cache (binary doc extraction)
 .workspace/cache/
