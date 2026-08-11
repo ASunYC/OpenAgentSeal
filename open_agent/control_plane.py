@@ -50,6 +50,7 @@ class ControlPlane:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA secure_delete=ON")
             self._local.conn = conn
             with self._connections_lock:
                 self._connections.add(conn)
@@ -324,6 +325,7 @@ class ControlPlane:
                 claim_expires_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                retained_at TEXT,
                 UNIQUE(account_id, event_key)
             );
 
@@ -342,6 +344,7 @@ class ControlPlane:
                 claim_expires_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                retained_at TEXT,
                 UNIQUE(destination, idempotency_key)
             );
 
@@ -395,6 +398,31 @@ class ControlPlane:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS runtime_retention_tombstones (
+                entity_kind TEXT NOT NULL,
+                scope_digest TEXT NOT NULL,
+                idempotency_digest TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                terminal_state TEXT NOT NULL,
+                retained_at TEXT NOT NULL,
+                PRIMARY KEY(entity_kind, scope_digest, idempotency_digest)
+            );
+
+            CREATE TABLE IF NOT EXISTS retention_key_registry (
+                key_id TEXT PRIMARY KEY,
+                first_used_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS retention_attachment_queue (
+                queue_id TEXT PRIMARY KEY,
+                storage_path TEXT NOT NULL,
+                queued_at TEXT NOT NULL,
+                attempt INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL,
+                last_error TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_inbox_state_due
                 ON inbox_events(state, next_attempt_at, created_at);
             CREATE INDEX IF NOT EXISTS idx_outbox_state_due
@@ -405,6 +433,8 @@ class ControlPlane:
                 ON goal_iterations(goal_id, sequence);
             CREATE INDEX IF NOT EXISTS idx_runtime_audit_entity_created
                 ON runtime_audit_events(entity_kind, entity_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_audit_retention
+                ON runtime_audit_events(created_at, audit_id);
             """
         )
 
@@ -437,6 +467,30 @@ class ControlPlane:
             self._ensure_column(conn, "goals", definition)
         for definition in scheduler_columns:
             self._ensure_column(conn, "scheduler_jobs", definition)
+        self._ensure_column(conn, "inbox_events", "retained_at TEXT")
+        self._ensure_column(conn, "outbox_obligations", "retained_at TEXT")
+        self._ensure_column(conn, "runtime_retention_tombstones", "key_id TEXT")
+        self._ensure_column(conn, "retention_attachment_queue", "next_attempt_at TEXT")
+        conn.execute(
+            """UPDATE retention_attachment_queue SET next_attempt_at = queued_at
+               WHERE next_attempt_at IS NULL"""
+        )
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_inbox_retention_due
+                ON inbox_events(retained_at, updated_at, event_id)
+                WHERE state IN ('succeeded', 'dead_letter');
+            CREATE INDEX IF NOT EXISTS idx_outbox_retention_due
+                ON outbox_obligations(
+                    retained_at, updated_at, obligation_id
+                )
+                WHERE state IN ('acknowledged', 'dead_letter', 'delivery_unknown');
+            CREATE INDEX IF NOT EXISTS idx_attachment_retention_due
+                ON retention_attachment_queue(next_attempt_at, queue_id);
+            CREATE INDEX IF NOT EXISTS idx_retention_tombstone_key_id
+                ON runtime_retention_tombstones(key_id);
+            """
+        )
         self._ensure_column(conn, "runtime_turns", "source_event_key TEXT")
         conn.execute(
             """

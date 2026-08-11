@@ -106,6 +106,44 @@ def test_legacy_column_migration_tolerates_concurrent_startup(tmp_path):
     assert errors == []
 
 
+def test_retention_indexes_are_created_after_legacy_columns(tmp_path):
+    conn = sqlite3.connect(tmp_path / "runtime.db")
+    conn.executescript(
+        """
+        CREATE TABLE inbox_events (
+            event_id TEXT PRIMARY KEY, event_key TEXT NOT NULL, account_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL,
+            attempt INTEGER NOT NULL, next_attempt_at TEXT, last_error TEXT,
+            claim_owner TEXT, claim_generation INTEGER NOT NULL, claim_expires_at TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(account_id, event_key)
+        );
+        CREATE TABLE outbox_obligations (
+            obligation_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL,
+            destination TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL,
+            attempt INTEGER NOT NULL, next_attempt_at TEXT, last_error TEXT,
+            acknowledgement TEXT, claim_owner TEXT, claim_generation INTEGER NOT NULL,
+            claim_expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(destination, idempotency_key)
+        );
+        """
+    )
+    conn.close()
+
+    control_plane = ControlPlane(tmp_path)
+    try:
+        migrated = control_plane._get_conn()
+        assert "retained_at" in {
+            row[1] for row in migrated.execute("PRAGMA table_info(inbox_events)")
+        }
+        indexes = {
+            row[1] for row in migrated.execute("PRAGMA index_list(inbox_events)")
+        }
+        assert "idx_inbox_retention_due" in indexes
+    finally:
+        control_plane.close()
+
+
 def test_enqueue_inbox_enforces_account_scoped_event_key(repository):
     _, repo = repository
     first = InboxEvent("event-1", "platform-42", "account-a", "chat-1", {"nested": [1, 2]})

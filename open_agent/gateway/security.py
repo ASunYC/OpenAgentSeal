@@ -440,6 +440,8 @@ class AttachmentPolicy:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.max_count > 64:
+            raise ValueError("max_count must not exceed the retention safety bound of 64")
         for value, name in (
             (self.max_compression_ratio, "max_compression_ratio"),
             (self.max_stream_seconds, "max_stream_seconds"),

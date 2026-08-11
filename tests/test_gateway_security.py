@@ -639,6 +639,7 @@ def test_expired_rate_limit_keys_are_pruned():
     "change",
     [
         {"max_count": 0},
+        {"max_count": 65},
         {"max_aggregate_bytes": -1},
         {"max_decompressed_bytes": 0},
         {"max_compression_ratio": float("nan")},

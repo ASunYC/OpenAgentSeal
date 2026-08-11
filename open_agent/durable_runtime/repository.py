@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import isfinite
 from typing import Any, Callable, Iterable, Mapping, TYPE_CHECKING
 
@@ -71,8 +73,36 @@ def _claim_from_row(row: sqlite3.Row) -> ClaimToken | None:
 class DurableRuntimeRepository:
     """The sole transactional state boundary for durable-runtime workers."""
 
-    def __init__(self, control_plane: ControlPlane):
+    def __init__(
+        self,
+        control_plane: ControlPlane,
+        *,
+        retention_hmac_key: bytes | None = None,
+        previous_retention_hmac_keys: Iterable[bytes] = (),
+    ):
+        retention_keys = (
+            (() if retention_hmac_key is None else (retention_hmac_key,))
+            + tuple(previous_retention_hmac_keys)
+        )
+        if any(not isinstance(key, bytes) or len(key) < 32 for key in retention_keys):
+            raise ValueError("retention HMAC keys must contain at least 32 bytes")
+        if len(retention_keys) > 8:
+            raise ValueError("at most 8 retention HMAC keys may be active")
         self.control_plane = control_plane
+        self._retention_hmac_keys = retention_keys
+        stored_key_ids = {
+            row[0]
+            for row in self._conn.execute(
+                "SELECT key_id FROM retention_key_registry LIMIT 9"
+            ).fetchall()
+        }
+        configured_key_ids = {
+            self._retention_key_id(key) for key in self._retention_hmac_keys
+        }
+        if not stored_key_ids <= configured_key_ids:
+            raise StateConflictError(
+                "retention tombstones require unavailable historical HMAC keys"
+            )
 
     def upsert_channel_account(
         self,
@@ -130,6 +160,42 @@ class DurableRuntimeRepository:
         if row is None:
             return None
         return self._channel_account(row)
+
+    def migrate_channel_account_credential(
+        self,
+        *,
+        account_id: str,
+        expected_credential: str,
+        credential_ref: str,
+        store_secret: Callable[[str], None],
+        now: datetime,
+    ) -> str | None:
+        """Serialize backend publication with the SQLite reference CAS."""
+        for value, name in (
+            (account_id, "account_id"),
+            (expected_credential, "expected_credential"),
+            (credential_ref, "credential_ref"),
+        ):
+            _require_identifier(value, name)
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT credential_ref FROM channel_accounts WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = row["credential_ref"]
+            if current != expected_credential:
+                return current
+            store_secret(expected_credential)
+            conn.execute(
+                """UPDATE channel_accounts SET credential_ref = ?, updated_at = ?
+                   WHERE account_id = ?""",
+                (credential_ref, _iso(now), account_id),
+            )
+        return credential_ref
 
     def upsert_channel_route(
         self,
@@ -410,6 +476,17 @@ class DurableRuntimeRepository:
             raise ValueError("new inbox events must be pending and unclaimed")
         conn = self._conn
         with conn:
+            tombstone = self._find_retention_tombstone(
+                conn, "inbox", event.account_id, event.event_key
+            )
+            if tombstone is not None:
+                row = conn.execute(
+                    "SELECT * FROM inbox_events WHERE event_id = ?",
+                    (tombstone["record_id"],),
+                ).fetchone()
+                if row is None:
+                    raise StateConflictError("inbox retention tombstone is orphaned")
+                return self._inbox(row)
             conn.execute(
                 """
                 INSERT INTO inbox_events (
@@ -561,6 +638,17 @@ class DurableRuntimeRepository:
             raise ValueError("new outbox obligations must be pending and unclaimed")
         conn = self._conn
         with conn:
+            tombstone = self._find_retention_tombstone(
+                conn, "outbox", obligation.destination, obligation.idempotency_key
+            )
+            if tombstone is not None:
+                row = conn.execute(
+                    "SELECT * FROM outbox_obligations WHERE obligation_id = ?",
+                    (tombstone["record_id"],),
+                ).fetchone()
+                if row is None:
+                    raise StateConflictError("outbox retention tombstone is orphaned")
+                return self._outbox(row)
             conn.execute(
                 """
                 INSERT INTO outbox_obligations (
@@ -671,45 +759,52 @@ class DurableRuntimeRepository:
                     _json(metadata),
                 ),
             )
-            conn.execute(
-                """
-                INSERT INTO outbox_obligations (
-                    obligation_id, idempotency_key, destination, payload, state,
-                    attempt, next_attempt_at, last_error, acknowledgement,
-                    claim_owner, claim_generation, claim_expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(destination, idempotency_key) DO NOTHING
-                """,
-                (
-                    obligation.obligation_id,
-                    obligation.idempotency_key,
-                    obligation.destination,
-                    _json(obligation.payload),
-                    obligation.state,
-                    obligation.attempt,
-                    None,
-                    obligation.last_error,
-                    None,
-                    None,
-                    0,
-                    None,
-                    _iso(obligation.created_at),
-                    _iso(obligation.updated_at),
-                ),
+            tombstone = self._find_retention_tombstone(
+                conn, "outbox", obligation.destination, obligation.idempotency_key
             )
-            row = conn.execute(
-                """
-                SELECT * FROM outbox_obligations
-                WHERE destination = ? AND idempotency_key = ?
-                """,
-                (obligation.destination, obligation.idempotency_key),
-            ).fetchone()
-            if (
+            if tombstone is None:
+                conn.execute(
+                    """
+                    INSERT INTO outbox_obligations (
+                        obligation_id, idempotency_key, destination, payload, state,
+                        attempt, next_attempt_at, last_error, acknowledgement,
+                        claim_owner, claim_generation, claim_expires_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(destination, idempotency_key) DO NOTHING
+                    """,
+                    (
+                        obligation.obligation_id,
+                        obligation.idempotency_key,
+                        obligation.destination,
+                        _json(obligation.payload),
+                        obligation.state,
+                        obligation.attempt,
+                        None,
+                        obligation.last_error,
+                        None,
+                        None,
+                        0,
+                        None,
+                        _iso(obligation.created_at),
+                        _iso(obligation.updated_at),
+                    ),
+                )
+                row = conn.execute(
+                    """SELECT * FROM outbox_obligations
+                       WHERE destination = ? AND idempotency_key = ?""",
+                    (obligation.destination, obligation.idempotency_key),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM outbox_obligations WHERE obligation_id = ?",
+                    (tombstone["record_id"],),
+                ).fetchone()
+            if row is None or (tombstone is None and (
                 row["obligation_id"] != obligation.obligation_id
                 or row["destination"] != obligation.destination
                 or row["idempotency_key"] != obligation.idempotency_key
                 or row["payload"] != _json(obligation.payload)
-            ):
+            )):
                 raise StateConflictError(
                     "agent task delivery identity belongs to another obligation"
                 )
@@ -804,6 +899,330 @@ class DurableRuntimeRepository:
             }
             for row in rows
         ]
+
+    def apply_retention_batch(
+        self,
+        *,
+        now: datetime,
+        inbox_before: datetime,
+        outbox_before: datetime,
+        audit_before: datetime,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Redact one bounded batch and append its compliance audit atomically."""
+        _require_limit(limit)
+        if not self._retention_hmac_keys:
+            raise StateConflictError("retention requires an externally managed HMAC key")
+        now_value = _iso(now)
+        inbox_cutoff = _iso(inbox_before)
+        outbox_cutoff = _iso(outbox_before)
+        audit_cutoff = _iso(audit_before)
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """INSERT INTO retention_key_registry (key_id, first_used_at)
+                   VALUES (?, ?) ON CONFLICT(key_id) DO NOTHING""",
+                (self._retention_key_id(self._retention_hmac_keys[0]), now_value),
+            )
+            inbox_rows = conn.execute(
+                """
+                SELECT event_id, payload, account_id, event_key, state FROM inbox_events
+                WHERE retained_at IS NULL AND updated_at <= ?
+                  AND state IN ('succeeded', 'dead_letter')
+                ORDER BY updated_at, event_id LIMIT ?
+                """,
+                (inbox_cutoff, limit),
+            ).fetchall()
+            remaining = limit - len(inbox_rows)
+            outbox_rows = conn.execute(
+                """
+                SELECT obligation_id, payload, destination, idempotency_key, state
+                FROM outbox_obligations
+                WHERE retained_at IS NULL AND updated_at <= ?
+                  AND state IN ('acknowledged', 'dead_letter', 'delivery_unknown')
+                ORDER BY updated_at, obligation_id LIMIT ?
+                """,
+                (outbox_cutoff, remaining),
+            ).fetchall()
+            remaining -= len(outbox_rows)
+            audit_rows = conn.execute(
+                """
+                SELECT audit_id FROM runtime_audit_events
+                WHERE created_at <= ?
+                ORDER BY created_at, audit_id LIMIT ?
+                """,
+                (audit_cutoff, remaining),
+            ).fetchall()
+
+            attachment_paths: list[str] = []
+            accepted_inbox: list[sqlite3.Row] = []
+            accepted_outbox: list[sqlite3.Row] = []
+            rejected_attachment_payloads = 0
+            attachment_queue_limit = min(1000, max(64, limit))
+            for entity_kind, row in (
+                *(("inbox", row) for row in inbox_rows),
+                *(("outbox", row) for row in outbox_rows),
+            ):
+                paths, overflow = self._attachment_paths(
+                    json.loads(row["payload"]), limit=64
+                )
+                if overflow:
+                    rejected_attachment_payloads += 1
+                if len(attachment_paths) + len(paths) > attachment_queue_limit:
+                    break
+                attachment_paths.extend(paths)
+                if entity_kind == "inbox":
+                    accepted_inbox.append(row)
+                else:
+                    accepted_outbox.append(row)
+            inbox_rows = accepted_inbox
+            outbox_rows = accepted_outbox
+            inbox_ids = [row["event_id"] for row in inbox_rows]
+            outbox_ids = [row["obligation_id"] for row in outbox_rows]
+            audit_ids = [row["audit_id"] for row in audit_rows]
+            attachment_paths = list(dict.fromkeys(attachment_paths))
+
+            for row in inbox_rows:
+                conn.execute(
+                    """INSERT INTO runtime_retention_tombstones (
+                           entity_kind, scope_digest, idempotency_digest, key_id,
+                           record_id, terminal_state, retained_at
+                       ) VALUES ('inbox', ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(entity_kind, scope_digest, idempotency_digest)
+                       DO NOTHING""",
+                    (
+                        self._retention_digest(row["account_id"]),
+                        self._retention_digest(row["event_key"]),
+                        self._retention_key_id(self._retention_hmac_keys[0]),
+                        row["event_id"],
+                        row["state"],
+                        now_value,
+                    ),
+                )
+            for row in outbox_rows:
+                conn.execute(
+                    """INSERT INTO runtime_retention_tombstones (
+                           entity_kind, scope_digest, idempotency_digest, key_id,
+                           record_id, terminal_state, retained_at
+                       ) VALUES ('outbox', ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(entity_kind, scope_digest, idempotency_digest)
+                       DO NOTHING""",
+                    (
+                        self._retention_digest(row["destination"]),
+                        self._retention_digest(row["idempotency_key"]),
+                        self._retention_key_id(self._retention_hmac_keys[0]),
+                        row["obligation_id"],
+                        row["state"],
+                        now_value,
+                    ),
+                )
+            for storage_path in attachment_paths:
+                conn.execute(
+                    """INSERT INTO retention_attachment_queue (
+                           queue_id, storage_path, queued_at, next_attempt_at
+                       ) VALUES (?, ?, ?, ?) ON CONFLICT(queue_id) DO NOTHING""",
+                    (
+                        self._retention_digest(storage_path),
+                        storage_path,
+                        now_value,
+                        now_value,
+                    ),
+                )
+
+            if inbox_ids:
+                conn.executemany(
+                    """UPDATE inbox_events
+                        SET event_key = ?, conversation_id = 'retained',
+                            payload = '{}', last_error = NULL,
+                            next_attempt_at = NULL, claim_owner = NULL,
+                            claim_expires_at = NULL, retained_at = ?
+                        WHERE event_id = ?""",
+                    ((f"retained:{event_id}", now_value, event_id) for event_id in inbox_ids),
+                )
+            if outbox_ids:
+                conn.executemany(
+                    """UPDATE outbox_obligations
+                        SET destination = ?, idempotency_key = ?, payload = '{}',
+                            last_error = NULL, acknowledgement = NULL,
+                            next_attempt_at = NULL, claim_owner = NULL,
+                            claim_expires_at = NULL, retained_at = ?
+                        WHERE obligation_id = ?""",
+                    (
+                        (f"retained:{obligation_id}", f"retained:{obligation_id}",
+                         now_value, obligation_id)
+                        for obligation_id in outbox_ids
+                    ),
+                )
+            if audit_ids:
+                placeholders = ",".join("?" for _ in audit_ids)
+                conn.execute(
+                    f"DELETE FROM runtime_audit_events WHERE audit_id IN ({placeholders})",
+                    audit_ids,
+                )
+
+            result = {
+                "inbox_redacted": len(inbox_ids),
+                "outbox_redacted": len(outbox_ids),
+                "audit_deleted": len(audit_ids),
+                "attachment_paths": (),
+            }
+            if inbox_ids or outbox_ids or audit_ids or rejected_attachment_payloads:
+                audit_payload = {
+                    "inbox_redacted": result["inbox_redacted"],
+                    "outbox_redacted": result["outbox_redacted"],
+                    "audit_deleted": result["audit_deleted"],
+                    "attachments_queued": len(attachment_paths),
+                    "attachment_payloads_rejected": rejected_attachment_payloads,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO runtime_audit_events (
+                        audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
+                    ) VALUES (?, 'retention', 'runtime', 'retention_batch',
+                              'retention-worker', ?, ?)
+                    """,
+                    (f"retention:{uuid.uuid4().hex}", _json(audit_payload), now_value),
+                )
+        pending = conn.execute(
+            """SELECT storage_path FROM retention_attachment_queue
+               WHERE next_attempt_at <= ?
+               ORDER BY next_attempt_at, queue_id LIMIT ?""",
+            (now_value, limit),
+        ).fetchall()
+        return {**result, "attachment_paths": tuple(row["storage_path"] for row in pending)}
+
+    def complete_retention_attachments(
+        self,
+        outcomes: Mapping[str, str],
+        *,
+        now: datetime,
+    ) -> None:
+        """Acknowledge safe deletion outcomes while retaining transient failures for retry."""
+        if not outcomes:
+            return
+        if len(outcomes) > 1000:
+            raise ValueError("attachment outcome batch exceeds 1000")
+        allowed = {"deleted", "missing", "rejected", "failed"}
+        if any(outcome not in allowed for outcome in outcomes.values()):
+            raise ValueError("unsupported attachment retention outcome")
+        now_value = _iso(now)
+        counts = {name: 0 for name in allowed}
+        with self._conn:
+            for storage_path, outcome in outcomes.items():
+                counts[outcome] += 1
+                queue_ids = tuple(
+                    self._retention_digest_with_key(storage_path, key)
+                    for key in self._retention_hmac_keys
+                )
+                if not queue_ids:
+                    raise StateConflictError("retention HMAC key is unavailable")
+                placeholders = ",".join("?" for _ in queue_ids)
+                if outcome == "failed":
+                    row = self._conn.execute(
+                        f"""SELECT MAX(attempt) FROM retention_attachment_queue
+                            WHERE queue_id IN ({placeholders})""",
+                        queue_ids,
+                    ).fetchone()
+                    attempt = int(row[0] or 0) + 1
+                    retry_at = _iso(now + timedelta(seconds=min(2**attempt, 3600)))
+                    self._conn.execute(
+                        f"""UPDATE retention_attachment_queue
+                           SET attempt = attempt + 1, last_error = 'delete_failed',
+                               next_attempt_at = ?
+                           WHERE queue_id IN ({placeholders})""",
+                        (retry_at, *queue_ids),
+                    )
+                else:
+                    self._conn.execute(
+                        f"""DELETE FROM retention_attachment_queue
+                            WHERE queue_id IN ({placeholders})""",
+                        queue_ids,
+                    )
+            self._conn.execute(
+                """INSERT INTO runtime_audit_events (
+                       audit_id, entity_kind, entity_id, action, actor_id, payload, created_at
+                   ) VALUES (?, 'retention', 'runtime', 'attachment_retention',
+                             'retention-worker', ?, ?)""",
+                (
+                    f"retention-attachments:{uuid.uuid4().hex}",
+                    _json({f"attachments_{key}": counts[key] for key in sorted(counts)}),
+                    now_value,
+                ),
+            )
+
+    def secure_checkpoint(self) -> None:
+        """Remove securely-deleted content from WAL before reporting retention complete."""
+        row = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row is None or row[0] != 0:
+            raise StateConflictError("secure WAL checkpoint is busy")
+
+    @staticmethod
+    def _attachment_paths(payload: Any, *, limit: int) -> tuple[list[str], bool]:
+        paths: list[str] = []
+        pending: list[Any] = [payload]
+        visited = 0
+        node_limit = max(100, limit * 20)
+        while pending:
+            visited += 1
+            if visited > node_limit:
+                return paths, True
+            value = pending.pop()
+            if isinstance(value, Mapping):
+                for key, nested in value.items():
+                    if key in {"storage_path", "attachment_path"} and isinstance(
+                        nested, str
+                    ):
+                        paths.append(nested)
+                        if len(paths) > limit:
+                            return paths[:limit], True
+                    else:
+                        pending.append(nested)
+            elif isinstance(value, (list, tuple)):
+                pending.extend(value)
+        return paths, False
+
+    @staticmethod
+    def _retention_digest_with_key(value: str, key: bytes) -> str:
+        return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _retention_key_id(key: bytes) -> str:
+        return hashlib.sha256(key).hexdigest()[:16]
+
+    def _retention_digest(self, value: str) -> str:
+        if not self._retention_hmac_keys:
+            raise StateConflictError("retention HMAC key is unavailable")
+        return self._retention_digest_with_key(value, self._retention_hmac_keys[0])
+
+    def _find_retention_tombstone(
+        self,
+        conn: sqlite3.Connection,
+        entity_kind: str,
+        scope: str,
+        idempotency_key: str,
+    ) -> sqlite3.Row | None:
+        if not self._retention_hmac_keys:
+            existing = conn.execute(
+                "SELECT 1 FROM runtime_retention_tombstones LIMIT 1"
+            ).fetchone()
+            if existing is not None:
+                raise StateConflictError("retention HMAC key is required to verify tombstones")
+            return None
+        for key in self._retention_hmac_keys:
+            row = conn.execute(
+                """SELECT record_id FROM runtime_retention_tombstones
+                   WHERE entity_kind = ? AND scope_digest = ?
+                     AND idempotency_digest = ?""",
+                (
+                    entity_kind,
+                    self._retention_digest_with_key(scope, key),
+                    self._retention_digest_with_key(idempotency_key, key),
+                ),
+            ).fetchone()
+            if row is not None:
+                return row
+        return None
 
     def manual_resend_outbox(
         self,
