@@ -106,6 +106,10 @@ try {
   assert.deepEqual(request, { enabled: false, note: 'preserve this draft', expected_version: 9 })
   assert.notEqual(request, draft)
   assert.deepEqual(draft, { enabled: false, note: 'preserve this draft' })
+
+  assert.equal(model.isCurrentSelection('goal-a', 'goal-a', 4, 4), true)
+  assert.equal(model.isCurrentSelection('goal-a', 'goal-b', 4, 4), false)
+  assert.equal(model.isCurrentSelection('goal-a', 'goal-a', 3, 4), false)
 } finally {
   await rm(tempDir, { recursive: true, force: true })
 }

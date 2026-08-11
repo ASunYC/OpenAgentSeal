@@ -90,6 +90,101 @@ def test_operational_routes_reject_anonymous_and_mobile_tokens(operational_app):
     assert "token" not in response.text.lower()
 
 
+def test_local_operational_session_bootstrap_and_rotation(operational_app):
+    app, _, _ = operational_app
+    remote = TestClient(
+        app, base_url="https://ops.example.test", client=("203.0.113.20", 51000)
+    )
+    headers = {"Origin": "https://ops.example.test", "Sec-Fetch-Site": "same-origin"}
+    assert remote.post(
+        "/api/operations/session/bootstrap", headers=headers, json={"mode": "cookie"}
+    ).status_code == 403
+
+    client = TestClient(
+        app, base_url="https://ops.example.test", client=("127.0.0.1", 51001)
+    )
+    assert client.post(
+        "/api/operations/session/bootstrap",
+        headers={"Origin": "https://evil.test", "Sec-Fetch-Site": "cross-site"},
+        json={"mode": "cookie"},
+    ).status_code == 403
+    bootstrapped = client.post(
+        "/api/operations/session/bootstrap", headers=headers, json={"mode": "cookie"}
+    )
+    assert bootstrapped.status_code == 200, bootstrapped.text
+    data = bootstrapped.json()["data"]
+    assert data["auth_mode"] == "cookie"
+    assert data["csrf_token"]
+    assert "access_token" not in data
+    assert "HttpOnly" in bootstrapped.headers["set-cookie"]
+    assert "Cache-Control" not in bootstrapped.text
+    assert client.get("/api/operations/channel-accounts").status_code == 200
+
+    rotated = client.post(
+        "/api/operations/session/reauthenticate",
+        headers={**headers, "X-CSRF-Token": data["csrf_token"]},
+        json={"user_presence_confirmed": True},
+    )
+    assert rotated.status_code == 200, rotated.text
+    next_csrf = rotated.json()["data"]["csrf_token"]
+    assert next_csrf and next_csrf != data["csrf_token"]
+    rejected = client.post(
+        "/api/operations/scheduler/jobs",
+        headers={**headers, "X-CSRF-Token": data["csrf_token"]},
+        json={
+            "job_id": "stale-csrf", "schedule": "0 9 * * *", "timezone": "UTC",
+            "prompt": "must not run",
+        },
+    )
+    assert rejected.status_code == 403
+
+
+def test_local_desktop_bootstrap_returns_memory_only_bearer(operational_app):
+    app, _, _ = operational_app
+    app.state.operational_auth = OperationalAuthStore(
+        signing_key=b"d" * 32,
+        trusted_origins=("http://tauri.localhost",),
+    )
+    client = TestClient(
+        app, base_url="http://tauri.localhost", client=("::1", 51002)
+    )
+    response = client.post(
+        "/api/operations/session/bootstrap",
+        headers={"Origin": "http://tauri.localhost", "Sec-Fetch-Site": "same-origin"},
+        json={"mode": "bearer"},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["auth_mode"] == "bearer"
+    assert data["access_token"]
+    assert data["csrf_token"] is None
+    assert "set-cookie" not in response.headers
+    assert client.get(
+        "/api/operations/channel-accounts",
+        headers={"Authorization": f"Bearer {data['access_token']}"},
+    ).status_code == 200
+
+
+def test_channel_account_views_include_exact_cas_version(operational_app):
+    app, auth, _ = operational_app
+    client = TestClient(app)
+    headers = _headers(auth)
+    created = client.post(
+        "/api/operations/channel-accounts", headers=headers,
+        json={"account_id": "versioned", "adapter_kind": "slack", "credential": "write-only"},
+    )
+    account_id = created.json()["data"]["account_id"]
+    assert created.json()["data"]["version"] == 0
+    changed = client.patch(
+        f"/api/operations/channel-accounts/{account_id}", headers=headers,
+        json={"enabled": False, "expected_version": 0},
+    )
+    assert changed.json()["data"]["version"] == 1
+    assert client.get(
+        f"/api/operations/channel-accounts/{account_id}", headers=headers
+    ).json()["data"]["version"] == 1
+
+
 def test_channel_accounts_are_tenant_scoped_and_secrets_are_opaque(operational_app):
     app, auth, _ = operational_app
     client = TestClient(app)
