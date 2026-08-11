@@ -78,6 +78,14 @@ class DurableRuntimeRepository:
     def _conn(self) -> sqlite3.Connection:
         return self.control_plane._get_conn()
 
+    def _list_rows(self, table: str, column: str, value: str | None, order: str, limit: int) -> list[sqlite3.Row]:
+        _require_limit(limit)
+        predicate = "" if value is None else f" WHERE {column} = ?"
+        params: list[Any] = [] if value is None else [value]
+        params.append(limit)
+        query = f"SELECT * FROM {table}{predicate} ORDER BY {order} LIMIT ?"
+        return self._conn.execute(query, params).fetchall()
+
     def enqueue_inbox(self, event: InboxEvent) -> InboxEvent:
         if event.state != "pending" or event.claim is not None:
             raise ValueError("new inbox events must be pending and unclaimed")
@@ -122,15 +130,7 @@ class DurableRuntimeRepository:
         return self._inbox(row) if row else None
 
     def list_inbox(self, state: str | None = None, limit: int = 100) -> list[InboxEvent]:
-        _require_limit(limit)
-        query = "SELECT * FROM inbox_events"
-        params: list[Any] = []
-        if state is not None:
-            query += " WHERE state = ?"
-            params.append(state)
-        query += " ORDER BY created_at, event_id LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        rows = self._list_rows("inbox_events", "state", state, "created_at, event_id", limit)
         return [self._inbox(row) for row in rows]
 
     def claim_inbox(
@@ -284,15 +284,7 @@ class DurableRuntimeRepository:
         return self._outbox(row) if row else None
 
     def list_outbox(self, state: str | None = None, limit: int = 100) -> list[OutboxObligation]:
-        _require_limit(limit)
-        query = "SELECT * FROM outbox_obligations"
-        params: list[Any] = []
-        if state is not None:
-            query += " WHERE state = ?"
-            params.append(state)
-        query += " ORDER BY created_at, obligation_id LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        rows = self._list_rows("outbox_obligations", "state", state, "created_at, obligation_id", limit)
         return [self._outbox(row) for row in rows]
 
     def claim_due_outbox(
@@ -432,26 +424,43 @@ class DurableRuntimeRepository:
         scheduled_value = _iso(scheduled_at)
         next_value = _iso(next_run_at)
         now_value = _iso(now)
+        scheduled_utc = scheduled_at.astimezone(timezone.utc)
+        next_utc = next_run_at.astimezone(timezone.utc)
+        now_utc = now.astimezone(timezone.utc)
+        if next_utc <= scheduled_utc:
+            raise ValueError("next_run_at must be after scheduled_at")
         run_id = run_id or f"{job_id}:{scheduled_value}"
         conn = self._conn
         with conn:
+            existing = conn.execute("SELECT * FROM scheduler_runs WHERE job_id = ? AND scheduled_at = ?", (job_id, scheduled_value)).fetchone()
+            if existing is not None:
+                return self._scheduler_run(existing)
+            job = conn.execute("SELECT status, next_run_at FROM scheduler_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if job is None or job["status"] != "active" or job["next_run_at"] is None:
+                return None
+            raw_cursor = job["next_run_at"]
+            try:
+                parseable_cursor = raw_cursor[:-1] + "+00:00" if raw_cursor.endswith("Z") else raw_cursor
+                stored_cursor = datetime.fromisoformat(parseable_cursor)
+                _require_aware(stored_cursor, "persisted scheduler cursor")
+            except (TypeError, ValueError) as exc:
+                raise StateConflictError(f"invalid scheduler cursor for job {job_id}") from exc
+            stored_utc = stored_cursor.astimezone(timezone.utc)
+            if stored_utc != scheduled_utc or stored_utc > now_utc:
+                return None
             advanced = conn.execute(
                 """
                 UPDATE scheduler_jobs
                 SET next_run_at = ?, last_run_at = ?, updated_at = ?,
                     runtime_version = runtime_version + 1
                 WHERE job_id = ? AND status = 'active'
-                  AND julianday(next_run_at) = julianday(?)
-                  AND julianday(next_run_at) <= julianday(?)
+                  AND next_run_at = ?
                 RETURNING job_id
                 """,
-                (next_value, scheduled_value, now_value, job_id, scheduled_value, now_value),
+                (next_value, scheduled_value, now_value, job_id, raw_cursor),
             ).fetchone()
             if advanced is None:
-                existing = conn.execute(
-                    "SELECT * FROM scheduler_runs WHERE job_id = ? AND scheduled_at = ?",
-                    (job_id, scheduled_value),
-                ).fetchone()
+                existing = conn.execute("SELECT * FROM scheduler_runs WHERE job_id = ? AND scheduled_at = ?", (job_id, scheduled_value)).fetchone()
                 return self._scheduler_run(existing) if existing else None
             conn.execute(
                 """
@@ -462,9 +471,7 @@ class DurableRuntimeRepository:
                 """,
                 (run_id, job_id, scheduled_value, now_value, now_value),
             )
-            row = conn.execute(
-                "SELECT * FROM scheduler_runs WHERE run_id = ?", (run_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM scheduler_runs WHERE run_id = ?", (run_id,)).fetchone()
         return self._scheduler_run(row)
 
     def get_scheduler_run(self, run_id: str) -> SchedulerRun | None:
@@ -474,15 +481,7 @@ class DurableRuntimeRepository:
         return self._scheduler_run(row) if row else None
 
     def list_scheduler_runs(self, job_id: str | None = None, limit: int = 100) -> list[SchedulerRun]:
-        _require_limit(limit)
-        query = "SELECT * FROM scheduler_runs"
-        params: list[Any] = []
-        if job_id is not None:
-            query += " WHERE job_id = ?"
-            params.append(job_id)
-        query += " ORDER BY scheduled_at, run_id LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        rows = self._list_rows("scheduler_runs", "job_id", job_id, "scheduled_at, run_id", limit)
         return [self._scheduler_run(row) for row in rows]
 
     def create_goal_iteration(self, iteration: GoalIteration) -> GoalIteration:
@@ -550,15 +549,7 @@ class DurableRuntimeRepository:
         return self._goal_iteration(row) if row else None
 
     def list_goal_iterations(self, goal_id: str | None = None, limit: int = 100) -> list[GoalIteration]:
-        _require_limit(limit)
-        query = "SELECT * FROM goal_iterations"
-        params: list[Any] = []
-        if goal_id is not None:
-            query += " WHERE goal_id = ?"
-            params.append(goal_id)
-        query += " ORDER BY goal_id, sequence LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        rows = self._list_rows("goal_iterations", "goal_id", goal_id, "goal_id, sequence", limit)
         return [self._goal_iteration(row) for row in rows]
 
     def complete_goal_iteration_and_continue(
@@ -579,10 +570,19 @@ class DurableRuntimeRepository:
         allowed_statuses = {"running", "runnable", "completed", "paused", "blocked", "failed", "cancelled"}
         if status not in allowed_statuses or continue_running != (status in {"running", "runnable"}):
             raise ValueError("goal_status must agree with continue_running")
-        increments = self._budget_increments(budget_delta)
+        judge_value = to_json_value(judge_result)
+        budget_value = to_json_value(budget_delta)
+        increments = self._budget_increments(budget_value)
         now_value = _iso(now)
         conn = self._conn
         with conn:
+            done = judge_value.get("done")
+            if not isinstance(done, bool):
+                raise ValueError("judge_result.done must be a boolean")
+            if (done and (continue_running or status != "completed")) or (
+                not done and status == "completed"
+            ):
+                raise ValueError("judge_result.done contradicts the requested goal transition")
             completed_row = conn.execute(
                 """
                 UPDATE goal_iterations
@@ -594,8 +594,8 @@ class DurableRuntimeRepository:
                 RETURNING *
                 """,
                 (
-                    _json(judge_result),
-                    _json(budget_delta),
+                    _json(judge_value),
+                    _json(budget_value),
                     now_value,
                     iteration_id,
                     token.owner_id,
@@ -613,7 +613,7 @@ class DurableRuntimeRepository:
             ).fetchone()
             if goal is None:
                 raise StateConflictError(f"missing goal: {completed_row['goal_id']}")
-            next_action = str(judge_result.get("next_action", "")) if continue_running else ""
+            next_action = str(judge_value.get("next_action", "")) if continue_running else ""
             updated = conn.execute(
                 """
                 UPDATE goals
@@ -629,7 +629,7 @@ class DurableRuntimeRepository:
                 (
                     status,
                     next_action,
-                    _json(judge_result),
+                    _json(judge_value),
                     increments["tokens"],
                     increments["estimated_cost"],
                     increments["active_seconds"],

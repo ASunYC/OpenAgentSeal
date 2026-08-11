@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -376,6 +379,132 @@ def test_scheduler_cas_compares_equivalent_aware_instants(repository):
     assert run is not None and run.run_id == "run-offset"
 
 
+def test_scheduler_cas_preserves_sub_millisecond_cursor_precision(repository):
+    control_plane, repo = repository
+    stored_due = NOW + timedelta(microseconds=100)
+    control_plane.create_scheduler_job(
+        "* * * * *", "run", job_id="job-precise", next_run_at=stored_due.isoformat()
+    )
+
+    run = repo.create_due_scheduler_run(
+        "job-precise",
+        NOW,
+        NOW + timedelta(hours=1),
+        run_id="run-wrong-instant",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert run is None
+    assert control_plane.list_scheduler_jobs()[0]["next_run_at"] == stored_due.isoformat()
+    assert repo.list_scheduler_runs("job-precise") == []
+
+
+@pytest.mark.parametrize("delta", [timedelta(0), -timedelta(microseconds=1)])
+def test_scheduler_rejects_non_forward_next_cursor(repository, delta):
+    control_plane, repo = repository
+    control_plane.create_scheduler_job(
+        "* * * * *", "run", job_id="job-stuck", next_run_at=NOW.isoformat()
+    )
+
+    with pytest.raises(ValueError, match="next_run_at"):
+        repo.create_due_scheduler_run(
+            "job-stuck", NOW, NOW + delta, run_id="run-stuck", now=NOW
+        )
+    assert control_plane.list_scheduler_jobs()[0]["next_run_at"] == NOW.isoformat()
+    assert repo.list_scheduler_runs("job-stuck") == []
+
+
+def test_scheduler_accepts_forward_progress_across_dst_fall_back(repository):
+    control_plane, repo = repository
+    new_york = ZoneInfo("America/New_York")
+    scheduled_at = datetime(2026, 11, 1, 1, 30, tzinfo=new_york, fold=0)
+    next_run_at = datetime(2026, 11, 1, 1, 30, tzinfo=new_york, fold=1)
+    control_plane.create_scheduler_job(
+        "30 1 * * *", "run", job_id="job-fold", next_run_at=scheduled_at.isoformat()
+    )
+
+    run = repo.create_due_scheduler_run(
+        "job-fold", scheduled_at, next_run_at, run_id="run-fold", now=next_run_at
+    )
+    assert run is not None and run.run_id == "run-fold"
+
+
+def test_scheduler_accepts_rfc3339_z_cursor(repository):
+    control_plane, repo = repository
+    z_cursor = NOW.isoformat().replace("+00:00", "Z")
+    control_plane.create_scheduler_job(
+        "* * * * *", "run", job_id="job-z", next_run_at=z_cursor
+    )
+
+    run = repo.create_due_scheduler_run(
+        "job-z", NOW, NOW + timedelta(minutes=1), run_id="run-z", now=NOW
+    )
+    assert run is not None and run.run_id == "run-z"
+
+
+def test_concurrent_scheduler_scanners_return_the_same_occurrence(repository):
+    control_plane, _ = repository
+    control_plane.create_scheduler_job(
+        "* * * * *", "run", job_id="job-race", next_run_at=NOW.isoformat()
+    )
+    barrier = threading.Barrier(2)
+
+    class SynchronizedConnection:
+        def __init__(self):
+            self.conn = sqlite3.connect(control_plane.db_path, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+
+        def execute(self, sql, params=()):
+            cursor = self.conn.execute(sql, params)
+            if "SELECT status, next_run_at FROM scheduler_jobs" in sql:
+                barrier.wait()
+            return cursor
+
+        def __enter__(self):
+            self.conn.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.conn.__exit__(*args)
+
+    class TestControlPlane:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def _get_conn(self):
+            return self.conn
+
+    connections = [SynchronizedConnection(), SynchronizedConnection()]
+    repos = [DurableRuntimeRepository(TestControlPlane(conn)) for conn in connections]
+    results: list[str | None] = []
+    errors: list[Exception] = []
+
+    def scan(index):
+        try:
+            run = repos[index].create_due_scheduler_run(
+                "job-race",
+                NOW,
+                NOW + timedelta(minutes=1),
+                run_id=f"run-{index}",
+                now=NOW,
+            )
+            results.append(run.run_id if run else None)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=scan, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for connection in connections:
+        connection.conn.close()
+
+    assert errors == []
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert len(DurableRuntimeRepository(control_plane).list_scheduler_runs("job-race")) == 1
+
+
 def test_goal_iteration_completion_hands_off_atomically(repository):
     control_plane, repo = repository
     control_plane.create_goal("session-1", "Ship it", goal_id="goal-1", status="running")
@@ -481,3 +610,107 @@ def test_goal_handoff_rejects_contradictory_status(repository, continue_running,
             now=NOW + timedelta(seconds=1),
         )
     assert repo.get_goal_iteration("iteration-1").state == "running"
+
+
+@pytest.mark.parametrize(
+    ("done", "continue_running"), [(True, True), (False, False), ("true", False)]
+)
+def test_goal_handoff_rejects_judge_done_contradictions(
+    repository, done, continue_running
+):
+    control_plane, repo = repository
+    control_plane.create_goal("session-1", "Judge safely", goal_id="goal-1", status="running")
+    repo.create_goal_iteration(GoalIteration("iteration-1", "goal-1", 1))
+    claimed = repo.claim_goal_iteration(
+        "iteration-1", "goal-worker", NOW, NOW + timedelta(seconds=30)
+    )
+    assert claimed is not None and claimed.claim is not None
+
+    with pytest.raises(ValueError, match="done"):
+        repo.complete_goal_iteration_and_continue(
+            "iteration-1",
+            claimed.claim,
+            judge_result={"done": done, "next_action": "continue"},
+            budget_delta={},
+            continue_running=continue_running,
+            now=NOW + timedelta(seconds=1),
+        )
+    assert control_plane.get_goal("goal-1")["status"] == "running"
+    assert repo.get_goal_iteration("iteration-1").state == "running"
+    assert len(repo.list_goal_iterations("goal-1")) == 1
+
+
+class FlippingJudge(Mapping[str, Any]):
+    def __getitem__(self, key):
+        return True if key == "done" else "continue"
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("done", "next_action"))
+
+    def __len__(self):
+        return 2
+
+    def get(self, key, default=None):
+        return False if key == "done" else super().get(key, default)
+
+
+class DivergentBudget(Mapping[str, int]):
+    def __getitem__(self, key):
+        if key == "tokens":
+            return 999
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("tokens",))
+
+    def __len__(self):
+        return 1
+
+    def get(self, key, default=None):
+        return 1 if key == "tokens" else default
+
+
+def test_goal_handoff_validates_one_judge_snapshot(repository):
+    control_plane, repo = repository
+    control_plane.create_goal("session-1", "Snapshot", goal_id="goal-1", status="running")
+    repo.create_goal_iteration(GoalIteration("iteration-1", "goal-1", 1))
+    claimed = repo.claim_goal_iteration(
+        "iteration-1", "goal-worker", NOW, NOW + timedelta(seconds=30)
+    )
+    assert claimed is not None and claimed.claim is not None
+
+    with pytest.raises(ValueError, match="done"):
+        repo.complete_goal_iteration_and_continue(
+            "iteration-1",
+            claimed.claim,
+            judge_result=FlippingJudge(),
+            budget_delta={},
+            continue_running=True,
+            now=NOW + timedelta(seconds=1),
+        )
+    assert repo.get_goal_iteration("iteration-1").state == "running"
+
+
+def test_goal_handoff_applies_and_persists_one_budget_snapshot(repository):
+    control_plane, repo = repository
+    control_plane.create_goal("session-1", "Budget", goal_id="goal-1", status="running")
+    repo.create_goal_iteration(GoalIteration("iteration-1", "goal-1", 1))
+    claimed = repo.claim_goal_iteration(
+        "iteration-1", "goal-worker", NOW, NOW + timedelta(seconds=30)
+    )
+    assert claimed is not None and claimed.claim is not None
+
+    repo.complete_goal_iteration_and_continue(
+        "iteration-1",
+        claimed.claim,
+        judge_result={"done": False, "next_action": "continue"},
+        budget_delta=DivergentBudget(),
+        continue_running=True,
+        now=NOW + timedelta(seconds=1),
+    )
+    goal = control_plane.get_goal("goal-1")
+    stored_delta = control_plane._get_conn().execute(
+        "SELECT budget_delta FROM goal_iterations WHERE iteration_id = 'iteration-1'"
+    ).fetchone()[0]
+    assert goal["consumed_tokens"] == 999
+    assert stored_delta == '{"tokens":999}'
