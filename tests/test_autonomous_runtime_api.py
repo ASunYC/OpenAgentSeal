@@ -33,6 +33,7 @@ def operational_app(tmp_path):
     auth = OperationalAuthStore(
         signing_key=b"a" * 32,
         trusted_origins=("https://ops.example.test",),
+        bootstrap_token="bootstrap-capability-" + "b" * 48,
     )
     app.state.operational_auth = auth
     app.state.operational_credentials = CredentialStore(MemoryCredentialBackend())
@@ -96,8 +97,10 @@ def test_local_operational_session_bootstrap_and_rotation(operational_app):
         app, base_url="https://ops.example.test", client=("203.0.113.20", 51000)
     )
     headers = {"Origin": "https://ops.example.test", "Sec-Fetch-Site": "same-origin"}
+    capability = "bootstrap-capability-" + "b" * 48
     assert remote.post(
-        "/api/operations/session/bootstrap", headers=headers, json={"mode": "cookie"}
+        "/api/operations/session/bootstrap", headers=headers,
+        json={"mode": "cookie", "capability": capability},
     ).status_code == 403
 
     client = TestClient(
@@ -106,10 +109,15 @@ def test_local_operational_session_bootstrap_and_rotation(operational_app):
     assert client.post(
         "/api/operations/session/bootstrap",
         headers={"Origin": "https://evil.test", "Sec-Fetch-Site": "cross-site"},
-        json={"mode": "cookie"},
+        json={"mode": "cookie", "capability": capability},
+    ).status_code == 403
+    assert client.post(
+        "/api/operations/session/bootstrap", headers=headers,
+        json={"mode": "cookie", "capability": "wrong-capability-" + "x" * 48},
     ).status_code == 403
     bootstrapped = client.post(
-        "/api/operations/session/bootstrap", headers=headers, json={"mode": "cookie"}
+        "/api/operations/session/bootstrap", headers=headers,
+        json={"mode": "cookie", "capability": capability},
     )
     assert bootstrapped.status_code == 200, bootstrapped.text
     data = bootstrapped.json()["data"]
@@ -119,6 +127,10 @@ def test_local_operational_session_bootstrap_and_rotation(operational_app):
     assert "HttpOnly" in bootstrapped.headers["set-cookie"]
     assert "Cache-Control" not in bootstrapped.text
     assert client.get("/api/operations/channel-accounts").status_code == 200
+    assert client.post(
+        "/api/operations/session/bootstrap", headers=headers,
+        json={"mode": "cookie", "capability": capability},
+    ).status_code == 403
 
     rotated = client.post(
         "/api/operations/session/reauthenticate",
@@ -144,6 +156,7 @@ def test_local_desktop_bootstrap_returns_memory_only_bearer(operational_app):
     app.state.operational_auth = OperationalAuthStore(
         signing_key=b"d" * 32,
         trusted_origins=("http://tauri.localhost",),
+        bootstrap_token="desktop-capability-" + "d" * 48,
     )
     client = TestClient(
         app, base_url="http://tauri.localhost", client=("::1", 51002)
@@ -151,7 +164,7 @@ def test_local_desktop_bootstrap_returns_memory_only_bearer(operational_app):
     response = client.post(
         "/api/operations/session/bootstrap",
         headers={"Origin": "http://tauri.localhost", "Sec-Fetch-Site": "same-origin"},
-        json={"mode": "bearer"},
+        json={"mode": "bearer", "capability": "desktop-capability-" + "d" * 48},
     )
     assert response.status_code == 200, response.text
     data = response.json()["data"]
