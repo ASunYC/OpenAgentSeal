@@ -8,7 +8,7 @@ from .base_http import AdapterAuthenticationError, HttpTransport, classify_respo
 
 class QQAdapter:
     kind="qq"
-    capabilities=ChannelCapabilities(supports_replies=True,max_message_chars=2000,acknowledgement_deadline_seconds=5)
+    capabilities=ChannelCapabilities(supports_replies=True,supports_gateway_resume=True,max_message_chars=2000,acknowledgement_deadline_seconds=5)
     def __init__(self,*,account_id:str,transport:HttpTransport,access_token:str,app_id:str)->None:
         self.account_id,self.transport=required_string(account_id,"account_id"),transport; self._token=required_string(access_token,"access_token"); self._app_id=required_string(app_id,"app_id")
     def verify_webhook(self,raw_body:bytes,headers:Mapping[str,str],**_:object)->bool:

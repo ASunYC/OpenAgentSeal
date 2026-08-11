@@ -8,26 +8,42 @@ durable obligations.
 
 ## Channel capability matrix
 
-Only the transport modes below are implemented. An adapter marked “connector”
-parses authenticated frames supplied by an operator-managed provider connector;
-OpenAgentSeal does **not** yet open, authenticate, or supervise that provider's
-long-lived socket/stream itself.
+The runtime directly opens, authenticates, supervises, and reconnects the four
+official long-lived transports marked `built-in connector`. Webhook channels
+remain independently authenticated at the HTTP boundary.
 
 | Channel | Inbound mode | Outbound mode | Important limitation |
 |---|---|---|---|
 | Telegram | authenticated webhook | Bot API HTTPS | webhook secret token required |
-| Discord | connector (Gateway frame) | REST HTTPS | no built-in Gateway socket/resume loop |
+| Discord | built-in Gateway v10 connector | REST HTTPS | durable sequence/session resume; configured intents remain operator-controlled |
 | Slack | signed webhook | Web API HTTPS | signing timestamp and signature required |
 | WhatsApp Cloud | signed webhook | Graph API HTTPS | app-secret signature required |
 | Feishu | verified/encrypted webhook | Open API HTTPS | verification/encryption configuration required |
-| DingTalk | connector (Stream frame) | Open API HTTPS | no built-in Stream client |
+| DingTalk | built-in Stream connector | Open API HTTPS | callback replay is deduplicated; the provider exposes no portable session-resume cursor |
 | LINE | signed webhook | Messaging API HTTPS | batch webhook signature required |
-| QQ Bot | connector (Gateway frame) | Open API HTTPS | no built-in Gateway socket/resume loop |
-| WeCom AI Bot | connector (WebSocket frame) | originating connector callback | reply must retain its request/frame identity; no built-in WebSocket client |
+| QQ Bot | built-in official Gateway connector | Open API HTTPS | durable sequence/session resume |
+| WeCom AI Bot | built-in official WebSocket connector | originating connector callback | reply retains `req_id`; the provider exposes no portable session-resume cursor |
 
 Never expose a connector-only account as a public webhook. Provider challenge
 responses, raw-body authentication, batch limits, replay/deduplication, tenant
 routes, and destination account identity are enforced at the gateway boundary.
+
+Each connector account has at most one active owner, enforced by a durable
+checkpoint lease plus compare-and-swap fencing. A callback is acknowledged only
+after normalized messages have been durably admitted. Lease loss, heartbeat
+timeout, provider reconnect, and credential rotation terminate the current
+session and enter bounded exponential backoff with jitter. Tickets, access
+tokens, session secrets, and raw credentials remain in the protected credential
+store or process memory and are never persisted in checkpoint or diagnostic
+records.
+
+The implementations are pinned to the official protocol sources audited on
+2026-08-12: Discord API docs commit `c98d64bc233833839cf0d8d369e81b77f21ade60`,
+DingTalk Stream SDK commit `8d8bb1c630848fee1ae8c7bdd11bc1b78097b611`,
+QQ BotPy commit `e25f3e84bad7217357d8200a9d12939b58285b84`, and WeCom AI
+Bot SDK commit `6bcb59a9a636c566f4c6ea5268b228e3def1611a`. DingTalk and
+WeCom deliberately report gateway resume as unsupported rather than inventing
+provider semantics.
 
 ## Credentials and rotation
 

@@ -497,6 +497,11 @@ def test_recursive_redaction_never_returns_sensitive_runtime_fields(operational_
 
 def test_channel_route_lifecycle_and_credential_rotation(operational_app):
     app, auth, _ = operational_app
+    invalidated = []
+    app.state.runtime_composition.connector_manager = SimpleNamespace(
+        wake=lambda: None, invalidate=lambda account_id: invalidated.append(account_id),
+        snapshot=lambda account_id: {"state": "not_managed"},
+    )
     client = TestClient(app)
     headers = _headers(auth)
     created = client.post(
@@ -515,6 +520,7 @@ def test_channel_route_lifecycle_and_credential_rotation(operational_app):
         json={"credential": "new", "expected_version": 1},
     )
     assert rotated.status_code == 200
+    assert invalidated == [account_id]
     route = client.put(
         f"/api/operations/channel-accounts/{account_id}/routes", headers=headers,
         json={"conversation_id": "C123", "profile_id": "main", "trigger_policy": "mention"},
@@ -531,8 +537,40 @@ def test_channel_route_lifecycle_and_credential_rotation(operational_app):
     assert diagnostic == {
         "account_id": account_id, "configured": True,
         "adapter_registered": False, "enabled": False,
+        "connector": {"state": "not_managed"},
     }
     assert client.delete(f"/api/operations/routes/{route_id}", headers=headers).status_code == 200
+
+
+def test_credential_write_then_raise_still_invalidates_connector(operational_app):
+    app, auth, _ = operational_app
+    client = TestClient(app)
+    headers = _headers(auth)
+    created = client.post(
+        "/api/operations/channel-accounts", headers=headers,
+        json={"account_id": "slack-partial", "adapter_kind": "slack", "credential": "old"},
+    )
+    account_id = created.json()["data"]["account_id"]
+    delegate = app.state.operational_credentials._backend
+
+    class WriteThenRaiseBackend:
+        def put(self, target_name, credential):
+            delegate.put(target_name, credential)
+            raise RuntimeError("simulated post-publication backend failure")
+        def resolve(self, target_name): return delegate.resolve(target_name)
+        def delete(self, target_name): return delegate.delete(target_name)
+
+    app.state.operational_credentials = CredentialStore(WriteThenRaiseBackend())
+    invalidated = []
+    app.state.runtime_composition.connector_manager = SimpleNamespace(
+        wake=lambda: None, invalidate=lambda value: invalidated.append(value),
+    )
+    with pytest.raises(RuntimeError, match="post-publication"):
+        client.put(
+            f"/api/operations/channel-accounts/{account_id}/credential", headers=headers,
+            json={"credential": "new", "expected_version": 0},
+        )
+    assert invalidated == [account_id]
     assert client.delete(
         f"/api/operations/channel-accounts/{account_id}", headers=headers
     ).status_code == 200

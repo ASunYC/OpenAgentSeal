@@ -25,6 +25,7 @@ class WorkerSpec:
     backoff_base: float = 0.25
     backoff_cap: float = 30.0
     jitter: float = 0.1
+    cancel_on_stop: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 64:
@@ -43,6 +44,8 @@ class WorkerSpec:
             raise ValueError("worker timing values must be positive and bounded")
         if not 0 <= self.jitter <= 1:
             raise ValueError("jitter must be between zero and one")
+        if type(self.cancel_on_stop) is not bool:
+            raise TypeError("cancel_on_stop must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +136,9 @@ class DurableRuntimeSupervisor:
                 event.set()
             tasks = tuple(self._tasks.values())
             if tasks:
+                for name, task in self._tasks.items():
+                    if self._specs[name].cancel_on_stop:
+                        task.cancel()
                 _, pending = await asyncio.wait(tasks, timeout=self._drain_timeout)
                 for task in pending:
                     task.cancel()

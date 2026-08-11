@@ -10,7 +10,7 @@ from .base_http import AdapterAuthenticationError, HttpTransport, classify_respo
 
 class DiscordAdapter:
     kind = "discord"
-    capabilities = ChannelCapabilities(supports_threads=True, supports_replies=True, supports_idempotency=True, max_message_chars=2000, acknowledgement_deadline_seconds=3)
+    capabilities = ChannelCapabilities(supports_threads=True, supports_replies=True, supports_idempotency=True, supports_gateway_resume=True, max_message_chars=2000, acknowledgement_deadline_seconds=3)
 
     def __init__(self, *, account_id: str, transport: HttpTransport, bot_token: str, application_id: str) -> None:
         self.account_id, self.transport = required_string(account_id, "account_id"), transport

@@ -111,7 +111,7 @@ def test_capabilities_are_truthful_and_bounded(kind):
     assert 1 <= capabilities.acknowledgement_deadline_seconds <= 30
     assert capabilities.supports_idempotency is (kind in {"discord", "line"})
     assert capabilities.supports_reconciliation is False
-    assert capabilities.supports_gateway_resume is False
+    assert capabilities.supports_gateway_resume is (kind in {"discord", "qq"})
 
 
 @pytest.mark.asyncio
@@ -238,7 +238,7 @@ def test_bot_authored_events_are_marked_non_dispatchable(kind):
 def test_discord_message_ingress_is_explicitly_gateway_only():
     adapter = _adapter("discord")
     assert adapter.capabilities.supports_webhook is False
-    assert adapter.capabilities.supports_gateway_resume is False
+    assert adapter.capabilities.supports_gateway_resume is True
     assert adapter.normalize_gateway(_body("discord")) == adapter.normalize(_body("discord"))
     with pytest.raises(AdapterAuthenticationError):
         adapter.verify_webhook(b'{"type":1}', {})

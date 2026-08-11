@@ -417,6 +417,7 @@ class IngressService:
         replay_state: Mapping[str, Any] | None = None,
         reconnect_metadata: Mapping[str, Any] | None = None,
         processed_event_key: str | None = None,
+        retain_claim: bool = False,
     ) -> dict[str, Any]:
         return self._repository.commit_ingress_checkpoint(
             account_id=account_id,
@@ -429,8 +430,28 @@ class IngressService:
             replay_state=replay_state,
             reconnect_metadata=reconnect_metadata,
             processed_event_key=processed_event_key,
+            release_claim=not retain_claim,
             now=self._now(),
         )
+
+    def install_gateway_capability(
+        self, account_id: str, capability: GatewayConnectorCapability
+    ) -> None:
+        """Publish proof only after an official connector authenticated its session."""
+        if not isinstance(capability, GatewayConnectorCapability):
+            raise TypeError("capability must be a GatewayConnectorCapability")
+        if capability.account_id != account_id:
+            raise SecurityViolation("gateway capability account mismatch")
+        self._gateway_capabilities = {**self._gateway_capabilities, account_id: capability}
+
+    def remove_gateway_capability(
+        self, account_id: str, capability: GatewayConnectorCapability
+    ) -> None:
+        if self._gateway_capabilities.get(account_id) is capability:
+            self._gateway_capabilities = {
+                key: value for key, value in self._gateway_capabilities.items()
+                if key != account_id
+            }
 
     def _validate_envelope(self, raw_body: bytes, headers: Mapping[str, str]) -> None:
         if len(raw_body) > self._limits.max_body_bytes:

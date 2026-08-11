@@ -13,6 +13,7 @@ import uuid
 import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from itertools import chain
 from math import isfinite
 from typing import Any, Callable, Iterable, Mapping, TYPE_CHECKING
 
@@ -35,6 +36,24 @@ class StaleClaimError(RuntimeError):
 
 class StateConflictError(RuntimeError):
     """The requested transition is illegal from persisted state."""
+
+
+def _bounded_gateway_sessions(
+    values: Iterable[Any], current_session: str | None, *, limit: int = 256,
+) -> list[str]:
+    """Keep a bounded, canonical recent-session replay window."""
+    bounded: list[str] = []
+    present: set[str] = set()
+    for value in chain(values, (current_session,)):
+        if not isinstance(value, str) or not value or len(value) > 512:
+            continue
+        if value in present:
+            continue
+        bounded.append(value)
+        present.add(value)
+        if len(bounded) > limit:
+            present.remove(bounded.pop(0))
+    return bounded
 
 
 @dataclass(frozen=True, slots=True, repr=False, weakref_slot=True)
@@ -708,6 +727,7 @@ class DurableRuntimeRepository:
         replay_state: Mapping[str, Any] | None = None,
         reconnect_metadata: Mapping[str, Any] | None = None,
         processed_event_key: str,
+        release_claim: bool = True,
     ) -> dict[str, Any]:
         """Persist a transport resume point after its referenced event is durable."""
         _require_identifier(account_id, "account_id")
@@ -739,6 +759,8 @@ class DurableRuntimeRepository:
         ):
             if value is not None and not isinstance(value, Mapping):
                 raise ValueError(f"{name} must be a mapping")
+        if type(release_claim) is not bool:
+            raise TypeError("release_claim must be a boolean")
         now_value = _iso(now)
         conn = self._conn
         with conn:
@@ -807,15 +829,16 @@ class DurableRuntimeRepository:
             current_replay = json.loads(current["replay_state"])
             merged_replay = dict(replay_state or current_replay)
             if transport_mode == "gateway":
-                seen_sessions = list(current_replay.get("seen_gateway_sessions", []))
+                raw_seen = current_replay.get("seen_gateway_sessions", [])
+                if not isinstance(raw_seen, list):
+                    raw_seen = []
                 current_session = current["gateway_session_id"]
+                seen_sessions = _bounded_gateway_sessions(raw_seen, current_session)
                 if (
                     gateway_session_id != current_session
                     and gateway_session_id in seen_sessions
                 ):
                     raise StateConflictError("gateway session cannot roll back")
-                if current_session is not None and current_session not in seen_sessions:
-                    seen_sessions.append(current_session)
                 merged_replay["seen_gateway_sessions"] = seen_sessions
             replay_value = _json(merged_replay)
             reconnect_value = _json(
@@ -833,14 +856,16 @@ class DurableRuntimeRepository:
                     account_id, transport_mode, cursor, gateway_session_id,
                     gateway_sequence, replay_state, claim_owner, claim_generation,
                     claim_expires_at, reconnect_metadata, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id, transport_mode) DO UPDATE SET
                     cursor=excluded.cursor,
                     gateway_session_id=excluded.gateway_session_id,
                     gateway_sequence=excluded.gateway_sequence,
                     replay_state=excluded.replay_state,
                     reconnect_metadata=excluded.reconnect_metadata,
-                    claim_owner=NULL, claim_expires_at=NULL,
+                    claim_owner=excluded.claim_owner,
+                    claim_generation=excluded.claim_generation,
+                    claim_expires_at=excluded.claim_expires_at,
                     updated_at=excluded.updated_at
                 RETURNING *
                 """,
@@ -855,6 +880,9 @@ class DurableRuntimeRepository:
                     if gateway_sequence is not None
                     else (current["gateway_sequence"] if current else None),
                     replay_value,
+                    None if release_claim else token.owner_id,
+                    0 if release_claim else token.generation,
+                    None if release_claim else _iso(token.expires_at),
                     reconnect_value,
                     now_value,
                 ),
@@ -862,6 +890,64 @@ class DurableRuntimeRepository:
         if row is None:
             raise StateConflictError("ingress checkpoint upsert returned no row")
         return self._ingress_checkpoint(row)
+
+    def renew_ingress_checkpoint_claim(
+        self,
+        *,
+        account_id: str,
+        transport_mode: str,
+        token: ClaimToken,
+        now: datetime,
+        expires_at: datetime,
+    ) -> ClaimToken:
+        """Extend one live fenced owner without changing its generation."""
+        self._validate_lease_window(now, expires_at)
+        _require_identifier(account_id, "account_id")
+        self._validate_transport_mode(transport_mode)
+        with self._conn:
+            row = self._conn.execute(
+                """UPDATE channel_ingress_checkpoints SET claim_expires_at=?, updated_at=?
+                     WHERE account_id=? AND transport_mode=? AND claim_owner=?
+                       AND claim_generation=? AND claim_expires_at=?
+                       AND claim_expires_at>?
+                     RETURNING claim_owner, claim_generation, claim_expires_at""",
+                (
+                    _iso(expires_at), _iso(now), account_id, transport_mode,
+                    token.owner_id, token.generation, _iso(token.expires_at), _iso(now),
+                ),
+            ).fetchone()
+        if row is None:
+            raise StaleClaimError("stale ingress checkpoint claim")
+        return ClaimToken(
+            str(row["claim_owner"]), int(row["claim_generation"]),
+            datetime.fromisoformat(str(row["claim_expires_at"])),
+        )
+
+    def release_ingress_checkpoint_claim(
+        self,
+        *,
+        account_id: str,
+        transport_mode: str,
+        token: ClaimToken,
+        now: datetime,
+    ) -> None:
+        """Release exactly one fenced owner; stale owners cannot release successors."""
+        _require_aware(now, "now")
+        _require_identifier(account_id, "account_id")
+        self._validate_transport_mode(transport_mode)
+        with self._conn:
+            changed = self._conn.execute(
+                """UPDATE channel_ingress_checkpoints
+                     SET claim_owner=NULL, claim_expires_at=NULL, updated_at=?
+                     WHERE account_id=? AND transport_mode=? AND claim_owner=?
+                       AND claim_generation=? AND claim_expires_at=?""",
+                (
+                    _iso(now), account_id, transport_mode, token.owner_id,
+                    token.generation, _iso(token.expires_at),
+                ),
+            )
+        if changed.rowcount != 1:
+            raise StaleClaimError("stale ingress checkpoint claim")
 
     @staticmethod
     def _validate_transport_mode(transport_mode: str) -> None:

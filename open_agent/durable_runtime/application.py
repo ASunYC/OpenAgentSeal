@@ -148,6 +148,7 @@ class RuntimeComposition:
     public_webhook_limiter: Any = None
     retention_policy: RetentionPolicy | None = None
     retention_worker: RetentionWorker | None = None
+    connector_manager: Any = None
 
     def register_adapter(self, account_id: str, adapter: Any) -> None:
         if getattr(adapter, "account_id", None) != account_id:
@@ -281,6 +282,7 @@ def _build_runtime_composition() -> RuntimeComposition:
 
     from open_agent.app.runner.auth import OperationalAuthStore
     from open_agent.gateway.credentials import CredentialStore
+    from open_agent.gateway.connectors import ConnectorManager
 
     credential_store = None
     if os.name == "nt":
@@ -292,6 +294,10 @@ def _build_runtime_composition() -> RuntimeComposition:
             )
         except RuntimeError:
             credential_store = None
+
+    connector_manager = ConnectorManager(
+        repository, ingress_service, credential_store, adapters, registry,
+    )
 
     def run_credential_cleanup_once():
         if credential_store is None:
@@ -343,6 +349,10 @@ def _build_runtime_composition() -> RuntimeComposition:
                 "credential_cleanup", run_credential_cleanup_once,
                 interval=30, required=False,
             ),
+            WorkerSpec(
+                "connectors", connector_manager.run_forever,
+                interval=1, required=False, cancel_on_stop=True,
+            ),
         ]
     )
     return RuntimeComposition(
@@ -366,6 +376,7 @@ def _build_runtime_composition() -> RuntimeComposition:
         public_webhook_limiter=public_webhook_limiter,
         retention_policy=retention_policy,
         retention_worker=retention,
+        connector_manager=connector_manager,
     )
 
 

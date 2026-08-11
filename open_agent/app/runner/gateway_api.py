@@ -103,6 +103,18 @@ def _credentials(request: Request) -> CredentialStore:
     return value
 
 
+def _wake_connectors(request: Request) -> None:
+    manager = getattr(_composition(request), "connector_manager", None)
+    if manager is not None:
+        manager.wake()
+
+
+def _restart_connector(request: Request, account_id: str) -> None:
+    manager = getattr(_composition(request), "connector_manager", None)
+    if manager is not None:
+        manager.invalidate(account_id)
+
+
 def _owner_visible(repository, kind: str, entity_id: str, principal: OperationalPrincipal, *, shared=False):
     return repository.operational_owner_matches(
         kind, entity_id, principal.tenant_id, None if shared else principal.actor_id
@@ -301,6 +313,7 @@ async def create_channel_account(
         if isinstance(exc, StateConflictError):
             raise _http(409, "already_exists", "Channel account already exists") from None
         raise
+    _wake_connectors(request)
     return _ok(_account_view(repository.get_channel_account(account_id), 0))
 
 
@@ -392,6 +405,7 @@ async def delete_channel_account(account_id: str, request: Request, principal: R
                        WHERE cleanup_id=? AND state='pending'""",
                     (datetime.now(timezone.utc).isoformat(), cleanup_id),
                 )
+    _wake_connectors(request)
     return _ok({"account_id": account_id, "deleted": True, "credential_cleanup_pending": cleanup_pending})
 
 
@@ -424,6 +438,7 @@ async def update_channel_account(
             raise _http(404, "not_found", "Resource not found")
         raise _http(409, "version_conflict", "The resource changed concurrently")
     _composition(request).supervisor.wake("inbox")
+    _wake_connectors(request)
     return _ok(_account_view(repository._channel_account(row), body.expected_version + 1))
 
 
@@ -442,6 +457,7 @@ async def rotate_credential(
     prior_secret = store.resolve_for_account(account_id, row["credential_ref"])
     conn = repository.control_plane._get_conn()
     published = False
+    publication_attempted = False
     try:
         with conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -453,6 +469,7 @@ async def rotate_credential(
             ).fetchone()
             if owner is None or int(owner["version"]) != body.expected_version:
                 raise _http(409, "version_conflict", "The resource changed concurrently")
+            publication_attempted = True
             store.rotate_for_account(account_id, row["credential_ref"], body.credential)
             published = True
             changed = conn.execute(
@@ -485,6 +502,11 @@ async def rotate_credential(
                     "Credential publication completed but the response was interrupted",
                 ) from None
         raise
+    finally:
+        if publication_attempted:
+            # A provider session authenticated before publication must never
+            # survive any complete, failed, or partially committed write.
+            _restart_connector(request, account_id)
     return _ok({"credential_ref": row["credential_ref"], "rotated": True, "version": body.expected_version + 1})
 
 
@@ -574,11 +596,17 @@ async def account_diagnostics(account_id: str, request: Request, principal: Auth
     if not _owner_visible(composition.repository, "channel_account", account_id, principal):
         raise _http(404, "not_found", "Resource not found")
     account = composition.repository.get_channel_account(account_id)
+    manager = getattr(composition, "connector_manager", None)
+    connector = manager.snapshot(account_id) if manager is not None else {
+        "state": "unavailable", "authenticated": False,
+        "session_resumable": False, "last_error": None,
+    }
     return _ok({
         "account_id": account_id,
         "configured": bool(account and account.get("credential_ref")),
         "adapter_registered": account_id in composition.adapters,
         "enabled": bool(account and account.get("enabled")),
+        "connector": connector,
     })
 
 

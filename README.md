@@ -109,4 +109,5 @@ Use `npm run build:clean` only when a full local rebuild is required.
 - 中文文档: [README.zh-CN.md](./README.zh-CN.md)
 - Desktop shell notes: [desktop/README.md](./desktop/README.md)
 - Autonomous runtime operations: [docs/autonomous-runtime-operations.md](./docs/autonomous-runtime-operations.md)
+- Built-in long-lived messaging connectors: Discord Gateway, DingTalk Stream, QQ Bot Gateway, and WeCom AI Bot WebSocket (see the operations capability matrix)
 - License: [LICENSE](./LICENSE)
