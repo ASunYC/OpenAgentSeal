@@ -4,7 +4,7 @@ import json
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,21 +62,54 @@ class SchedulerJobSpec:
     prompt: str
     goal_id: str | None = None
     next_run_at: str | None = None
+    timezone: str = "Asia/Shanghai"
+    max_retries: int = 5
+    destination: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class SchedulerController:
     """Durable scheduler facade backed by the control plane."""
 
-    def __init__(self, control_plane: ControlPlane | None = None):
+    def __init__(
+        self,
+        control_plane: ControlPlane | None = None,
+        *,
+        clock=None,
+    ):
         self.control_plane = control_plane or get_control_plane()
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def create_job(self, spec: SchedulerJobSpec) -> dict[str, Any]:
+        from .scheduler_runtime import CronSchedule
+
+        if not isinstance(spec.prompt, str) or not spec.prompt.strip() or len(spec.prompt) > 100_000:
+            raise ValueError("prompt must be a non-empty string of at most 100000 characters")
+        if isinstance(spec.max_retries, bool) or not isinstance(spec.max_retries, int) or not 0 <= spec.max_retries <= 100:
+            raise ValueError("max_retries must be between 0 and 100")
+        if spec.destination is not None and (
+            not isinstance(spec.destination, str)
+            or not spec.destination.strip()
+            or len(spec.destination) > 512
+        ):
+            raise ValueError("destination must be a non-empty string of at most 512 characters")
+        schedule = CronSchedule.parse(spec.schedule, spec.timezone)
+        now = self._clock()
+        next_run_at = spec.next_run_at
+        if next_run_at is None:
+            next_run_at = schedule.next_occurrence(now).isoformat()
+        else:
+            parsed = datetime.fromisoformat(next_run_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError("next_run_at must be timezone-aware")
         return self.control_plane.create_scheduler_job(
             schedule=spec.schedule,
             prompt=spec.prompt,
             goal_id=spec.goal_id,
-            next_run_at=spec.next_run_at,
+            next_run_at=next_run_at,
+            timezone_name=spec.timezone,
+            max_retries=spec.max_retries,
+            destination=spec.destination,
             metadata=spec.metadata,
         )
 
@@ -84,10 +117,39 @@ class SchedulerController:
         return self._set_job_status(job_id, "paused")
 
     def resume_job(self, job_id: str) -> dict[str, Any]:
-        return self._set_job_status(job_id, "active")
+        from .scheduler_runtime import CronSchedule
+
+        job = self.control_plane.get_scheduler_job(job_id)
+        if job is None:
+            raise KeyError(f"Scheduler job not found: {job_id}")
+        if job["status"] == "deleted":
+            raise ValueError("deleted scheduler jobs cannot be resumed")
+        now = self._clock()
+        cursor = CronSchedule.parse(job["schedule"], job["timezone"]).next_occurrence(now)
+        conn = self.control_plane._get_conn()
+        with conn:
+            conn.execute(
+                """UPDATE scheduler_jobs SET status = 'active', next_run_at = ?,
+                   updated_at = ?, runtime_version = runtime_version + 1
+                   WHERE job_id = ? AND status != 'deleted'""",
+                (
+                    cursor.astimezone(timezone.utc).isoformat(),
+                    now.astimezone(timezone.utc).isoformat(),
+                    job_id,
+                ),
+            )
+        return self.control_plane.get_scheduler_job(job_id) or {}
 
     def delete_job(self, job_id: str) -> dict[str, Any]:
-        return self._set_job_status(job_id, "deleted")
+        job = self._set_job_status(job_id, "deleted")
+        conn = self.control_plane._get_conn()
+        with conn:
+            conn.execute(
+                """UPDATE scheduler_runs SET state = 'cancelled', updated_at = ?
+                   WHERE job_id = ? AND state IN ('pending', 'retry_wait')""",
+                (self._clock().astimezone(timezone.utc).isoformat(), job_id),
+            )
+        return job
 
     def _set_job_status(self, job_id: str, status: str) -> dict[str, Any]:
         return self.control_plane.update_scheduler_job_status(job_id, status)

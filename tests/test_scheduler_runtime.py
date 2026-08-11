@@ -51,6 +51,8 @@ def test_cron_defaults_to_asia_shanghai_and_rejects_unknown_zone():
     )
     with pytest.raises(ValueError, match="timezone"):
         CronSchedule.parse("0 9 * * *", "Mars/Olympus")
+    with pytest.raises(ValueError, match="timezone"):
+        CronSchedule.parse("0 9 * * *", "A" * 256)
 
 
 def test_cron_skips_spring_gap_and_returns_both_fall_fold_occurrences():
@@ -95,7 +97,7 @@ def test_scan_skips_overlap_but_advances_cursor(runtime):
     due = NOW - timedelta(minutes=1)
     control.create_scheduler_job("* * * * *", "run", job_id="overlap", next_run_at=due.isoformat())
     first = repository.create_due_scheduler_run(
-        "overlap", due - timedelta(minutes=1), due, run_id="existing", now=due
+        "overlap", due, NOW, run_id="existing", now=due
     )
     claimed = repository.claim_due_scheduler_runs("busy", due, due + timedelta(hours=1))[0]
     assert first is not None and claimed.state == "running"
@@ -142,10 +144,89 @@ async def test_execute_reuses_agent_runner_and_atomically_enqueues_origin_outbox
     assert completed.state == "completed"
     assert runner.requests[0][0].messages == [{"role": "user", "content": "say hello"}]
     assert runner.requests[0][0].session_id == f"scheduler:{run.job_id}"
+    assert runner.requests[0][0].meta["source_event_key"] == f"scheduler:{run.run_id}"
     assert runner.requests[0][1]["turn_id"] == f"turn:scheduler:{run.run_id}"
     obligation = repository.list_outbox()[0]
     assert obligation.destination == "local:test"
     assert obligation.payload["content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_is_recovered_without_rerunning_agent(runtime):
+    control, repository = runtime
+    control.create_scheduler_job("* * * * *", "run", job_id="recover-complete", next_run_at=NOW.isoformat())
+    run = repository.create_due_scheduler_run(
+        "recover-complete", NOW, NOW + timedelta(minutes=1), now=NOW
+    )
+    claimed = repository.claim_due_scheduler_runs(
+        "crashed", NOW, NOW + timedelta(seconds=1), run_id=run.run_id
+    )[0]
+    control.complete_runtime_turn(
+        f"turn:scheduler:{run.run_id}", result={"content": "persisted answer"}
+    )
+    runner = FakeRunner()
+    worker = SchedulerWorker(
+        repository, runner, clock=lambda: NOW + timedelta(seconds=2), owner_id="recovery"
+    )
+
+    completed = await worker.execute_run(run.run_id)
+
+    assert completed.state == "completed"
+    assert runner.requests == []
+
+
+def test_paused_job_does_not_start_queued_automatic_occurrence(runtime):
+    control, repository = runtime
+    control.create_scheduler_job("* * * * *", "run", job_id="pause-queued", next_run_at=NOW.isoformat())
+    run = repository.create_due_scheduler_run(
+        "pause-queued", NOW, NOW + timedelta(minutes=1), now=NOW
+    )
+    control.update_scheduler_job_status("pause-queued", "paused")
+    assert repository.claim_due_scheduler_runs(
+        "worker", NOW, NOW + timedelta(minutes=1), run_id=run.run_id
+    ) == []
+
+
+def test_invalid_legacy_job_is_quarantined_without_starving_valid_jobs(runtime):
+    control, repository = runtime
+    control.create_scheduler_job("* * * * *", "legacy", job_id="a-invalid", next_run_at=NOW.isoformat())
+    control._get_conn().execute(
+        "UPDATE scheduler_jobs SET schedule = 'once' WHERE job_id = 'a-invalid'"
+    )
+    control.create_scheduler_job("* * * * *", "valid", job_id="b-valid", next_run_at=NOW.isoformat())
+    worker = SchedulerWorker(repository, FakeRunner(), clock=lambda: NOW)
+    runs = worker.scan_once(NOW)
+    assert [run.job_id for run in runs] == ["b-valid"]
+    assert control.get_scheduler_job("a-invalid")["status"] == "paused"
+
+
+def test_deleted_manual_run_cannot_be_reclaimed_after_lease_expiry(runtime):
+    control, repository = runtime
+    control.create_scheduler_job("* * * * *", "run", job_id="manual-delete", next_run_at=NOW.isoformat())
+    run = repository.create_manual_scheduler_run("manual-delete", "request", now=NOW)
+    repository.claim_due_scheduler_runs(
+        "before-delete", NOW, NOW + timedelta(seconds=1), run_id=run.run_id
+    )
+    control.update_scheduler_job_status("manual-delete", "deleted")
+    assert repository.claim_due_scheduler_runs(
+        "after-delete", NOW + timedelta(seconds=2), NOW + timedelta(minutes=1), run_id=run.run_id
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"schedule": "once", "prompt": "run"},
+        {"schedule": "* * * * *", "prompt": ""},
+        {"schedule": "* * * * *", "prompt": "run", "timezone_name": "Mars/Olympus"},
+        {"schedule": "* * * * *", "prompt": "run", "max_retries": 1_000_000},
+        {"schedule": "* * * * *", "prompt": "run", "metadata": []},
+    ],
+)
+def test_persistence_boundary_rejects_invalid_scheduler_jobs(runtime, kwargs):
+    control, _ = runtime
+    with pytest.raises(ValueError):
+        control.create_scheduler_job(**kwargs)
 
 
 @pytest.mark.asyncio
@@ -158,6 +239,30 @@ async def test_destination_disallows_silent_completion(runtime):
     result = await worker.execute_run(run.run_id)
     assert result.state == "retry_wait"
     assert repository.list_outbox() == []
+
+
+@pytest.mark.asyncio
+async def test_channel_destination_uses_origin_scoped_gateway_contract(runtime):
+    control, repository = runtime
+    control.create_scheduler_job(
+        "* * * * *", "run", job_id="channel-job", next_run_at=NOW.isoformat(),
+        destination="channel:telegram-main",
+        metadata={"conversation_id": "chat-42"},
+    )
+    run = repository.create_due_scheduler_run(
+        "channel-job", NOW, NOW + timedelta(minutes=1), now=NOW
+    )
+    result = await SchedulerWorker(
+        repository,
+        FakeRunner([AgentEvent(event="complete", session_id="x", content="scheduled reply")]),
+        clock=lambda: NOW,
+    ).execute_run(run.run_id)
+    obligation = repository.list_outbox()[0]
+    assert result.state == "completed"
+    assert obligation.destination == "channel:telegram-main"
+    assert obligation.payload["account_id"] == "telegram-main"
+    assert obligation.payload["conversation_id"] == "chat-42"
+    assert obligation.payload["source_event_key"] == f"scheduler:{run.run_id}"
 
 
 @pytest.mark.asyncio

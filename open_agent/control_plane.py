@@ -505,6 +505,44 @@ class ControlPlane:
             self._ensure_column(conn, "goals", definition)
         for definition in scheduler_columns:
             self._ensure_column(conn, "scheduler_jobs", definition)
+        migration = conn.execute(
+            """SELECT 1 FROM metadata
+               WHERE namespace = 'migrations' AND key = 'scheduler_cursor_utc_v1'"""
+        ).fetchone()
+        if migration is None:
+            # CAS prevents a concurrent worker advance from being overwritten by
+            # a second process performing this one-time legacy normalization.
+            for scheduler_row in conn.execute(
+                "SELECT job_id, next_run_at FROM scheduler_jobs WHERE next_run_at IS NOT NULL"
+            ).fetchall():
+                raw_cursor = scheduler_row["next_run_at"]
+                try:
+                    normalized = raw_cursor[:-1] + "+00:00" if raw_cursor.endswith("Z") else raw_cursor
+                    parsed_cursor = datetime.fromisoformat(normalized)
+                    if parsed_cursor.tzinfo is None or parsed_cursor.utcoffset() is None:
+                        raise ValueError("naive scheduler cursor")
+                except (AttributeError, TypeError, ValueError):
+                    conn.execute(
+                        """UPDATE scheduler_jobs SET status = 'paused'
+                           WHERE job_id = ? AND next_run_at = ?""",
+                        (scheduler_row["job_id"], raw_cursor),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE scheduler_jobs SET next_run_at = ?
+                           WHERE job_id = ? AND next_run_at = ?""",
+                        (
+                            parsed_cursor.astimezone(timezone.utc).isoformat(),
+                            scheduler_row["job_id"],
+                            raw_cursor,
+                        ),
+                    )
+            conn.execute(
+                """INSERT INTO metadata (namespace, key, value, updated_at)
+                   VALUES ('migrations', 'scheduler_cursor_utc_v1', 'true', ?)
+                   ON CONFLICT(namespace, key) DO NOTHING""",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
         self._ensure_column(conn, "inbox_events", "retained_at TEXT")
         self._ensure_column(conn, "outbox_obligations", "retained_at TEXT")
         for table in ("inbox_events", "outbox_obligations"):
@@ -1371,22 +1409,73 @@ class ControlPlane:
         goal_id: str | None = None,
         job_id: str | None = None,
         next_run_at: str | None = None,
+        timezone_name: str = "Asia/Shanghai",
+        max_retries: int = 5,
+        destination: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        now = datetime.now().isoformat()
+        from open_agent.scheduler_runtime import CronSchedule
+
+        if not isinstance(schedule, str):
+            raise ValueError("schedule must be a string")
+        parsed_schedule = CronSchedule.parse(schedule, timezone_name)
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100_000:
+            raise ValueError("prompt must be a non-empty string of at most 100000 characters")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 100:
+            raise ValueError("max_retries must be between 0 and 100")
+        if destination is not None and (
+            not isinstance(destination, str) or not destination.strip() or len(destination) > 512
+        ):
+            raise ValueError("destination must be a non-empty string of at most 512 characters")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("metadata must be an object")
+        metadata_value = metadata or {}
+        for identity_name in ("profile_id", "user_id", "conversation_id"):
+            identity = metadata_value.get(identity_name)
+            if identity is not None and (
+                not isinstance(identity, str) or not identity.strip() or len(identity) > 256
+            ):
+                raise ValueError(f"metadata.{identity_name} must be a bounded identifier")
+        encoded_metadata = json.dumps(metadata_value, ensure_ascii=False)
+        if len(encoded_metadata.encode("utf-8")) > 262_144:
+            raise ValueError("metadata must not exceed 256 KiB")
+        if job_id is not None and (
+            not isinstance(job_id, str) or not job_id.strip() or len(job_id) > 256
+        ):
+            raise ValueError("job_id must be a bounded identifier")
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        if next_run_at is None:
+            next_run_at = parsed_schedule.next_occurrence(now_dt).astimezone(timezone.utc).isoformat()
+        else:
+            try:
+                cursor = datetime.fromisoformat(next_run_at.replace("Z", "+00:00"))
+            except (AttributeError, ValueError) as exc:
+                raise ValueError("next_run_at must be a timezone-aware ISO datetime") from exc
+            if cursor.tzinfo is None or cursor.utcoffset() is None:
+                raise ValueError("next_run_at must be a timezone-aware ISO datetime")
+            next_run_at = cursor.astimezone(timezone.utc).isoformat()
         job_id = job_id or f"job_{uuid.uuid4().hex[:8]}"
         conn = self._get_conn()
         with conn:
             conn.execute(
                 """
-                INSERT INTO scheduler_jobs (job_id, goal_id, schedule, prompt, next_run_at, created_at, updated_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO scheduler_jobs (
+                    job_id, goal_id, schedule, prompt, next_run_at, timezone,
+                    max_retries, destination, created_at, updated_at, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job_id, goal_id, schedule, prompt, next_run_at, now, now, json.dumps(metadata or {}, ensure_ascii=False)),
+                (
+                    job_id, goal_id, schedule, prompt, next_run_at, timezone_name,
+                    max_retries, destination, now, now,
+                    encoded_metadata,
+                ),
             )
         return self._row_to_dict(conn.execute("SELECT * FROM scheduler_jobs WHERE job_id = ?", (job_id,)).fetchone())
 
     def update_scheduler_job_status(self, job_id: str, status: str) -> dict[str, Any]:
+        if status not in {"active", "paused", "deleted"}:
+            raise ValueError("invalid scheduler job status")
         now = datetime.now().isoformat()
         conn = self._get_conn()
         with conn:
@@ -1398,6 +1487,26 @@ class ControlPlane:
         if row is None:
             raise KeyError(f"Scheduler job not found: {job_id}")
         return self._row_to_dict(row)
+
+    def get_scheduler_job(self, job_id: str) -> dict[str, Any] | None:
+        row = self._get_conn().execute(
+            "SELECT * FROM scheduler_jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_due_scheduler_jobs(self, now: datetime, limit: int = 100) -> list[dict[str, Any]]:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        rows = self._get_conn().execute(
+            """SELECT * FROM scheduler_jobs
+               WHERE status = 'active' AND next_run_at IS NOT NULL
+                 AND next_run_at <= ?
+               ORDER BY next_run_at, job_id LIMIT ?""",
+            (now.astimezone(timezone.utc).isoformat(), limit),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
     def list_scheduler_jobs(self, session_id: str | None = None) -> list[dict[str, Any]]:
         if session_id is None:

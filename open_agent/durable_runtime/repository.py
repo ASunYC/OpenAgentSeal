@@ -3633,13 +3633,17 @@ class DurableRuntimeRepository:
         scheduled_at: datetime,
         next_run_at: datetime,
         *,
+        expected_cursor: datetime | None = None,
         run_id: str | None = None,
         now: datetime,
+        skip_if_overlapping: bool = False,
     ) -> SchedulerRun | None:
+        expected_cursor = expected_cursor or scheduled_at
         scheduled_value = _iso(scheduled_at)
         next_value = _iso(next_run_at)
         now_value = _iso(now)
         scheduled_utc = scheduled_at.astimezone(timezone.utc)
+        expected_utc = expected_cursor.astimezone(timezone.utc)
         next_utc = next_run_at.astimezone(timezone.utc)
         now_utc = now.astimezone(timezone.utc)
         if next_utc <= scheduled_utc:
@@ -3661,7 +3665,7 @@ class DurableRuntimeRepository:
             except (TypeError, ValueError) as exc:
                 raise StateConflictError(f"invalid scheduler cursor for job {job_id}") from exc
             stored_utc = stored_cursor.astimezone(timezone.utc)
-            if stored_utc != scheduled_utc or stored_utc > now_utc:
+            if stored_utc != expected_utc or stored_utc > now_utc:
                 return None
             advanced = conn.execute(
                 """
@@ -3677,14 +3681,24 @@ class DurableRuntimeRepository:
             if advanced is None:
                 existing = conn.execute("SELECT * FROM scheduler_runs WHERE job_id = ? AND scheduled_at = ?", (job_id, scheduled_value)).fetchone()
                 return self._scheduler_run(existing) if existing else None
+            state = "pending"
+            if skip_if_overlapping:
+                overlapping = conn.execute(
+                    """SELECT 1 FROM scheduler_runs
+                       WHERE job_id = ? AND state = 'running'
+                         AND claim_expires_at > ? LIMIT 1""",
+                    (job_id, now_value),
+                ).fetchone()
+                if overlapping is not None:
+                    state = "skipped"
             conn.execute(
                 """
                 INSERT INTO scheduler_runs (
                     run_id, job_id, scheduled_at, state, attempt,
                     claim_generation, created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', 0, 0, ?, ?)
+                ) VALUES (?, ?, ?, ?, 0, 0, ?, ?)
                 """,
-                (run_id, job_id, scheduled_value, now_value, now_value),
+                (run_id, job_id, scheduled_value, state, now_value, now_value),
             )
             row = conn.execute("SELECT * FROM scheduler_runs WHERE run_id = ?", (run_id,)).fetchone()
         return self._scheduler_run(row)
@@ -3698,6 +3712,264 @@ class DurableRuntimeRepository:
     def list_scheduler_runs(self, job_id: str | None = None, limit: int = 100) -> list[SchedulerRun]:
         rows = self._list_rows("scheduler_runs", "job_id", job_id, "scheduled_at, run_id", limit)
         return [self._scheduler_run(row) for row in rows]
+
+    def create_manual_scheduler_run(
+        self,
+        job_id: str,
+        request_id: str,
+        *,
+        now: datetime,
+    ) -> SchedulerRun:
+        """Create one idempotent manual occurrence without touching the cron cursor."""
+        _require_identifier(job_id, "job_id")
+        _require_identifier(request_id, "request_id")
+        if len(job_id) > 256 or len(request_id) > 256:
+            raise ValueError("manual scheduler identifiers must not exceed 256 characters")
+        now_value = _iso(now)
+        run_id = f"manual:{job_id}:{uuid.uuid5(uuid.NAMESPACE_URL, request_id).hex}"
+        conn = self._conn
+        with conn:
+            existing = conn.execute(
+                "SELECT * FROM scheduler_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if existing is not None:
+                return self._scheduler_run(existing)
+            job = conn.execute(
+                "SELECT status FROM scheduler_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise KeyError(f"Scheduler job not found: {job_id}")
+            if job["status"] == "deleted":
+                raise StateConflictError("deleted scheduler jobs cannot run manually")
+            conn.execute(
+                """INSERT INTO scheduler_runs (
+                       run_id, job_id, scheduled_at, state, attempt,
+                       claim_generation, created_at, updated_at
+                   ) VALUES (?, ?, ?, 'pending', 0, 0, ?, ?)""",
+                (run_id, job_id, now_value, now_value, now_value),
+            )
+            row = conn.execute(
+                "SELECT * FROM scheduler_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return self._scheduler_run(row)
+
+    def claim_due_scheduler_runs(
+        self,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+        *,
+        limit: int = 1,
+        run_id: str | None = None,
+    ) -> list[SchedulerRun]:
+        """Lease due occurrences and bind each to one deterministic runner turn."""
+        self._validate_lease_window(now, expires_at)
+        _require_identifier(owner_id, "owner_id")
+        _require_limit(limit)
+        if run_id is not None:
+            _require_identifier(run_id, "run_id")
+        claimed: list[SchedulerRun] = []
+        conn = self._conn
+        with conn:
+            for _ in range(limit):
+                extra = "AND run_id = ?" if run_id is not None else ""
+                parameters: list[Any] = [
+                    owner_id, _iso(expires_at), _iso(now), _iso(now), _iso(now),
+                    _iso(now),
+                ]
+                if run_id is not None:
+                    parameters.append(run_id)
+                row = conn.execute(
+                    f"""UPDATE scheduler_runs
+                        SET state = 'running', claim_owner = ?,
+                            claim_generation = claim_generation + 1,
+                            claim_expires_at = ?, attempt = attempt + 1, updated_at = ?
+                        WHERE run_id = (
+                            SELECT run_id FROM scheduler_runs
+                            WHERE (state IN ('pending', 'retry_wait')
+                                   OR (state = 'running' AND claim_expires_at <= ?))
+                              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                              AND (
+                                  (run_id LIKE 'manual:%' AND EXISTS (
+                                      SELECT 1 FROM scheduler_jobs AS manual_job
+                                      WHERE manual_job.job_id = scheduler_runs.job_id
+                                        AND manual_job.status != 'deleted'
+                                  ))
+                                  OR EXISTS (
+                                      SELECT 1 FROM scheduler_jobs AS owning_job
+                                      WHERE owning_job.job_id = scheduler_runs.job_id
+                                        AND owning_job.status = 'active'
+                                  )
+                              )
+                              AND (
+                                  COALESCE((SELECT overlap_policy FROM scheduler_jobs
+                                            WHERE job_id = scheduler_runs.job_id), 'skip') != 'skip'
+                                  OR NOT EXISTS (
+                                      SELECT 1 FROM scheduler_runs AS active
+                                      WHERE active.job_id = scheduler_runs.job_id
+                                        AND active.run_id != scheduler_runs.run_id
+                                        AND active.state = 'running'
+                                        AND active.claim_expires_at > ?
+                                  )
+                              )
+                              {extra}
+                            ORDER BY COALESCE(next_attempt_at, scheduled_at), run_id LIMIT 1
+                        ) RETURNING *""",
+                    tuple(parameters),
+                ).fetchone()
+                if row is None:
+                    break
+                deterministic_session = f"scheduler:{row['job_id']}"
+                deterministic_thread = f"thread:scheduler:{row['job_id']}"
+                deterministic_turn = f"turn:scheduler:{row['run_id']}"
+                now_value = _iso(now)
+                conn.execute(
+                    """INSERT INTO sessions (
+                           session_id, channel, user_id, status, created_at, updated_at, metadata
+                       ) VALUES (?, 'scheduler', 'default', 'active', ?, ?, '{}')
+                       ON CONFLICT(session_id) DO NOTHING""",
+                    (deterministic_session, now_value, now_value),
+                )
+                conn.execute(
+                    """INSERT INTO runtime_threads (
+                           thread_id, session_id, user_id, title, status,
+                           latest_event_seq, created_at, updated_at, metadata
+                       ) VALUES (?, ?, 'default', ?, 'active', 0, ?, ?, '{}')
+                       ON CONFLICT(thread_id) DO NOTHING""",
+                    (deterministic_thread, deterministic_session, f"Scheduled job {row['job_id']}", now_value, now_value),
+                )
+                job = conn.execute(
+                    "SELECT prompt, goal_id, metadata FROM scheduler_jobs WHERE job_id = ?",
+                    (row["job_id"],),
+                ).fetchone()
+                job_metadata = json.loads(job["metadata"])
+                execution_profile = str(job_metadata.get("profile_id") or "main")
+                execution_user = str(job_metadata.get("user_id") or "default")
+                conn.execute(
+                    """INSERT INTO runtime_turns (
+                           turn_id, thread_id, session_id, user_input, status,
+                           started_at, metadata
+                       ) VALUES (?, ?, ?, ?, 'running', ?, ?)
+                       ON CONFLICT(turn_id) DO NOTHING""",
+                    (
+                        deterministic_turn, deterministic_thread, deterministic_session,
+                        job["prompt"], now_value,
+                        _json({
+                            "scheduler_run_id": row["run_id"],
+                            "job_id": row["job_id"],
+                            "source_event_key": f"scheduler:{row['run_id']}",
+                            "profile_id": execution_profile,
+                            "user_id": execution_user,
+                        }),
+                    ),
+                )
+                conn.execute(
+                    "UPDATE scheduler_runs SET turn_id = ?, goal_id = ? WHERE run_id = ?",
+                    (deterministic_turn, job["goal_id"], row["run_id"]),
+                )
+                claimed_row = conn.execute(
+                    "SELECT * FROM scheduler_runs WHERE run_id = ?", (row["run_id"],)
+                ).fetchone()
+                claimed.append(self._scheduler_run(claimed_row))
+                if run_id is not None:
+                    break
+        return claimed
+
+    def retry_scheduler_run(
+        self,
+        run_id: str,
+        token: ClaimToken,
+        error: str,
+        *,
+        now: datetime,
+        next_attempt_at: datetime | None,
+        failed: bool = False,
+    ) -> SchedulerRun:
+        if next_attempt_at is not None:
+            _require_aware(next_attempt_at, "next_attempt_at")
+        state = "failed" if failed else "retry_wait"
+        now_value = _iso(now)
+        with self._conn:
+            row = self._conn.execute(
+                """UPDATE scheduler_runs
+                   SET state = ?, next_attempt_at = ?, last_error = ?,
+                       claim_owner = NULL, claim_expires_at = NULL, updated_at = ?
+                   WHERE run_id = ? AND state = 'running'
+                     AND claim_owner = ? AND claim_generation = ?
+                     AND claim_expires_at = ? AND claim_expires_at > ?
+                   RETURNING *""",
+                (
+                    state, _iso(next_attempt_at) if next_attempt_at else None,
+                    str(error)[:500], now_value, run_id, token.owner_id,
+                    token.generation, _iso(token.expires_at), now_value,
+                ),
+            ).fetchone()
+        if row is None:
+            raise StaleClaimError(f"stale scheduler_run claim: {run_id}")
+        return self._scheduler_run(row)
+
+    def complete_scheduler_run(
+        self,
+        run_id: str,
+        token: ClaimToken,
+        *,
+        content: str,
+        now: datetime,
+        obligation: OutboxObligation | None = None,
+    ) -> SchedulerRun:
+        """Atomically finish the run and persist its optional delivery obligation."""
+        now_value = _iso(now)
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                """SELECT sr.*, sj.destination FROM scheduler_runs sr
+                   JOIN scheduler_jobs sj ON sj.job_id = sr.job_id
+                   WHERE sr.run_id = ?""",
+                (run_id,),
+            ).fetchone()
+            if current is None:
+                raise StateConflictError(f"missing scheduler run: {run_id}")
+            if current["destination"] and obligation is None:
+                raise StateConflictError("scheduled delivery destination requires an outbox obligation")
+            if obligation is not None:
+                if obligation.destination != current["destination"]:
+                    raise StateConflictError("scheduler destination changed before completion")
+                conn.execute(
+                    """INSERT INTO outbox_obligations (
+                           obligation_id, idempotency_key, destination, payload, state,
+                           attempt, claim_generation, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+                       ON CONFLICT(destination, idempotency_key) DO NOTHING""",
+                    (
+                        obligation.obligation_id, obligation.idempotency_key,
+                        obligation.destination, _json(obligation.payload),
+                        _iso(obligation.created_at), _iso(obligation.updated_at),
+                    ),
+                )
+                stored = conn.execute(
+                    """SELECT obligation_id, payload FROM outbox_obligations
+                       WHERE destination = ? AND idempotency_key = ?""",
+                    (obligation.destination, obligation.idempotency_key),
+                ).fetchone()
+                if stored is None or stored["obligation_id"] != obligation.obligation_id or stored["payload"] != _json(obligation.payload):
+                    raise StateConflictError("scheduler delivery identity belongs to another obligation")
+            row = conn.execute(
+                """UPDATE scheduler_runs
+                   SET state = 'completed', next_attempt_at = NULL, last_error = NULL,
+                       claim_owner = NULL, claim_expires_at = NULL, updated_at = ?
+                   WHERE run_id = ? AND state = 'running'
+                     AND claim_owner = ? AND claim_generation = ?
+                     AND claim_expires_at = ? AND claim_expires_at > ?
+                   RETURNING *""",
+                (
+                    now_value, run_id, token.owner_id, token.generation,
+                    _iso(token.expires_at), now_value,
+                ),
+            ).fetchone()
+            if row is None:
+                raise StaleClaimError(f"stale scheduler_run claim: {run_id}")
+        return self._scheduler_run(row)
 
     def create_goal_iteration(self, iteration: GoalIteration) -> GoalIteration:
         if iteration.state != "pending" or iteration.claim is not None:

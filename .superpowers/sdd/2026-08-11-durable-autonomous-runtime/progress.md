@@ -25,3 +25,7 @@ Task 6: minor (deferred): Quota release needs an idempotent noexcept compensatio
 Task 7: fix round 1/5 (5 HIGH and 3 MEDIUM addressed; batch, loop, bounded transport, authentication, WeCom routing, capability, retry-delay, and secret-surface findings closed)
 Task 7: fix round 2/5 (Discord transport boundary and 3 security MEDIUM findings addressed; final code/security gates 0 Critical, 0 High, 0 Medium)
 Task 7: complete (RED 66c5e2f plus implementation commit; 149 focused at 88% adapter/destination coverage, 373 passed and 2 skipped compatibility, reviews clean)
+Task 8: fix round 1/5 (2 HIGH and 2 MEDIUM code findings addressed: tool-effect fencing, completed-turn recovery, pause claim gating, legacy quarantine)
+Task 8: fix round 2/5 (1 HIGH, 2 MEDIUM, 1 LOW security findings addressed: deleted-manual fencing, bounded due scan/validation/backoff, pinned identity)
+Task 8: fix round 3/5 (cross-process cursor migration CAS/marker and bounded timezone validation addressed)
+Task 8: complete (RED 7637a72 plus implementation commit; 88 focused, 437 passed and 2 skipped compatibility, 85% scheduler coverage, code/security 0 Critical / 0 High / 0 Medium)

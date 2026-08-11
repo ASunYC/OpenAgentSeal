@@ -558,6 +558,60 @@ def test_scheduler_occurrence_and_cursor_advance_are_atomic(repository):
     assert job_two["next_run_at"] == scheduled_at.isoformat()
 
 
+def test_scheduler_cursor_cas_is_separate_from_latest_missed_occurrence(repository):
+    control_plane, repo = repository
+    expected_cursor = NOW - timedelta(minutes=5)
+    latest_missed = NOW
+    next_future = NOW + timedelta(minutes=1)
+    control_plane.create_scheduler_job(
+        "* * * * *", "run", job_id="job-catchup", next_run_at=expected_cursor.isoformat()
+    )
+
+    run = repo.create_due_scheduler_run(
+        "job-catchup",
+        latest_missed,
+        next_future,
+        expected_cursor=expected_cursor,
+        run_id="run-catchup",
+        now=NOW,
+    )
+
+    assert run is not None and run.scheduled_at == latest_missed
+    assert control_plane.get_scheduler_job("job-catchup")["next_run_at"] == next_future.isoformat()
+
+
+def test_scheduler_completion_and_outbox_rollback_together_on_stale_claim(repository):
+    control_plane, repo = repository
+    control_plane.create_scheduler_job(
+        "* * * * *", "run", job_id="job-delivery", next_run_at=NOW.isoformat(),
+        destination="local:test",
+    )
+    run = repo.create_due_scheduler_run(
+        "job-delivery", NOW, NOW + timedelta(minutes=1), now=NOW
+    )
+    claimed = repo.claim_due_scheduler_runs(
+        "dead", NOW, NOW + timedelta(seconds=1), run_id=run.run_id
+    )[0]
+    repo.claim_due_scheduler_runs(
+        "live", NOW + timedelta(seconds=2), NOW + timedelta(minutes=1), run_id=run.run_id
+    )
+    obligation = OutboxObligation(
+        "scheduler-output", "scheduler-result:test", "local:test", {"content": "late"},
+        created_at=NOW + timedelta(seconds=2), updated_at=NOW + timedelta(seconds=2),
+    )
+
+    with pytest.raises(StaleClaimError):
+        repo.complete_scheduler_run(
+            run.run_id,
+            claimed.claim,
+            content="late",
+            obligation=obligation,
+            now=NOW + timedelta(seconds=2),
+        )
+
+    assert repo.get_outbox("scheduler-output") is None
+
+
 def test_scheduler_cas_compares_equivalent_aware_instants(repository):
     control_plane, repo = repository
     china = timezone(timedelta(hours=8))
@@ -591,7 +645,8 @@ def test_scheduler_cas_preserves_sub_millisecond_cursor_precision(repository):
         now=NOW + timedelta(seconds=1),
     )
     assert run is None
-    assert control_plane.list_scheduler_jobs()[0]["next_run_at"] == stored_due.isoformat()
+    persisted = datetime.fromisoformat(control_plane.list_scheduler_jobs()[0]["next_run_at"])
+    assert persisted.astimezone(timezone.utc) == stored_due.astimezone(timezone.utc)
     assert repo.list_scheduler_runs("job-precise") == []
 
 

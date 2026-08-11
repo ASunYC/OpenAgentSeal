@@ -85,8 +85,8 @@ class TestAutonomics(unittest.TestCase):
         goal = goals.start_goal("session_obs", "observe me")
         goals.apply_judge_result(goal.goal_id, JudgeResult(done=True, confidence=1, reason="done", next_action=""))
         other_goal = goals.start_goal("session_other", "do not leak")
-        SchedulerController(self.control_plane).create_job(SchedulerJobSpec(schedule="once", prompt="run", goal_id=goal.goal_id))
-        SchedulerController(self.control_plane).create_job(SchedulerJobSpec(schedule="once", prompt="other", goal_id=other_goal.goal_id))
+        SchedulerController(self.control_plane).create_job(SchedulerJobSpec(schedule="0 9 * * *", prompt="run", goal_id=goal.goal_id))
+        SchedulerController(self.control_plane).create_job(SchedulerJobSpec(schedule="0 9 * * *", prompt="other", goal_id=other_goal.goal_id))
 
         snapshot = ObservabilitySnapshot(self.control_plane).build("session_obs")
         replay = GoalReplay(self.control_plane)

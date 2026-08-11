@@ -28,6 +28,7 @@ dependencies = [
     "pywinpty>=2.0.15; platform_system == 'Windows'",
     "pywin32>=310; platform_system == 'Windows'",
     "send2trash>=1.8.3",
+    "croniter>=6.0,<7",
 ]
 
 [project.scripts]
