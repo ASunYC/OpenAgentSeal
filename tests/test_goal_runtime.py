@@ -155,7 +155,7 @@ async def test_completion_emits_terminal_result_exactly_once(runtime):
     cp, repo = runtime
     goal = repo.create_goal_with_first_iteration(
         session_id="session-1", goal_text="Ship", configuration=config().to_record(), now=NOW,
-        destination="local-session:session-1",
+        destination="local_session",
     )
     runner = FakeRunner([AgentEvent(event="complete", session_id="session-1", content="done", result={"usage": {"total_tokens": 4}})])
     done = JudgeResult(True, 0.9, "accepted", "", criterion_evidence={"tests pass": {"satisfied": True, "evidence": "yes"}, "report exists": {"satisfied": True, "evidence": "yes"}})
@@ -165,7 +165,7 @@ async def test_completion_emits_terminal_result_exactly_once(runtime):
     await service.run_iteration(goal.goal_id)
 
     assert cp.get_goal(goal.goal_id)["status"] == "completed"
-    obligations = [item for item in repo.list_outbox() if item.destination == "local-session:session-1"]
+    obligations = [item for item in repo.list_outbox() if item.destination == "local_session"]
     assert len(obligations) == 1
     assert obligations[0].idempotency_key == f"goal:{goal.goal_id}:terminal:v1"
 
@@ -484,7 +484,7 @@ def test_terminal_outbox_identity_conflict_rolls_back_goal_settlement(runtime):
         obligation_id=f"goal:{first.goal_id}:terminal:v1", idempotency_key=f"goal:{first.goal_id}:terminal:v1",
         destination="local_session", payload={"conflict": True}, created_at=NOW, updated_at=NOW,
     ))
-    obligation = GoalRunner._result_obligation(cp.get_goal(first.goal_id), "done", JudgeResult(True, 1, "done", "", criterion_evidence=satisfied()), NOW, status="completed", sequence=1)
+    obligation = GoalRunner(repo, FakeRunner([]), FakeJudge([]), owner_id="builder")._result_obligation(cp.get_goal(first.goal_id), "done", JudgeResult(True, 1, "done", "", criterion_evidence=satisfied()), NOW, status="completed", sequence=1)
     with pytest.raises(Exception):
         repo.finish_goal_iteration(claimed.iteration_id, claimed.claim, judge_result=JudgeResult(True, 1, "done", "", criterion_evidence=satisfied()).to_dict(), budget_delta={}, continue_running=False, goal_status="completed", expected_goal_version=0, terminal_obligation=obligation, now=NOW + timedelta(seconds=1))
     assert repo.get_goal_iteration(first.iteration_id).state == "running"
@@ -502,7 +502,8 @@ def test_destination_kind_is_validated_at_goal_creation(runtime):
 def test_cancel_also_fences_retry_wait_iteration(runtime):
     cp, repo = runtime
     first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
-    cp._get_conn().execute("UPDATE goal_iterations SET state='retry_wait', next_attempt_at=? WHERE iteration_id=?", ((NOW + timedelta(seconds=5)).isoformat(), first.iteration_id))
+    with cp._get_conn() as conn:
+        conn.execute("UPDATE goal_iterations SET state='retry_wait', next_attempt_at=? WHERE iteration_id=?", ((NOW + timedelta(seconds=5)).isoformat(), first.iteration_id))
     repo.transition_goal(first.goal_id, expected_version=0, action="cancel", now=NOW, reason="stop")
     assert repo.get_goal_iteration(first.iteration_id).state == "cancelled"
 
@@ -538,3 +539,69 @@ def test_configured_transition_message_and_state_are_atomic(runtime):
     repo.transition_goal(first.goal_id, expected_version=0, action="pause", now=NOW, reason="review")
     messages = cp.list_messages("s")
     assert any(item["metadata"].get("goal_event") == "paused" for item in messages)
+
+
+@pytest.mark.asyncio
+async def test_malformed_slow_judge_settles_with_latest_renewed_claim(runtime):
+    import asyncio
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
+
+    class MalformedSlowJudge:
+        async def judge(self, **kwargs):
+            await asyncio.sleep(0.4)
+            return {"malformed": True}
+
+    ticks = [0]
+    def clock():
+        ticks[0] += 0.2
+        return NOW + timedelta(seconds=ticks[0])
+
+    result = await GoalRunner(
+        repo, FakeRunner([AgentEvent(event="complete", session_id="s", content="x", result={"usage": {"total_tokens": 1}})]),
+        MalformedSlowJudge(), owner_id="w", clock=clock, lease_duration=timedelta(seconds=1),
+    ).run_iteration(first.goal_id)
+    assert result.state == "retry_wait" and result.claim is None
+
+
+@pytest.mark.asyncio
+async def test_channel_goal_uses_channel_destination_payload(runtime):
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(
+        session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW,
+        destination="channel:account-1",
+        metadata={"account_id": "account-1", "conversation_id": "conversation-1"},
+    )
+    await GoalRunner(
+        repo, FakeRunner([AgentEvent(event="complete", session_id="s", content="done", result={"usage": {"total_tokens": 1}})]),
+        FakeJudge([JudgeResult(True, 1, "done", "", criterion_evidence=satisfied())]),
+        owner_id="w", clock=lambda: NOW + timedelta(seconds=1),
+    ).run_iteration(first.goal_id)
+    obligation = repo.list_outbox()[0]
+    assert obligation.destination == "channel:account-1"
+    assert obligation.payload["account_id"] == "account-1"
+    assert obligation.payload["conversation_id"] == "conversation-1"
+    assert obligation.payload["source_event_key"] == obligation.idempotency_key
+
+
+@pytest.mark.asyncio
+async def test_slow_none_judge_settles_with_latest_renewed_claim(runtime):
+    import asyncio
+    cp, repo = runtime
+    first = repo.create_goal_with_first_iteration(session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW)
+
+    class NoneJudge:
+        async def judge(self, **kwargs):
+            await asyncio.sleep(0.4)
+            return None
+
+    ticks = [0]
+    def clock():
+        ticks[0] += 0.2
+        return NOW + timedelta(seconds=ticks[0])
+
+    result = await GoalRunner(
+        repo, FakeRunner([AgentEvent(event="complete", session_id="s", content="x", result={"usage": {"total_tokens": 1}})]),
+        NoneJudge(), owner_id="w", clock=clock, lease_duration=timedelta(seconds=1),
+    ).run_iteration(first.goal_id)
+    assert result.state == "retry_wait" and repo.get_goal_iteration(first.iteration_id).state == "retry_wait"
