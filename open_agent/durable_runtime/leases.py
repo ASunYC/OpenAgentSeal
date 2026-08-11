@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from math import isfinite
 from typing import Callable
 
 from .models import ClaimToken
@@ -21,14 +22,19 @@ def next_backoff(
         raise ValueError("attempt must be an integer")
     if attempt < 0:
         raise ValueError("attempt must not be negative")
-    if base_seconds <= 0:
+    if not isfinite(base_seconds) or base_seconds <= 0:
         raise ValueError("base_seconds must be positive")
-    if cap_seconds <= 0 or cap_seconds < base_seconds:
+    if not isfinite(cap_seconds) or cap_seconds <= 0 or cap_seconds < base_seconds:
         raise ValueError("cap_seconds must be at least base_seconds")
-    if not 0 <= jitter <= 1:
+    if not isfinite(jitter) or not 0 <= jitter <= 1:
         raise ValueError("jitter must be between 0 and 1")
 
-    delay = min(cap_seconds, base_seconds * (2**attempt))
+    delay = base_seconds
+    for _ in range(attempt):
+        if delay >= cap_seconds / 2:
+            delay = cap_seconds
+            break
+        delay *= 2
     if jitter == 0:
         return delay
     if random_source is None:

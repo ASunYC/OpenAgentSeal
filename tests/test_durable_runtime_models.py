@@ -122,6 +122,16 @@ def test_zero_jitter_backoff_is_deterministic() -> None:
     assert next_backoff(3, base_seconds=2.0, cap_seconds=60.0, jitter=0.0) == 16.0
 
 
+def test_backoff_caps_a_huge_attempt_without_overflow_for_zero_jitter() -> None:
+    """A long-lived retry counter must still produce its configured cap."""
+    assert next_backoff(1024, 2.0, 30.0, 0.0) == 30.0
+
+
+def test_backoff_caps_a_huge_attempt_without_overflow_for_jitter() -> None:
+    """Jitter must not reintroduce an overflowing exponential calculation."""
+    assert next_backoff(1024, 2.0, 30.0, 0.5, random_source=lambda: 1.0) == 30.0
+
+
 def test_backoff_never_exceeds_cap_after_jitter() -> None:
     """A random high jitter draw cannot delay a retry beyond its configured cap."""
     assert next_backoff(10, 2.0, 30.0, 0.5, random_source=lambda: 1.0) == 30.0
@@ -133,9 +143,46 @@ def test_backoff_rejects_non_zero_jitter_without_an_injected_random_source() -> 
         next_backoff(1, 2.0, 30.0, 0.25)
 
 
+@pytest.mark.parametrize(
+    ("args", "random_source", "message"),
+    [
+        ((-1, 2.0, 30.0, 0.0), None, "negative"),
+        ((1, 0.0, 30.0, 0.0), None, "base_seconds"),
+        ((1, 2.0, 0.0, 0.0), None, "cap_seconds"),
+        ((1, 2.0, 1.0, 0.0), None, "cap_seconds"),
+        ((1, 2.0, 30.0, -0.1), None, "jitter"),
+        ((1, 2.0, 30.0, 1.1), None, "jitter"),
+        ((1, 2.0, 30.0, 0.5), lambda: -0.1, "random_source"),
+        ((1, 2.0, 30.0, 0.5), lambda: 1.1, "random_source"),
+        ((1, float("nan"), 30.0, 0.0), None, "base_seconds"),
+        ((1, float("inf"), 30.0, 0.0), None, "base_seconds"),
+        ((1, 2.0, float("nan"), 0.0), None, "cap_seconds"),
+        ((1, 2.0, float("inf"), 0.0), None, "cap_seconds"),
+        ((1, 2.0, 30.0, float("nan")), None, "jitter"),
+        ((1, 2.0, 30.0, float("inf")), None, "jitter"),
+    ],
+)
+def test_backoff_rejects_invalid_inputs(
+    args: tuple[object, float, float, float],
+    random_source: object,
+    message: str,
+) -> None:
+    """Invalid retry settings and random draws cannot create undefined schedules."""
+    with pytest.raises(ValueError, match=message):
+        next_backoff(*args, random_source=random_source)  # type: ignore[arg-type]
+
+
 def test_lease_is_invalid_at_expiry_and_valid_before_expiry() -> None:
     """An expiry boundary must prevent a stale claimant from issuing a side effect."""
     token = ClaimToken("worker-a", 3, UTC_NOW + timedelta(seconds=30))
 
     assert lease_is_valid(token, UTC_NOW + timedelta(seconds=29)) is True
     assert lease_is_valid(token, UTC_NOW + timedelta(seconds=30)) is False
+
+
+def test_lease_rejects_naive_now() -> None:
+    """Lease comparison needs an unambiguous instant from the caller."""
+    token = ClaimToken("worker-a", 3, UTC_NOW + timedelta(seconds=30))
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        lease_is_valid(token, UTC_NOW.replace(tzinfo=None))
