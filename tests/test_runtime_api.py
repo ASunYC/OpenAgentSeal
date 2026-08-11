@@ -96,6 +96,22 @@ class TestRuntimeApi(unittest.TestCase):
         self.assertEqual(metadata["attachments"][0]["name"], "notes.md")
         self.assertNotIn("data", metadata["attachments"][0])
 
+    def test_runtime_turn_metadata_preserves_durable_source_event_key(self):
+        request = AgentRequest(
+            session_id="session_gateway",
+            messages=[{"role": "user", "content": "hello"}],
+            meta={"source_event_key": '["account-1","event-1"]'},
+        )
+
+        metadata = AgentRunner()._runtime_turn_metadata(
+            request,
+            agent_id="main",
+            profile_id="main",
+            tool_access_mode="default",
+        )
+
+        self.assertEqual(metadata["source_event_key"], '["account-1","event-1"]')
+
     def test_memory_recall_excludes_already_injected_memories(self):
         memory_manager = Mock()
         memory_manager.recall.return_value = [
