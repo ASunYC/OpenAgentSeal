@@ -14,6 +14,7 @@
     "test:message-queue": "node scripts/test-message-queue.mjs",
     "test:runtime-task": "node scripts/test-runtime-task.mjs",
     "test:collaboration-state": "node scripts/test-collaboration-state.mjs",
+    "test:autonomics": "node scripts/test-autonomics-model.mjs",
     "preview": "vite preview",
     "mobile:sync": "npm run build && cap sync android",
     "mobile:package": "cap sync android && cd android && gradlew.bat assembleDebug",
