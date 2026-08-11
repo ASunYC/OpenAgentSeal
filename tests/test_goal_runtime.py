@@ -8,7 +8,7 @@ import pytest
 
 from open_agent.app.runner.models import AgentEvent
 from open_agent.control_plane import ControlPlane
-from open_agent.durable_runtime.repository import DurableRuntimeRepository
+from open_agent.durable_runtime.repository import DurableRuntimeRepository, GoalOperatorService
 from open_agent.durable_runtime.delivery import DeliveryWorker
 from open_agent.goal_mode import JudgeResult
 from open_agent.goal_runtime import (
@@ -21,6 +21,46 @@ from open_agent.goal_runtime import (
 
 
 NOW = datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc)
+
+
+class AuthorizedRepository:
+    """Test auth-boundary facade that injects opaque capabilities, never identity strings."""
+
+    def __init__(self, repository, principal, operator_service):
+        self.raw = repository
+        self.principal = principal
+        self.operator_service = operator_service
+
+    def __getattr__(self, name):
+        return getattr(self.raw, name)
+
+    def create_goal_with_first_iteration(self, **kwargs):
+        kwargs.setdefault("principal", self.principal)
+        return self.raw.create_goal_with_first_iteration(**kwargs)
+
+    def append_goal_guidance(self, goal_id, content, **kwargs):
+        kwargs.setdefault("principal", self.principal)
+        return self.raw.append_goal_guidance(goal_id, content, **kwargs)
+
+    def list_goal_guidance(self, goal_id, **kwargs):
+        kwargs.setdefault("principal", self.principal)
+        return self.raw.list_goal_guidance(goal_id, **kwargs)
+
+    def transition_goal(self, goal_id, **kwargs):
+        kwargs.pop("operator_principal", None)
+        kwargs.setdefault("principal", self.principal)
+        return self.raw.transition_goal(goal_id, **kwargs)
+
+    def issue_goal_operator_approval(
+        self, goal_id, *, approval_id, decision, now, budget_updates=None, **_ignored
+    ):
+        goal = self.control_plane.get_goal(goal_id)
+        return self.operator_service.approve(
+            self.principal, goal_id, approval_id=approval_id, decision=decision,
+            expected_goal_version=int(goal["runtime_version"]),
+            expires_at=now + timedelta(minutes=5), now=now,
+            budget_updates=budget_updates,
+        )
 
 
 def criteria_evidence(*, complete: bool = False):
@@ -68,7 +108,18 @@ class FakeJudge:
 @pytest.fixture
 def runtime(tmp_path: Path):
     cp = ControlPlane(tmp_path)
-    return cp, DurableRuntimeRepository(cp)
+    goal_capability = object()
+    operator_capability = object()
+    raw = DurableRuntimeRepository(
+        cp, goal_authority_capability=goal_capability,
+        operator_authority_capability=operator_capability,
+    )
+    principal = raw.mint_goal_principal(
+        actor_id="default", tenant_id="local", capability=goal_capability
+    )
+    return cp, AuthorizedRepository(
+        raw, principal, GoalOperatorService(raw, operator_capability)
+    )
 
 
 def config(*, max_iterations=4, max_tokens=1000, max_cost=2.0, max_seconds=300.0):
@@ -418,7 +469,7 @@ def test_budget_resume_requires_atomic_budget_increase(runtime):
         repo.transition_goal(first.goal_id, expected_version=0, action="resume", now=NOW, reason="try")
     repo.issue_goal_operator_approval(
         first.goal_id, approval_id="budget-approval", principal_id="default",
-        decision="increase_budget", now=NOW,
+        decision="increase_budget", now=NOW, budget_updates={"max_tokens": 20},
     )
     resumed = repo.transition_goal(
         first.goal_id, expected_version=0, action="resume", now=NOW, reason="operator",
@@ -585,7 +636,7 @@ async def test_channel_goal_uses_channel_destination_payload(runtime):
     cp, repo = runtime
     cp.create_session(
         "s", channel="telegram", user_id="default",
-        metadata={"account_id": "account-1", "conversation_id": "conversation-1"},
+        metadata={"tenant_id": "local", "account_id": "account-1", "conversation_id": "conversation-1"},
     )
     first = repo.create_goal_with_first_iteration(
         session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW,
@@ -672,12 +723,12 @@ async def test_non_main_goal_uses_scoped_parent_profile_and_real_local_delivery(
     await manager.create_chat(session_id="s")
     cp.create_session(
         "s", channel="web", user_id="default",
-        metadata={"profile_id": "profile-a", "parent_profile_id": "profile-a"},
+        metadata={"tenant_id": "local", "profile_id": "profile-a", "parent_profile_id": "profile-a"},
     )
     monkeypatch.setattr("open_agent.durable_runtime.delivery.get_chat_manager", lambda profile: manager if profile == "profile-a" else None)
     first = repo.create_goal_with_first_iteration(
         session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW,
-        metadata={"profile_id": "profile-a", "parent_profile_id": "profile-a"},
+        metadata={"tenant_id": "local", "profile_id": "profile-a", "parent_profile_id": "profile-a"},
     )
     await GoalRunner(
         repo, FakeRunner([AgentEvent(event="complete", session_id="s", content="done", result={"usage": {"total_tokens": 1}})]),
@@ -704,7 +755,7 @@ def test_goal_destination_is_derived_from_persisted_session_principal(runtime):
         )
     cp.create_session(
         "channel", channel="telegram", user_id="user-a",
-        metadata={"account_id": "account-a", "conversation_id": "conversation-a"},
+        metadata={"tenant_id": "local", "account_id": "account-a", "conversation_id": "conversation-a"},
     )
     with pytest.raises(PermissionError):
         repo.create_goal_with_first_iteration(
@@ -805,8 +856,8 @@ async def test_goal_delivery_rechecks_profile_acl_after_obligation_creation(runt
     await manager.create_chat(session_id="s")
     monkeypatch.setattr("open_agent.durable_runtime.delivery.get_chat_manager", lambda _: manager)
     cp.create_session(
-        "s", channel="web", user_id="user-a",
-        metadata={"profile_id": "profile-a", "parent_profile_id": "profile-a"},
+        "s", channel="web", user_id="default",
+        metadata={"tenant_id": "local", "profile_id": "profile-a", "parent_profile_id": "profile-a"},
     )
     first = repo.create_goal_with_first_iteration(
         session_id="s", goal_text="Ship", configuration=config().to_record(), now=NOW,
@@ -820,7 +871,7 @@ async def test_goal_delivery_rechecks_profile_acl_after_obligation_creation(runt
     ).run_iteration(first.goal_id)
     cp.create_session(
         "s", channel="web", user_id="user-b",
-        metadata={"profile_id": "profile-b", "parent_profile_id": "profile-b"},
+        metadata={"tenant_id": "local", "profile_id": "profile-b", "parent_profile_id": "profile-b"},
     )
     worker = DeliveryWorker(
         repo, {"local_session": LocalSessionDestination(repo, clock=lambda: NOW + timedelta(seconds=2))},
@@ -881,14 +932,14 @@ def test_terminal_validation_precedes_any_control_plane_write(runtime):
     cp, _ = runtime
     cp.create_runtime_thread(session_id="s", thread_id="thread")
     cp.start_runtime_turn("thread", "x", turn_id="turn")
-    before = cp.get_runtime_turn("turn")
+    before = cp.list_runtime_turns("thread")[0]
     with pytest.raises(ValueError):
         cp.complete_runtime_turn_with_event(
             thread_id="thread", turn_id="turn", session_id="s", event_type="complete",
             payload={"event": "complete", "content": "x" * 65_537}, status="completed",
             result={"content": "x" * 65_537, "usage": {"total_tokens": 1}},
         )
-    assert cp.get_runtime_turn("turn") == before
+    assert cp.list_runtime_turns("thread")[0] == before
     assert cp.list_runtime_events("thread") == []
 
 
@@ -905,3 +956,37 @@ def test_transition_reason_byte_limit_has_zero_residual_writes(runtime):
         )
     assert cp.get_goal(first.goal_id)["runtime_version"] == 0
     assert cp.list_messages("reason") == before_messages
+
+
+@pytest.mark.asyncio
+async def test_goal_runner_recovery_and_explicit_run_are_tenant_scoped(tmp_path):
+    cp = ControlPlane(tmp_path)
+    capability = object()
+    repo = DurableRuntimeRepository(cp, goal_authority_capability=capability)
+    victim = repo.mint_goal_principal(actor_id="victim", tenant_id="tenant-a", capability=capability)
+    attacker = repo.mint_goal_principal(actor_id="attacker", tenant_id="tenant-b", capability=capability)
+    first = repo.create_goal_with_first_iteration(
+        session_id="victim-session", goal_text="Ship", configuration=config().to_record(),
+        now=NOW, principal=victim,
+    )
+    runner = GoalRunner(
+        repo, FakeRunner([]), FakeJudge([]), owner_id="attacker-worker",
+        request_principal=attacker, clock=lambda: NOW,
+    )
+    assert runner.recover(NOW) == []
+    assert await runner.run_iteration(first.goal_id) is None
+    assert repo.get_goal_iteration(first.iteration_id).state == "pending"
+    assert cp.list_runtime_turns(f"goal:{first.goal_id}:thread") == []
+
+
+def test_legacy_terminal_completion_uses_same_prewrite_validator(runtime):
+    cp, _ = runtime
+    cp.create_runtime_thread(session_id="s", thread_id="legacy-thread")
+    cp.start_runtime_turn("legacy-thread", "x", turn_id="legacy-turn")
+    before = cp.list_runtime_turns("legacy-thread")[0]
+    with pytest.raises(ValueError):
+        cp.complete_runtime_turn(
+            "legacy-turn", status="completed",
+            result={"content": "x" * 65_537, "usage": {"total_tokens": 1}},
+        )
+    assert cp.list_runtime_turns("legacy-thread")[0] == before
