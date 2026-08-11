@@ -127,19 +127,41 @@ def test_local_operational_session_bootstrap_and_rotation(operational_app):
     assert "HttpOnly" in bootstrapped.headers["set-cookie"]
     assert "Cache-Control" not in bootstrapped.text
     assert client.get("/api/operations/channel-accounts").status_code == 200
+    resumed = client.get(
+        "/api/operations/session/resume", headers={"Origin": "https://ops.example.test"}
+    )
+    assert resumed.status_code == 200
+    resumed_csrf = resumed.json()["data"]["csrf_token"]
+    assert resumed_csrf and resumed_csrf != data["csrf_token"]
     assert client.post(
         "/api/operations/session/bootstrap", headers=headers,
         json={"mode": "cookie", "capability": capability},
     ).status_code == 403
+    assert client.post(
+        "/api/operations/session/reauthenticate",
+        headers={**headers, "X-CSRF-Token": resumed_csrf},
+        json={"user_presence_confirmed": True, "capability": "wrong-" + "x" * 48},
+    ).status_code == 403
 
     rotated = client.post(
         "/api/operations/session/reauthenticate",
-        headers={**headers, "X-CSRF-Token": data["csrf_token"]},
-        json={"user_presence_confirmed": True},
+        headers={**headers, "X-CSRF-Token": resumed_csrf},
+        json={
+            "user_presence_confirmed": True,
+            "capability": data["next_bootstrap_capability"],
+        },
     )
     assert rotated.status_code == 200, rotated.text
     next_csrf = rotated.json()["data"]["csrf_token"]
     assert next_csrf and next_csrf != data["csrf_token"]
+    assert client.post(
+        "/api/operations/session/reauthenticate",
+        headers={**headers, "X-CSRF-Token": next_csrf},
+        json={
+            "user_presence_confirmed": True,
+            "capability": data["next_bootstrap_capability"],
+        },
+    ).status_code == 403
     rejected = client.post(
         "/api/operations/scheduler/jobs",
         headers={**headers, "X-CSRF-Token": data["csrf_token"]},
@@ -163,7 +185,7 @@ def test_local_desktop_bootstrap_returns_memory_only_bearer(operational_app):
     )
     response = client.post(
         "/api/operations/session/bootstrap",
-        headers={"Origin": "http://tauri.localhost", "Sec-Fetch-Site": "same-origin"},
+        headers={"Origin": "http://tauri.localhost", "Sec-Fetch-Site": "cross-site"},
         json={"mode": "bearer", "capability": "desktop-capability-" + "d" * 48},
     )
     assert response.status_code == 200, response.text

@@ -7,7 +7,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -40,6 +40,45 @@ fn current_sidecar_file_names() -> Vec<String> {
 struct BackendProcess {
     child: Mutex<Option<Child>>,
     command: BackendCommand,
+    operational_bootstrap: OperationalBootstrapState,
+}
+
+#[derive(Clone, Default)]
+struct OperationalBootstrapState {
+    capability: Arc<Mutex<Option<String>>>,
+}
+
+impl OperationalBootstrapState {
+    fn load(&self) -> Result<Option<String>, String> {
+        self.capability
+            .lock()
+            .map(|value| value.clone())
+            .map_err(|_| "Operational bootstrap state lock is poisoned".to_string())
+    }
+
+    fn store(&self, capability: String) -> Result<(), String> {
+        validate_operational_bootstrap_capability(&capability)?;
+        *self
+            .capability
+            .lock()
+            .map_err(|_| "Operational bootstrap state lock is poisoned".to_string())? =
+            Some(capability);
+        Ok(())
+    }
+}
+
+fn validate_operational_bootstrap_capability(capability: &str) -> Result<(), String> {
+    if !(32..=4096).contains(&capability.len()) {
+        return Err("Operational bootstrap capability has an invalid length".to_string());
+    }
+    Ok(())
+}
+
+fn generate_operational_bootstrap_capability() -> Result<String, String> {
+    let mut random = [0_u8; 32];
+    getrandom::fill(&mut random)
+        .map_err(|_| "Failed to provision operational bootstrap capability".to_string())?;
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 impl BackendProcess {
@@ -57,7 +96,9 @@ impl BackendProcess {
             return Err("Backend port is already owned by another process".to_string());
         }
 
-        let mut backend = spawn_backend(&self.command)?;
+        let capability = generate_operational_bootstrap_capability()?;
+        self.operational_bootstrap.store(capability.clone())?;
+        let mut backend = spawn_backend(&self.command, &capability)?;
         if wait_for_backend_ready() {
             *child = Some(backend);
             Ok(())
@@ -81,7 +122,9 @@ impl BackendProcess {
             return Err("Backend port is already owned by another process".to_string());
         }
 
-        let mut backend = spawn_backend(&self.command)?;
+        let capability = generate_operational_bootstrap_capability()?;
+        self.operational_bootstrap.store(capability.clone())?;
+        let mut backend = spawn_backend(&self.command, &capability)?;
         if wait_for_backend_ready() {
             *child = Some(backend);
             Ok(())
@@ -120,6 +163,21 @@ impl Drop for BackendProcess {
 #[tauri::command]
 fn backend_url() -> String {
     format!("http://{}:{}", BACKEND_CONNECT_HOST, BACKEND_PORT)
+}
+
+#[tauri::command]
+fn load_operational_bootstrap_capability(
+    state: tauri::State<'_, OperationalBootstrapState>,
+) -> Result<Option<String>, String> {
+    state.load()
+}
+
+#[tauri::command]
+fn store_operational_bootstrap_capability(
+    capability: String,
+    state: tauri::State<'_, OperationalBootstrapState>,
+) -> Result<(), String> {
+    state.store(capability)
 }
 
 #[tauri::command]
@@ -274,7 +332,10 @@ fn find_sidecar(app: &tauri::App) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.exists())
 }
 
-fn spawn_backend(command_config: &BackendCommand) -> Result<Child, String> {
+fn spawn_backend(
+    command_config: &BackendCommand,
+    bootstrap_capability: &str,
+) -> Result<Child, String> {
     let stdout = open_backend_log()?;
     let stderr = stdout
         .try_clone()
@@ -312,6 +373,10 @@ fn spawn_backend(command_config: &BackendCommand) -> Result<Child, String> {
 
     command
         .env("OPEN_AGENT_DESKTOP", "1")
+        .env(
+            "OPEN_AGENT_OPERATIONAL_BOOTSTRAP_TOKEN",
+            bootstrap_capability,
+        )
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::null())
@@ -893,9 +958,12 @@ fn main() {
         )
         .setup(|app| {
             let backend_command = resolve_backend_command(app);
+            let operational_bootstrap = OperationalBootstrapState::default();
+            app.manage(operational_bootstrap.clone());
             app.manage(BackendProcess {
                 child: Mutex::new(None),
                 command: backend_command,
+                operational_bootstrap,
             });
 
             let app_handle = app.handle().clone();
@@ -996,7 +1064,12 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![backend_url, open_path])
+        .invoke_handler(tauri::generate_handler![
+            backend_url,
+            open_path,
+            load_operational_bootstrap_capability,
+            store_operational_bootstrap_capability
+        ])
         .run(tauri::generate_context!())
         .expect("error while running OpenAgentSeal desktop shell");
 }
@@ -1004,6 +1077,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operational_bootstrap_state_is_memory_only_and_replaceable() {
+        let state = OperationalBootstrapState::default();
+        let first = "a".repeat(64);
+        let successor = "b".repeat(64);
+
+        assert_eq!(state.load().unwrap(), None);
+        state.store(first).unwrap();
+        assert_eq!(state.load().unwrap(), Some("a".repeat(64)));
+        state.store(successor).unwrap();
+        assert_eq!(state.load().unwrap(), Some("b".repeat(64)));
+    }
+
+    #[test]
+    fn operational_bootstrap_state_rejects_invalid_lengths() {
+        let state = OperationalBootstrapState::default();
+
+        assert!(state.store("short".to_string()).is_err());
+        assert!(state.store("x".repeat(4097)).is_err());
+        assert_eq!(state.load().unwrap(), None);
+    }
 
     #[test]
     fn format_cli_command_line_includes_cwd_program_and_args() {

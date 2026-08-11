@@ -94,7 +94,7 @@ def create_app() -> FastAPI:
         origin.strip()
         for origin in os.environ.get(
             "OPEN_AGENT_ALLOWED_ORIGINS",
-            "http://127.0.0.1:8088,http://localhost:8088",
+            "http://127.0.0.1:8088,http://localhost:8088,http://tauri.localhost",
         ).split(",")
         if origin.strip()
     ]
@@ -103,7 +103,7 @@ def create_app() -> FastAPI:
         allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "If-Match"],
     )
 
     # Include chat router

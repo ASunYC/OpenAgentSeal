@@ -5468,6 +5468,19 @@ onUnmounted(() => {
   z-index: 999;
 }
 
+@media (max-width: 900px) {
+  .app-container {
+    min-width: 0;
+    overflow-x: hidden;
+  }
+
+  .settings-sidebar {
+    width: 100vw !important;
+    max-width: 100vw;
+    height: 100dvh;
+  }
+}
+
 .confirm-overlay {
   position: fixed;
   inset: 0;

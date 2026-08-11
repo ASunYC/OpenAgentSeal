@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -76,6 +77,16 @@ class AuditReveal(StrictOperationalModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class SessionBootstrap(StrictOperationalModel):
+    mode: Literal["cookie", "bearer"]
+    capability: str = Field(min_length=32, max_length=4096)
+
+
+class SessionReauthenticate(StrictOperationalModel):
+    user_presence_confirmed: Literal[True]
+    capability: str = Field(min_length=32, max_length=4096)
+
+
 def _composition(request: Request):
     value = getattr(request.app.state, "runtime_composition", None)
     if value is None:
@@ -118,6 +129,120 @@ def _page(request, principal, kind, *, limit, cursor, shared=False, tenant_id=No
     return visible, auth.sign_cursor(principal, kind, visible[-1]) if more and visible else None
 
 
+def _require_local_trusted_client(request: Request, *, allow_cross_site: bool = False) -> None:
+    try:
+        local = ipaddress.ip_address(request.client.host if request.client else "").is_loopback
+    except ValueError:
+        local = False
+    auth = getattr(request.app.state, "operational_auth", None)
+    origin = request.headers.get("origin")
+    fetch_site = request.headers.get("sec-fetch-site", "none").lower()
+    if (
+        not local
+        or not hasattr(auth, "origin_is_trusted")
+        or not auth.origin_is_trusted(origin)
+        or (fetch_site == "cross-site" and not allow_cross_site)
+    ):
+        raise _http(403, "local_session_required", "A trusted local application session is required")
+
+
+def _session_view(
+    *, mode: str, token: str, csrf: str | None,
+    next_bootstrap_capability: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "auth_mode": mode,
+        "csrf_token": csrf,
+        "roles": ["operator", "system_operator", "auditor"],
+        "expires_in_seconds": 1800,
+    }
+    if mode == "bearer":
+        result["access_token"] = token
+    if next_bootstrap_capability is not None:
+        result["next_bootstrap_capability"] = next_bootstrap_capability
+    return result
+
+
+def _set_operational_cookie(response: Response, request: Request, token: str) -> None:
+    response.set_cookie(
+        "oas_operational_session", token, max_age=1800, httponly=True,
+        secure=request.url.scheme == "https", samesite="strict",
+        path="/api/operations",
+    )
+    response.headers["Cache-Control"] = "no-store"
+
+
+@operations.post("/session/bootstrap")
+async def bootstrap_session(body: SessionBootstrap, request: Request, response: Response):
+    _require_local_trusted_client(request, allow_cross_site=body.mode == "bearer")
+    auth = request.app.state.operational_auth
+    common = {
+        "actor_id": "local-operator", "tenant_id": "local",
+        "roles": ("operator", "system_operator", "auditor"),
+        "scopes": ("operations",), "session_ttl": timedelta(minutes=30),
+    }
+    if body.mode == "cookie":
+        token, csrf = auth.issue_cookie_session(**common)
+    else:
+        token, csrf = auth.issue_bearer(**common), None
+    successor = auth.consume_bootstrap_capability(body.capability)
+    if successor is None:
+        auth.revoke_token(token)
+        raise _http(403, "bootstrap_capability_required", "A valid one-time bootstrap capability is required")
+    if body.mode == "cookie":
+        _set_operational_cookie(response, request, token)
+    else:
+        response.headers["Cache-Control"] = "no-store"
+    return _ok(_session_view(
+        mode=body.mode, token=token, csrf=csrf,
+        next_bootstrap_capability=successor,
+    ))
+
+
+@operations.get("/session/resume")
+async def resume_cookie_session(request: Request, response: Response, principal: Authenticated):
+    if principal.auth_method != "cookie":
+        raise _http(409, "cookie_session_required", "Cookie session resume is not available")
+    _require_local_trusted_client(request)
+    try:
+        csrf = request.app.state.operational_auth.refresh_cookie_csrf(principal)
+    except ValueError:
+        raise _http(401, "authentication_required", "Authentication is required") from None
+    response.headers["Cache-Control"] = "no-store"
+    return _ok(_session_view(mode="cookie", token="", csrf=csrf))
+
+
+@operations.post("/session/reauthenticate")
+async def reauthenticate_session(
+    body: SessionReauthenticate, request: Request, response: Response,
+    principal: Authenticated,
+):
+    _require_local_trusted_client(request, allow_cross_site=principal.auth_method == "bearer")
+    auth = request.app.state.operational_auth
+    common = {
+        "actor_id": principal.actor_id, "tenant_id": principal.tenant_id,
+        "roles": principal.roles, "scopes": principal.scopes,
+        "session_ttl": timedelta(minutes=30),
+    }
+    if principal.auth_method == "cookie":
+        token, csrf = auth.issue_cookie_session(**common)
+    else:
+        token, csrf = auth.issue_bearer(**common), None
+    successor = auth.consume_bootstrap_capability(body.capability)
+    if successor is None:
+        auth.revoke_token(token)
+        raise _http(403, "bootstrap_capability_required", "A valid one-time bootstrap capability is required")
+    auth.revoke_session_id(principal.session_id)
+    if principal.auth_method == "cookie":
+        _set_operational_cookie(response, request, token)
+    else:
+        response.headers["Cache-Control"] = "no-store"
+    return _ok(_session_view(
+        mode=principal.auth_method, token=token, csrf=csrf,
+        next_bootstrap_capability=successor,
+    ))
+
+
 @operations.get("/channel-accounts")
 async def list_channel_accounts(
     request: Request,
@@ -128,7 +253,11 @@ async def list_channel_accounts(
     ids, next_cursor = _page(request, principal, "channel_account", limit=limit, cursor=cursor)
     repository = _composition(request).repository
     rows = [repository.get_channel_account(entity_id) for entity_id in ids]
-    return _ok([_account_view(row) for row in rows if row], next_cursor)
+    versions = _account_versions(repository, [row["account_id"] for row in rows if row])
+    return _ok(
+        [_account_view(row, versions.get(row["account_id"], 0)) for row in rows if row],
+        next_cursor,
+    )
 
 
 @operations.post("/channel-accounts", status_code=201)
@@ -172,7 +301,7 @@ async def create_channel_account(
         if isinstance(exc, StateConflictError):
             raise _http(409, "already_exists", "Channel account already exists") from None
         raise
-    return _ok(_account_view(repository.get_channel_account(account_id)))
+    return _ok(_account_view(repository.get_channel_account(account_id), 0))
 
 
 @operations.get("/channel-accounts/{account_id}")
@@ -183,7 +312,7 @@ async def get_channel_account(account_id: str, request: Request, principal: Auth
     row = repository.get_channel_account(account_id)
     if row is None:
         raise _http(404, "not_found", "Resource not found")
-    return _ok(_account_view(row))
+    return _ok(_account_view(row, _account_versions(repository, [account_id]).get(account_id, 0)))
 
 
 @operations.delete("/channel-accounts/{account_id}")
@@ -295,7 +424,7 @@ async def update_channel_account(
             raise _http(404, "not_found", "Resource not found")
         raise _http(409, "version_conflict", "The resource changed concurrently")
     _composition(request).supervisor.wake("inbox")
-    return _ok(_account_view(repository._channel_account(row)))
+    return _ok(_account_view(repository._channel_account(row), body.expected_version + 1))
 
 
 @operations.put("/channel-accounts/{account_id}/credential")
@@ -670,13 +799,26 @@ def _record_credential_cleanup(conn, account_id: str, credential_ref: str, exc: 
         )
 
 
-def _account_view(row):
+def _account_versions(repository, account_ids: list[str]) -> dict[str, int]:
+    if not account_ids:
+        return {}
+    placeholders = ",".join("?" for _ in account_ids)
+    rows = repository.control_plane._get_conn().execute(
+        f"""SELECT entity_id, version FROM runtime_operational_ownership
+             WHERE entity_kind='channel_account' AND entity_id IN ({placeholders})""",
+        account_ids,
+    ).fetchall()
+    return {row["entity_id"]: int(row["version"]) for row in rows}
+
+
+def _account_view(row, version: int):
     if row is None:
         return None
     return {
         "account_id": row["account_id"], "adapter_kind": row["adapter_kind"],
         "enabled": bool(row["enabled"]), "credential_ref": row.get("credential_ref"),
         "default_profile_id": row.get("default_profile_id"), "updated_at": row["updated_at"],
+        "version": version,
     }
 
 

@@ -355,10 +355,11 @@ def _build_runtime_composition() -> RuntimeComposition:
                 origin.strip()
                 for origin in os.environ.get(
                     "OPEN_AGENT_ALLOWED_ORIGINS",
-                    "http://127.0.0.1:8088,http://localhost:8088",
+                    "http://127.0.0.1:8088,http://localhost:8088,http://tauri.localhost",
                 ).split(",")
                 if origin.strip()
             ),
+            bootstrap_token=os.environ.get("OPEN_AGENT_OPERATIONAL_BOOTSTRAP_TOKEN") or None,
         ),
         credential_store=credential_store,
         ingress_service=ingress_service,

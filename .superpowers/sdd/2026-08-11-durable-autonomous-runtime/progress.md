@@ -44,3 +44,8 @@ Task 11: fix round 3/5 (retention overflow backlog preserves authenticated per-o
 Task 11: security fix round 1/5 (1 HIGH and 4 MEDIUM addressed: recursive audit reveal/list protection, public webhook pre-limiting, atomic owned deletion, crash-durable credential cleanup, and canonical trusted CSRF origins)
 Task 11: security fix round 2/5 (global identifier probing/squatting closed with tenant/actor/resource-bound opaque account, job, Goal, session, and approval IDs)
 Task 11: complete (RED 4f15db9; 96 focused and 2 skipped, 461 passed and 2 skipped expanded compatibility, 81% new API coverage, final code/security 0 Critical / 0 High / 0 Medium / 0 Low)
+Task 12: RED checkpoints 785e931, 84e889c, and 505770c (immutable UI models, integration gaps, and one-time bootstrap replay resistance)
+Task 12: fix round 1/5 (3 HIGH and 5 MEDIUM TypeScript/code findings addressed: secure host bootstrap/resume, recent reauthentication recovery, Goal and route epochs, pagination guards, detail errors, focus restoration, and exact CAS)
+Task 12: fix round 2/5 (bootstrap single-flight, one-shot reauth continuations, duplicate refresh, capability-bound reauthentication, and pre-publication session reservation/CAS addressed; TypeScript and security reviews clean)
+Task 12: fix round 3/5 (channel-route abort/epoch/account fencing and semantic tab keyboard navigation addressed)
+Task 12: complete (three RED commits; frontend model/build, 23 API tests, 11 Rust tests, 80% changed auth/API coverage; final TypeScript/code/security reviews 0 Critical / 0 High / 0 Medium)

@@ -25,10 +25,11 @@
     
     <!-- 菜单列表 -->
     <div class="panel-body">
-      <nav class="settings-menu">
+      <nav class="settings-menu" role="tablist" :aria-label="t('设置区域', 'Settings sections')" @keydown="onMenuKeydown">
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'dashboard' }"
+          role="tab" :aria-selected="currentTab === 'dashboard'" :tabindex="currentTab === 'dashboard' ? 0 : -1"
           @click="switchTab('dashboard')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -43,6 +44,7 @@
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'workspace' }"
+          role="tab" :aria-selected="currentTab === 'workspace'" :tabindex="currentTab === 'workspace' ? 0 : -1"
           @click="switchTab('workspace')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -54,6 +56,7 @@
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'user' }"
+          role="tab" :aria-selected="currentTab === 'user'" :tabindex="currentTab === 'user' ? 0 : -1"
           @click="switchTab('user')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -66,6 +69,7 @@
         <div
           class="menu-item"
           :class="{ active: currentTab === 'mobile' }"
+          role="tab" :aria-selected="currentTab === 'mobile'" :tabindex="currentTab === 'mobile' ? 0 : -1"
           @click="switchTab('mobile')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -78,6 +82,7 @@
         <div
           class="menu-item"
           :class="{ active: currentTab === 'models' }"
+          role="tab" :aria-selected="currentTab === 'models'" :tabindex="currentTab === 'models' ? 0 : -1"
           @click="switchTab('models')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -90,6 +95,7 @@
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'smart-routing' }"
+          role="tab" :aria-selected="currentTab === 'smart-routing'" :tabindex="currentTab === 'smart-routing' ? 0 : -1"
           @click="switchTab('smart-routing')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -104,6 +110,7 @@
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'agents' }"
+          role="tab" :aria-selected="currentTab === 'agents'" :tabindex="currentTab === 'agents' ? 0 : -1"
           @click="switchTab('agents')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -118,6 +125,7 @@
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'skills' }"
+          role="tab" :aria-selected="currentTab === 'skills'" :tabindex="currentTab === 'skills' ? 0 : -1"
           @click="switchTab('skills')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -129,6 +137,7 @@
         <div
           class="menu-item"
           :class="{ active: currentTab === 'plugins' }"
+          role="tab" :aria-selected="currentTab === 'plugins'" :tabindex="currentTab === 'plugins' ? 0 : -1"
           @click="switchTab('plugins')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -144,6 +153,7 @@
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'mcp' }"
+          role="tab" :aria-selected="currentTab === 'mcp'" :tabindex="currentTab === 'mcp' ? 0 : -1"
           @click="switchTab('mcp')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -164,6 +174,7 @@
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'logs' }"
+          role="tab" :aria-selected="currentTab === 'logs'" :tabindex="currentTab === 'logs' ? 0 : -1"
           @click="switchTab('logs')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -179,6 +190,7 @@
         <div
           class="menu-item"
           :class="{ active: currentTab === 'knowledge' }"
+          role="tab" :aria-selected="currentTab === 'knowledge'" :tabindex="currentTab === 'knowledge' ? 0 : -1"
           @click="switchTab('knowledge')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -191,6 +203,7 @@
         <div
           class="menu-item"
           :class="{ active: currentTab === 'tasks' }"
+          role="tab" :aria-selected="currentTab === 'tasks'" :tabindex="currentTab === 'tasks' ? 0 : -1"
           @click="switchTab('tasks')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -199,10 +212,21 @@
           </svg>
           <span>{{ t('定时任务', 'Tasks') }}</span>
         </div>
+
+        <div class="menu-item" :class="{ active: currentTab === 'channels' }" role="tab" :aria-selected="currentTab === 'channels'" :tabindex="currentTab === 'channels' ? 0 : -1" @click="switchTab('channels')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12a7 7 0 0 1 14 0"/><path d="M8 12a4 4 0 0 1 8 0"/><circle cx="12" cy="12" r="1"/><path d="M12 13v7"/></svg>
+          <span>{{ t('消息渠道', 'Channels') }}</span>
+        </div>
+
+        <div class="menu-item" :class="{ active: currentTab === 'autonomics' }" role="tab" :aria-selected="currentTab === 'autonomics'" :tabindex="currentTab === 'autonomics' ? 0 : -1" @click="switchTab('autonomics')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/><path d="M5 4 3 6"/><path d="m19 4 2 2"/></svg>
+          <span>{{ t('自治运行', 'Autonomics') }}</span>
+        </div>
         
         <div 
           class="menu-item" 
           :class="{ active: currentTab === 'system' }"
+          role="tab" :aria-selected="currentTab === 'system'" :tabindex="currentTab === 'system' ? 0 : -1"
           @click="switchTab('system')"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -250,6 +274,9 @@
 
         <!-- 定时任务 -->
         <TasksSettings v-else-if="currentTab === 'tasks'" />
+
+        <ChannelsSettings v-else-if="currentTab === 'channels'" />
+        <AutonomicsSettings v-else-if="currentTab === 'autonomics'" />
         
         <!-- 系统设置 -->
         <SystemSettings v-else-if="currentTab === 'system'" />
@@ -259,7 +286,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import DashboardSettings from '@/components/settings/DashboardSettings.vue'
 import WorkspaceSettings from '@/components/settings/WorkspaceSettings.vue'
@@ -275,6 +302,8 @@ import LogsSettings from '@/components/settings/LogsSettings.vue'
 import TasksSettings from '@/components/settings/TasksSettings.vue'
 import KnowledgeSettings from '@/components/settings/KnowledgeSettings.vue'
 import SystemSettings from '@/components/settings/SystemSettings.vue'
+import ChannelsSettings from '@/components/settings/ChannelsSettings.vue'
+import AutonomicsSettings from '@/components/settings/AutonomicsSettings.vue'
 
 const props = defineProps<{
   currentTab: string
@@ -310,6 +339,18 @@ function switchTab(tab: string) {
   emit('switchTab', tab)
 }
 
+function onMenuKeydown(event: KeyboardEvent) {
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  const menu = event.currentTarget as HTMLElement
+  const tabs = [...menu.querySelectorAll<HTMLElement>('[role="tab"]')]
+  const current = tabs.indexOf(document.activeElement as HTMLElement)
+  if (tabs.length === 0) return
+  event.preventDefault()
+  const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : event.key === 'ArrowDown' ? (current + 1) % tabs.length : (current - 1 + tabs.length) % tabs.length
+  tabs[index]?.focus()
+  tabs[index]?.click()
+}
+
 // 开始拖拽
 const startDrag = (e: MouseEvent) => {
   isDragging.value = true
@@ -340,6 +381,8 @@ const stopDrag = () => {
   document.removeEventListener('mousemove', onDrag)
   document.removeEventListener('mouseup', stopDrag)
 }
+
+onBeforeUnmount(stopDrag)
 </script>
 
 <style scoped>
@@ -467,6 +510,52 @@ const stopDrag = () => {
   transition: all 0.2s;
   position: relative;
   border: 1px solid transparent;
+}
+
+.menu-item:focus-visible {
+  outline: 2px solid color-mix(in srgb, #2d766e 45%, transparent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 720px) {
+  .settings-panel {
+    width: 100% !important;
+    min-width: 0;
+  }
+
+  .resizer {
+    display: none;
+  }
+
+  .panel-header {
+    padding: 13px 15px;
+  }
+
+  .panel-body {
+    flex-direction: column;
+  }
+
+  .settings-menu {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-color);
+    padding: 7px;
+  }
+
+  .menu-item {
+    flex: 0 0 auto;
+    margin: 0 2px;
+  }
+
+  .settings-content {
+    min-width: 0;
+    padding: 14px;
+  }
 }
 
 .menu-item:hover {

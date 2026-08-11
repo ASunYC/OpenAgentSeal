@@ -49,7 +49,10 @@ class OperationalRateLimitError(RuntimeError):
 class OperationalAuthStore:
     """In-process session registry with signed, opaque bearer/cookie handles."""
 
-    def __init__(self, *, signing_key: bytes, trusted_origins: Iterable[str]) -> None:
+    def __init__(
+        self, *, signing_key: bytes, trusted_origins: Iterable[str],
+        bootstrap_token: str | None = None,
+    ) -> None:
         if not isinstance(signing_key, bytes) or len(signing_key) < 32:
             raise ValueError("signing_key must contain at least 32 bytes")
         origins = frozenset(_canonical_origin(value) for value in trusted_origins)
@@ -57,9 +60,55 @@ class OperationalAuthStore:
             raise ValueError("trusted_origins must not be empty")
         self._key = signing_key
         self._trusted_origins = origins
+        if bootstrap_token is not None and (
+            not isinstance(bootstrap_token, str)
+            or not 32 <= len(bootstrap_token.encode("utf-8")) <= 4096
+        ):
+            raise ValueError("bootstrap_token must contain 32 to 4096 UTF-8 bytes")
+        self._bootstrap_digest = (
+            hmac.new(self._key, b"operational-bootstrap\0" + bootstrap_token.encode("utf-8"), hashlib.sha256).digest()
+            if bootstrap_token is not None else None
+        )
         self._sessions: dict[str, _Session] = {}
         self._rate_windows: dict[str, tuple[int, int]] = {}
         self._lock = threading.RLock()
+
+    def consume_bootstrap_capability(self, supplied: str) -> str | None:
+        """Consume one capability and return its high-entropy successor."""
+        if not isinstance(supplied, str) or not 32 <= len(supplied.encode("utf-8")) <= 4096:
+            return None
+        actual = hmac.new(
+            self._key, b"operational-bootstrap\0" + supplied.encode("utf-8"), hashlib.sha256
+        ).digest()
+        with self._lock:
+            expected = self._bootstrap_digest
+            accepted = expected is not None and hmac.compare_digest(actual, expected)
+            if accepted:
+                successor = secrets.token_urlsafe(48)
+                self._bootstrap_digest = hmac.new(
+                    self._key,
+                    b"operational-bootstrap\0" + successor.encode("utf-8"),
+                    hashlib.sha256,
+                ).digest()
+            else:
+                successor = None
+        return successor
+
+    def refresh_cookie_csrf(self, principal: OperationalPrincipal) -> str:
+        """Issue a new in-memory CSRF value without refreshing authentication age."""
+        if principal.auth_method != "cookie":
+            raise ValueError("CSRF refresh requires cookie authentication")
+        csrf = secrets.token_urlsafe(32)
+        digest = hmac.new(self._key, csrf.encode("utf-8"), hashlib.sha256).digest()
+        with self._lock:
+            session = self._sessions.get(principal.session_id)
+            if session is None:
+                raise ValueError("operational session is unavailable")
+            self._sessions = {
+                **self._sessions,
+                principal.session_id: _Session(session.principal, session.expires_at, digest),
+            }
+        return csrf
 
     def issue_bearer(
         self,
@@ -69,6 +118,7 @@ class OperationalAuthStore:
         roles: Iterable[str],
         scopes: Iterable[str],
         authenticated_at: datetime | None = None,
+        session_ttl: timedelta = _MAX_SESSION_AGE,
     ) -> str:
         return self._issue(
             actor_id=actor_id,
@@ -78,6 +128,7 @@ class OperationalAuthStore:
             authenticated_at=authenticated_at,
             method="bearer",
             csrf=None,
+            session_ttl=session_ttl,
         )[0]
 
     def issue_cookie_session(
@@ -88,6 +139,7 @@ class OperationalAuthStore:
         roles: Iterable[str],
         scopes: Iterable[str],
         authenticated_at: datetime | None = None,
+        session_ttl: timedelta = _MAX_SESSION_AGE,
     ) -> tuple[str, str]:
         csrf = secrets.token_urlsafe(32)
         token, _ = self._issue(
@@ -98,8 +150,57 @@ class OperationalAuthStore:
             authenticated_at=authenticated_at,
             method="cookie",
             csrf=csrf,
+            session_ttl=session_ttl,
         )
         return token, csrf
+
+    def rotate_session(
+        self, principal: OperationalPrincipal, *, session_ttl: timedelta
+    ) -> tuple[str, str | None]:
+        """Replace an authenticated session after explicit local user presence."""
+        if not isinstance(principal, OperationalPrincipal):
+            raise TypeError("principal must be operational")
+        if principal.auth_method == "cookie":
+            token, csrf = self.issue_cookie_session(
+                actor_id=principal.actor_id, tenant_id=principal.tenant_id,
+                roles=principal.roles, scopes=principal.scopes,
+                session_ttl=session_ttl,
+            )
+        elif principal.auth_method == "bearer":
+            token = self.issue_bearer(
+                actor_id=principal.actor_id, tenant_id=principal.tenant_id,
+                roles=principal.roles, scopes=principal.scopes,
+                session_ttl=session_ttl,
+            )
+            csrf = None
+        else:
+            raise ValueError("unsupported operational authentication method")
+        with self._lock:
+            self._sessions = {
+                key: value for key, value in self._sessions.items()
+                if key != principal.session_id
+            }
+            self._rate_windows = {
+                key: value for key, value in self._rate_windows.items()
+                if key != principal.session_id
+            }
+        return token, csrf
+
+    def revoke_token(self, token: str) -> None:
+        """Revoke a newly minted handle that was never published."""
+        session_id = self._verify_handle(token)
+        if session_id is not None:
+            self.revoke_session_id(session_id)
+
+    def revoke_session_id(self, session_id: str) -> None:
+        """Revoke one session and its associated rate window."""
+        with self._lock:
+            self._sessions = {
+                key: value for key, value in self._sessions.items() if key != session_id
+            }
+            self._rate_windows = {
+                key: value for key, value in self._rate_windows.items() if key != session_id
+            }
 
     def authenticate(self, token: str, *, method: str) -> OperationalPrincipal | None:
         session_id = self._verify_handle(token)
@@ -196,7 +297,10 @@ class OperationalAuthStore:
             raise ValueError("invalid pagination cursor")
         return position
 
-    def _issue(self, *, actor_id, tenant_id, roles, scopes, authenticated_at, method, csrf):
+    def _issue(
+        self, *, actor_id, tenant_id, roles, scopes, authenticated_at, method, csrf,
+        session_ttl: timedelta,
+    ):
         for value, name in ((actor_id, "actor_id"), (tenant_id, "tenant_id")):
             if not isinstance(value, str) or not value.strip() or len(value) > 128:
                 raise ValueError(f"{name} must be a bounded identifier")
@@ -207,6 +311,8 @@ class OperationalAuthStore:
             raise ValueError("authenticated_at must be timezone-aware")
         if auth_time.astimezone(timezone.utc) > _now() + timedelta(minutes=1):
             raise ValueError("authenticated_at cannot be in the future")
+        if not isinstance(session_ttl, timedelta) or not timedelta(minutes=1) <= session_ttl <= _MAX_SESSION_AGE:
+            raise ValueError("session_ttl must be between one minute and twelve hours")
         session_id = secrets.token_urlsafe(24)
         principal = OperationalPrincipal(
             actor_id,
@@ -225,7 +331,7 @@ class OperationalAuthStore:
         with self._lock:
             self._sessions = {
                 **self._sessions,
-                session_id: _Session(principal, _now() + _MAX_SESSION_AGE, csrf_digest),
+                session_id: _Session(principal, _now() + session_ttl, csrf_digest),
             }
         signature = hmac.new(self._key, b"session\0" + session_id.encode(), hashlib.sha256).digest()
         return _b64(session_id.encode() + b"." + signature), csrf
