@@ -475,6 +475,11 @@ class ControlPlane:
                 ON runtime_audit_events(created_at, audit_id);
             """
         )
+        for definition in (
+            "attempt INTEGER NOT NULL DEFAULT 0",
+            "next_attempt_at TEXT",
+        ):
+            self._ensure_column(conn, "goal_iterations", definition)
 
         goal_columns = (
             "acceptance_criteria TEXT NOT NULL DEFAULT '[]'",
@@ -491,6 +496,11 @@ class ControlPlane:
             "consumed_active_seconds REAL NOT NULL DEFAULT 0",
             "active_started_at TEXT",
             "last_guidance_sequence INTEGER NOT NULL DEFAULT 0",
+            "pricing_version TEXT",
+            "pricing_currency TEXT",
+            "pricing_cost_per_token REAL",
+            "transient_failure_count INTEGER NOT NULL DEFAULT 0",
+            "terminal_destination TEXT",
             "runtime_version INTEGER NOT NULL DEFAULT 0",
         )
         scheduler_columns = (
@@ -503,6 +513,46 @@ class ControlPlane:
         )
         for definition in goal_columns:
             self._ensure_column(conn, "goals", definition)
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS goal_guidance (
+                goal_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(goal_id, sequence),
+                FOREIGN KEY(goal_id) REFERENCES goals(goal_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS goal_operator_approvals (
+                approval_id TEXT PRIMARY KEY,
+                goal_id TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                issuer_id TEXT NOT NULL,
+                issuer_tenant_id TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                expected_goal_version INTEGER NOT NULL,
+                approved_budget_updates TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                consumer_id TEXT,
+                FOREIGN KEY(goal_id) REFERENCES goals(goal_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_goal_operator_approval_lookup
+                ON goal_operator_approvals(goal_id, principal_id, decision, consumed_at);
+            """
+        )
+        for definition in (
+            "tenant_id TEXT NOT NULL DEFAULT ''",
+            "issuer_id TEXT NOT NULL DEFAULT ''",
+            "issuer_tenant_id TEXT NOT NULL DEFAULT ''",
+            "expected_goal_version INTEGER NOT NULL DEFAULT 0",
+            "approved_budget_updates TEXT NOT NULL DEFAULT '{}'",
+            "expires_at TEXT NOT NULL DEFAULT ''",
+            "consumer_id TEXT",
+        ):
+            self._ensure_column(conn, "goal_operator_approvals", definition)
         for definition in scheduler_columns:
             self._ensure_column(conn, "scheduler_jobs", definition)
         migration = conn.execute(
@@ -864,6 +914,38 @@ class ControlPlane:
         row = conn.execute("SELECT * FROM runtime_turns WHERE turn_id = ?", (turn_id,)).fetchone()
         return self._row_to_dict(row)
 
+    @staticmethod
+    def _validate_terminal_common(
+        event_type: str, status: str, result: Any, error: str | None
+    ) -> str | None:
+        expected = {"complete": "completed", "cancelled": "cancelled", "error": "error"}
+        if event_type not in expected or status != expected[event_type]:
+            raise ValueError("runtime terminal event and status disagree")
+        if error is not None and (not isinstance(error, str) or len(error.encode("utf-8")) > 4096):
+            raise ValueError("runtime terminal error is invalid or too large")
+        if event_type != "complete":
+            if result is not None:
+                raise ValueError("non-complete terminal events cannot persist a result")
+            return None
+        if not isinstance(result, dict) or set(result) - {"content", "usage", "agent_result"} or not {"content", "usage"}.issubset(result):
+            raise ValueError("authoritative runtime result schema is invalid")
+        content, usage = result.get("content"), result.get("usage")
+        if not isinstance(content, str) or len(content.encode("utf-8")) > 65_536:
+            raise ValueError("authoritative runtime content is invalid or too large")
+        if not isinstance(usage, dict) or "total_tokens" not in usage or set(usage) - {"total_tokens", "prompt_tokens", "completion_tokens"}:
+            raise ValueError("authoritative runtime usage schema is invalid")
+        if any(isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 9_000_000_000_000_000 for value in usage.values()):
+            raise ValueError("authoritative runtime usage is invalid")
+        if usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0) > usage["total_tokens"]:
+            raise ValueError("authoritative runtime usage aggregate is inconsistent")
+        agent_result = result.get("agent_result")
+        if agent_result is not None and (not isinstance(agent_result, str) or len(agent_result.encode("utf-8")) > 65_536):
+            raise ValueError("authoritative runtime agent_result is invalid or too large")
+        result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        if len(result_json.encode("utf-8")) > 131_072:
+            raise ValueError("authoritative runtime result exceeds the byte limit")
+        return result_json
+
     def complete_runtime_turn(
         self,
         turn_id: str,
@@ -872,6 +954,11 @@ class ControlPlane:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        terminal_event = {"completed": "complete", "cancelled": "cancelled", "error": "error"}.get(status)
+        validated_result = (
+            self._validate_terminal_common(terminal_event, status, result, error)
+            if terminal_event is not None else None
+        )
         now = datetime.now().isoformat()
         conn = self._get_conn()
         current = conn.execute("SELECT * FROM runtime_turns WHERE turn_id = ?", (turn_id,)).fetchone()
@@ -888,7 +975,9 @@ class ControlPlane:
                 """,
                 (
                     status,
-                    json.dumps(result, ensure_ascii=False, default=str) if result is not None else None,
+                    validated_result if terminal_event is not None else (
+                        json.dumps(result, ensure_ascii=False, default=str) if result is not None else None
+                    ),
                     error,
                     now,
                     metadata_value,
@@ -919,6 +1008,46 @@ class ControlPlane:
             raise ValueError("runtime terminal event type is invalid")
         if status not in {"completed", "cancelled", "error"}:
             raise ValueError("runtime terminal status is invalid")
+        common_result_json = self._validate_terminal_common(
+            event_type, status, result, error
+        )
+        expected_status = {"complete": "completed", "cancelled": "cancelled", "error": "error"}[event_type]
+        if status != expected_status:
+            raise ValueError("runtime terminal event and status disagree")
+        if not isinstance(payload, dict):
+            raise ValueError("runtime terminal payload must be an object")
+        try:
+            payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("runtime terminal payload is not JSON-compatible") from exc
+        if len(payload_json.encode("utf-8")) > 131_072:
+            raise ValueError("runtime terminal payload exceeds the byte limit")
+        if error is not None and (not isinstance(error, str) or len(error.encode("utf-8")) > 4096):
+            raise ValueError("runtime terminal error is invalid or too large")
+        result_json = None
+        if event_type == "complete":
+            if not isinstance(result, dict) or set(result) - {"content", "usage", "agent_result"} or not {"content", "usage"}.issubset(result):
+                raise ValueError("authoritative runtime result schema is invalid")
+            content = result.get("content")
+            usage = result.get("usage")
+            if not isinstance(content, str) or len(content.encode("utf-8")) > 65_536:
+                raise ValueError("authoritative runtime content is invalid or too large")
+            if not isinstance(usage, dict) or "total_tokens" not in usage or set(usage) - {"total_tokens", "prompt_tokens", "completion_tokens"}:
+                raise ValueError("authoritative runtime usage schema is invalid")
+            for value in usage.values():
+                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 9_000_000_000_000_000:
+                    raise ValueError("authoritative runtime usage is invalid")
+            if usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0) > usage["total_tokens"]:
+                raise ValueError("authoritative runtime usage aggregate is inconsistent")
+            agent_result = result.get("agent_result")
+            if agent_result is not None and (not isinstance(agent_result, str) or len(agent_result.encode("utf-8")) > 65_536):
+                raise ValueError("authoritative runtime agent_result is invalid or too large")
+            result_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            if len(result_json.encode("utf-8")) > 131_072:
+                raise ValueError("authoritative runtime result exceeds the byte limit")
+        elif result is not None:
+            raise ValueError("non-complete terminal events cannot persist a result")
+        result_json = common_result_json
         now = datetime.now().isoformat()
         event_id = f"event_{uuid.uuid4().hex[:8]}"
         conn = self._get_conn()
@@ -955,7 +1084,7 @@ class ControlPlane:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')""",
                 (
                     event_id, thread_id, turn_id, session_id, seq, event_type,
-                    json.dumps(payload, ensure_ascii=False, default=str), now,
+                    payload_json, now,
                 ),
             )
             conn.execute(
@@ -963,8 +1092,7 @@ class ControlPlane:
                    completed_at = ? WHERE turn_id = ? AND status = 'running'""",
                 (
                     status,
-                    json.dumps(result, ensure_ascii=False, default=str)
-                    if result is not None else None,
+                    result_json,
                     error, now, turn_id,
                 ),
             )
@@ -1640,7 +1768,7 @@ class ControlPlane:
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
-        for key in ("metadata", "todo_items", "last_judge_result", "arguments", "result", "payload", "decision", "events"):
+        for key in ("metadata", "todo_items", "last_judge_result", "acceptance_criteria", "judge_result", "budget_delta", "arguments", "result", "payload", "decision", "events"):
             if key in data and isinstance(data[key], str):
                 try:
                     data[key] = json.loads(data[key])

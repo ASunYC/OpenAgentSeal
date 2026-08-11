@@ -18,7 +18,7 @@ SchedulerRunState: TypeAlias = Literal[
     "pending", "running", "completed", "retry_wait", "failed", "cancelled", "skipped"
 ]
 GoalIterationState: TypeAlias = Literal[
-    "pending", "running", "judging", "completed", "failed", "cancelled"
+    "pending", "retry_wait", "running", "judging", "completed", "failed", "cancelled"
 ]
 
 _INBOX_STATES = frozenset(InboxState.__args__)
@@ -193,6 +193,11 @@ class GoalIteration:
     updated_at: datetime = field(default_factory=_utc_now)
     claim: ClaimToken | None = None
     last_error: str | None = None
+    turn_id: str | None = None
+    judge_result: Mapping[str, Any] | None = None
+    budget_delta: Mapping[str, Any] = field(default_factory=dict)
+    attempt: int = 0
+    next_attempt_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _require_identifier(self.iteration_id, "iteration_id")
@@ -203,3 +208,13 @@ class GoalIteration:
         _require_state(self.state, _GOAL_ITERATION_STATES)
         _require_aware(self.created_at, "created_at")
         _require_aware(self.updated_at, "updated_at")
+        if self.turn_id is not None:
+            _require_identifier(self.turn_id, "turn_id")
+        if self.judge_result is not None:
+            object.__setattr__(self, "judge_result", _freeze_payload(self.judge_result))
+        object.__setattr__(self, "budget_delta", _freeze_payload(self.budget_delta))
+        _require_integer(self.attempt, "attempt")
+        if self.attempt < 0:
+            raise ValueError("attempt must not be negative")
+        if self.next_attempt_at is not None:
+            _require_aware(self.next_attempt_at, "next_attempt_at")

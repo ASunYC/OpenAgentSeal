@@ -106,6 +106,21 @@ class ChannelDestination:
         metadata = payload.get("metadata")
         if not isinstance(metadata, Mapping):
             raise PermanentDeliveryError("payload.metadata must be an object")
+        if isinstance(metadata.get("kind"), str) and metadata["kind"].startswith("goal_"):
+            origin_session_id = _required(metadata, "origin_session_id")
+            principal_id = _required(metadata, "principal_id")
+            tenant_id = _required(metadata, "tenant_id")
+            session = self._repository.control_plane.get_session(origin_session_id)
+            session_metadata = session.get("metadata") if session else None
+            if (
+                session is None
+                or session.get("user_id") != principal_id
+                or not isinstance(session_metadata, Mapping)
+                or session_metadata.get("tenant_id") != tenant_id
+                or session_metadata.get("account_id") != self._adapter.account_id
+                or session_metadata.get("conversation_id") != payload.get("conversation_id")
+            ):
+                raise PermanentDeliveryError("goal channel principal mismatch")
         outbound_metadata = dict(metadata)
         outbound_metadata["delivery_id"] = obligation.obligation_id
         message = OutboundMessage(

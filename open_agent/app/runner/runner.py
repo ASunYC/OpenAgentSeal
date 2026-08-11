@@ -1274,13 +1274,18 @@ class AgentRunner:
                 chat_manager.add_message(session_id, assistant_message)
             
             # Yield completion event
+            usage = {
+                "total_tokens": int(getattr(agent, "session_total_tokens", 0) or 0),
+                "prompt_tokens": int(getattr(agent, "session_prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(agent, "session_completion_tokens", 0) or 0),
+            }
             complete_event = persist_terminal_event(
                 AgentEvent(
                     event="complete", session_id=session_id, status="idle",
-                    content=last_assistant_msg,
+                    content=last_assistant_msg, result={"usage": usage},
                 ),
                 status="completed",
-                result={"content": last_assistant_msg, "agent_result": str(result)},
+                result={"content": last_assistant_msg, "agent_result": str(result), "usage": usage},
             )
             yield complete_event
             

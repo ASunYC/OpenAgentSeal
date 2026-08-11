@@ -1079,3 +1079,55 @@ def test_claim_persists_real_owner_tenant_and_rejects_conflicting_thread(tmp_pat
             principal=principal,
         )
     assert repo.get_goal_iteration(second.iteration_id).state == "pending"
+
+
+def test_principal_capabilities_are_deeply_immutable(runtime):
+    from dataclasses import FrozenInstanceError
+    from open_agent.durable_runtime.repository import OperatorPrincipal, RequestPrincipal
+
+    _, repo = runtime
+    for principal, fields in (
+        (repo.principal, ("actor_id", "tenant_id", "_proof")),
+        (repo.operator_service.principal, ("issuer_id", "tenant_id", "_proof")),
+    ):
+        for name in fields:
+            with pytest.raises(FrozenInstanceError):
+                setattr(principal, name, object())
+    assert "_proof" not in repr(repo.principal)
+    assert "_proof" not in repr(repo.operator_service.principal)
+    for clone in (
+        RequestPrincipal(repo.principal.actor_id, repo.principal.tenant_id, repo.principal._proof),
+        RequestPrincipal("victim", repo.principal.tenant_id, repo.principal._proof),
+    ):
+        with pytest.raises(PermissionError):
+            repo.raw.list_goals_for_principal(clone)
+    for clone in (
+        OperatorPrincipal(
+            repo.operator_service.principal.issuer_id,
+            repo.operator_service.principal.tenant_id,
+            repo.operator_service.principal._proof,
+        ),
+        OperatorPrincipal("victim-issuer", "local", repo.operator_service.principal._proof),
+    ):
+        with pytest.raises(PermissionError):
+            repo.raw._require_operator_principal(clone)
+
+
+def test_principal_registry_is_weak_and_active_identity_remains_valid(runtime):
+    import gc
+
+    _, repo = runtime
+    active = repo.principal
+    baseline = len(repo.raw._issued_goal_principals)
+    for index in range(500):
+        transient = repo.raw.mint_goal_principal(
+            actor_id=f"actor-{index}", tenant_id="local",
+            capability=repo.raw._goal_authority_capability,
+        )
+    del transient
+    gc.collect()
+    assert len(repo.raw._issued_goal_principals) == baseline
+    repo.raw._require_goal_principal(active)
+    clone = type(active)(active.actor_id, active.tenant_id, active._proof)
+    with pytest.raises(PermissionError):
+        repo.raw._require_goal_principal(clone)

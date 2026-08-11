@@ -162,7 +162,8 @@ async def test_completed_turn_is_recovered_without_rerunning_agent(runtime):
         "crashed", NOW, NOW + timedelta(seconds=1), run_id=run.run_id
     )[0]
     control.complete_runtime_turn(
-        f"turn:scheduler:{run.run_id}", result={"content": "persisted answer"}
+        f"turn:scheduler:{run.run_id}",
+        result={"content": "persisted answer", "usage": {"total_tokens": 0}},
     )
     runner = FakeRunner()
     worker = SchedulerWorker(

@@ -10,7 +10,8 @@ import sqlite3
 import time
 import unicodedata
 import uuid
-from dataclasses import dataclass
+import weakref
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from math import isfinite
 from typing import Any, Callable, Iterable, Mapping, TYPE_CHECKING
@@ -34,6 +35,54 @@ class StaleClaimError(RuntimeError):
 
 class StateConflictError(RuntimeError):
     """The requested transition is illegal from persisted state."""
+
+
+@dataclass(frozen=True, slots=True, repr=False, weakref_slot=True)
+class RequestPrincipal:
+    """Opaque authenticated actor/tenant proof minted by the server auth boundary."""
+
+    actor_id: str
+    tenant_id: str
+    _proof: object = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True, repr=False, weakref_slot=True)
+class OperatorPrincipal:
+    """Opaque operator issuer identity, separate from the subject Goal owner."""
+
+    issuer_id: str
+    tenant_id: str
+    _proof: object = field(repr=False)
+
+
+class GoalOperatorService:
+    """Trusted operator-only approval issuer; ordinary repository callers cannot mint approvals."""
+
+    def __init__(
+        self, repository: "DurableRuntimeRepository", capability: object, *,
+        issuer_id: str, tenant_id: str,
+    ) -> None:
+        if capability is not repository._operator_authority_capability:
+            raise PermissionError("invalid operator authority capability")
+        self._repository = repository
+        self._capability = capability
+        for value, name in ((issuer_id, "issuer_id"), (tenant_id, "tenant_id")):
+            _require_identifier(value, name)
+            if len(value.encode("utf-8")) > 128:
+                raise ValueError(f"{name} exceeds the byte limit")
+        self.principal = OperatorPrincipal(issuer_id, tenant_id, object())
+        repository._issued_operator_principals[id(self.principal)] = self.principal
+
+    def approve(
+        self, principal: RequestPrincipal, goal_id: str, *, approval_id: str,
+        decision: str, expected_goal_version: int, expires_at: datetime,
+        now: datetime, budget_updates: Mapping[str, int | float] | None = None,
+    ) -> None:
+        self._repository._issue_goal_operator_approval(
+            self.principal, principal, goal_id, approval_id=approval_id, decision=decision,
+            expected_goal_version=expected_goal_version, expires_at=expires_at,
+            now=now, budget_updates=budget_updates, capability=self._capability,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +122,28 @@ def _require_identifier(value: str, name: str) -> None:
 def _require_limit(limit: int) -> None:
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
         raise ValueError("limit must be an integer between 1 and 1000")
+
+
+def _validate_json_tree(value: Any, name: str, *, depth: int = 0) -> None:
+    if depth > 20:
+        raise ValueError(f"{name} exceeds the nesting limit")
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError(f"{name} contains a non-finite number")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{name} keys must be strings")
+            _validate_json_tree(item, name, depth=depth + 1)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_json_tree(item, name, depth=depth + 1)
+        return
+    raise ValueError(f"{name} contains an unsupported value")
 
 
 _OPAQUE_CREDENTIAL_REF = re.compile(r"oas-cred:[0-9a-f]{32}\Z")
@@ -150,6 +221,8 @@ class DurableRuntimeRepository:
         *,
         retention_hmac_key: bytes | None = None,
         previous_retention_hmac_keys: Iterable[bytes] = (),
+        goal_authority_capability: object | None = None,
+        operator_authority_capability: object | None = None,
     ):
         retention_keys = (
             (() if retention_hmac_key is None else (retention_hmac_key,))
@@ -163,9 +236,40 @@ class DurableRuntimeRepository:
         if len(set(key_ids)) != len(key_ids):
             raise ValueError("retention HMAC key identifiers must be unique")
         self.control_plane = control_plane
+        self._goal_authority_capability = goal_authority_capability
+        self._operator_authority_capability = operator_authority_capability
+        self._issued_goal_principals: weakref.WeakValueDictionary[int, RequestPrincipal] = weakref.WeakValueDictionary()
+        self._issued_operator_principals: weakref.WeakValueDictionary[int, OperatorPrincipal] = weakref.WeakValueDictionary()
         self._retention_hmac_keys = retention_keys
         self._retention_keys_by_id = dict(zip(key_ids, retention_keys))
         self._migrate_retention_attachment_rows()
+
+    def mint_goal_principal(
+        self, *, actor_id: str, tenant_id: str, capability: object
+    ) -> RequestPrincipal:
+        if capability is not self._goal_authority_capability or capability is None:
+            raise PermissionError("invalid goal authority capability")
+        for value, name in ((actor_id, "actor_id"), (tenant_id, "tenant_id")):
+            _require_identifier(value, name)
+            if len(value.encode("utf-8")) > 128:
+                raise ValueError(f"{name} exceeds the byte limit")
+        principal = RequestPrincipal(actor_id, tenant_id, object())
+        self._issued_goal_principals[id(principal)] = principal
+        return principal
+
+    def _require_goal_principal(self, principal: RequestPrincipal) -> None:
+        if (
+            not isinstance(principal, RequestPrincipal)
+            or self._issued_goal_principals.get(id(principal)) is not principal
+        ):
+            raise PermissionError("a trusted request principal is required")
+
+    def _require_operator_principal(self, principal: OperatorPrincipal) -> None:
+        if (
+            not isinstance(principal, OperatorPrincipal)
+            or self._issued_operator_principals.get(id(principal)) is not principal
+        ):
+            raise PermissionError("trusted operator principal is required")
 
     def upsert_channel_account(
         self,
@@ -255,7 +359,7 @@ class DurableRuntimeRepository:
             if current != expected_credential:
                 return current
             store_secret(expected_credential)
-            conn.execute(
+            goal_update = conn.execute(
                 """UPDATE channel_accounts SET credential_ref = ?, updated_at = ?
                    WHERE account_id = ?""",
                 (credential_ref, _iso(now), account_id),
@@ -3552,9 +3656,11 @@ class DurableRuntimeRepository:
         except KeyError as exc:
             raise ValueError(f"unsupported claim kind: {kind}") from exc
         state_predicate = (
-            "state IN ('claimed', 'dispatched')" if kind == "inbox" else "state = ?"
+            "state IN ('claimed', 'dispatched')" if kind == "inbox"
+            else "state IN ('running', 'judging')" if kind == "goal_iteration"
+            else "state = ?"
         )
-        state_values: tuple[str, ...] = () if kind == "inbox" else (active_state,)
+        state_values: tuple[str, ...] = () if kind in {"inbox", "goal_iteration"} else (active_state,)
         conn = self._conn
         with conn:
             row = conn.execute(
@@ -4003,6 +4109,809 @@ class DurableRuntimeRepository:
             ).fetchone()
         return self._goal_iteration(row)
 
+    def create_goal_with_first_iteration(
+        self,
+        *,
+        session_id: str,
+        goal_text: str,
+        configuration: Mapping[str, Any],
+        now: datetime,
+        goal_id: str | None = None,
+        destination: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        plan: str = "",
+        todo_items: Iterable[Mapping[str, Any]] = (),
+        start_prompt: str | None = None,
+        principal: RequestPrincipal,
+    ) -> GoalIteration:
+        """Atomically persist an executable goal and its deterministic first iteration."""
+        self._require_goal_principal(principal)
+        _require_aware(now, "now")
+        _require_identifier(session_id, "session_id")
+        if len(session_id.encode("utf-8")) > 256:
+            raise ValueError("session_id exceeds the byte limit")
+        _require_identifier(goal_text, "goal_text")
+        if len(goal_text.encode("utf-8")) > 100_000:
+            raise ValueError("goal_text exceeds the byte limit")
+        goal_id = goal_id or f"goal_{uuid.uuid4().hex[:16]}"
+        _require_identifier(goal_id, "goal_id")
+        if len(goal_id.encode("utf-8")) > 128:
+            raise ValueError("goal_id exceeds the byte limit")
+        if not isinstance(configuration, Mapping):
+            raise ValueError("configuration must be an object")
+        config = to_json_value(configuration)
+        required = {
+            "acceptance_criteria", "judge_schema_version", "judge_prompt_version",
+            "judge_confidence_threshold", "max_iterations", "max_tokens",
+            "max_estimated_cost", "max_active_seconds", "pricing_version",
+            "pricing_currency", "pricing_cost_per_token",
+        }
+        if set(config) != required:
+            raise ValueError("goal configuration fields are incomplete or unknown")
+        acceptance = config.get("acceptance_criteria")
+        if not isinstance(acceptance, list) or not acceptance or any(
+            not isinstance(item, str) or not item.strip() for item in acceptance
+        ):
+            raise ValueError("acceptance_criteria must contain non-empty strings")
+        if len(set(acceptance)) != len(acceptance):
+            raise ValueError("acceptance_criteria must be unique")
+        if len(acceptance) > 100 or any(len(item.encode("utf-8")) > 4096 for item in acceptance):
+            raise ValueError("acceptance_criteria exceed the count or byte limit")
+        if sum(len(item.encode("utf-8")) for item in acceptance) > 65_536:
+            raise ValueError("acceptance_criteria exceed the aggregate byte limit")
+        for name in ("judge_schema_version", "judge_prompt_version", "pricing_version", "pricing_currency"):
+            _require_identifier(config.get(name), name)
+            if len(config[name].encode("utf-8")) > 128:
+                raise ValueError(f"{name} exceeds the byte limit")
+        confidence = config["judge_confidence_threshold"]
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not isfinite(confidence) or not 0 <= confidence <= 1:
+            raise ValueError("judge_confidence_threshold must be finite and between 0 and 1")
+        for name in ("max_iterations", "max_tokens"):
+            value = config[name]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9_000_000_000_000_000_000:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in ("max_estimated_cost", "max_active_seconds", "pricing_cost_per_token"):
+            value = config[name]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or not 0 <= value <= 1_000_000_000_000_000:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if config["max_estimated_cost"] <= 0 or config["max_active_seconds"] <= 0:
+            raise ValueError("goal cost and active-time budgets must be positive")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise ValueError("metadata must be an object")
+        metadata_value = to_json_value(metadata or {})
+        try:
+            todo_source = list(todo_items)
+        except TypeError as exc:
+            raise ValueError("todo_items must be iterable") from exc
+        if len(todo_source) > 1000 or any(not isinstance(item, Mapping) for item in todo_source):
+            raise ValueError("todo_items must contain at most 1000 objects")
+        todo_value = [to_json_value(item) for item in todo_source]
+        _validate_json_tree(metadata_value, "metadata")
+        _validate_json_tree(todo_value, "todo_items")
+        if not isinstance(plan, str) or (start_prompt is not None and not isinstance(start_prompt, str)):
+            raise ValueError("plan and start_prompt must be strings")
+        if len(plan.encode("utf-8")) > 100_000 or (start_prompt is not None and len(start_prompt.encode("utf-8")) > 100_000):
+            raise ValueError("plan or start_prompt exceeds the byte limit")
+        metadata_json = _json(metadata_value)
+        todo_json = _json(todo_value)
+        acceptance_json = _json(acceptance)
+        start_metadata_json = _json({"goal_id": goal_id, "goal_event": "start"})
+        if len(metadata_json.encode("utf-8")) > 1_000_000 or len(todo_json.encode("utf-8")) > 1_000_000:
+            raise ValueError("goal metadata or todo_items exceed the byte limit")
+        if destination is not None:
+            _require_identifier(destination, "destination")
+        destination = destination or "local_session"
+        if len(destination.encode("utf-8")) > 256:
+            raise ValueError("goal destination exceeds the byte limit")
+        if destination == "local_session":
+            profile = metadata_value.get("profile_id", "main")
+            if not isinstance(profile, str) or not profile.strip() or len(profile.encode("utf-8")) > 128:
+                raise ValueError("local goal profile_id is invalid")
+            parent_profile = metadata_value.get("parent_profile_id")
+            if parent_profile is not None and (
+                not isinstance(parent_profile, str)
+                or not parent_profile.strip()
+                or len(parent_profile.encode("utf-8")) > 128
+            ):
+                raise ValueError("local goal parent_profile_id is invalid")
+            if profile != "main" and parent_profile is None:
+                raise ValueError("non-main local goals require metadata.parent_profile_id")
+        elif destination.startswith("channel:"):
+            account_id = destination.removeprefix("channel:")
+            _require_identifier(account_id, "channel account_id")
+            if len(account_id.encode("utf-8")) > 128:
+                raise ValueError("channel account_id exceeds the byte limit")
+            conversation_id = metadata_value.get("conversation_id")
+            if not isinstance(conversation_id, str) or not conversation_id.strip() or len(conversation_id.encode("utf-8")) > 512:
+                raise ValueError("channel goal requires bounded metadata.conversation_id")
+            supplied_account = metadata_value.get("account_id", account_id)
+            if supplied_account != account_id:
+                raise ValueError("channel destination account does not match metadata")
+        else:
+            raise ValueError("unsupported goal destination")
+        now_value = _iso(now)
+        first_id = f"{goal_id}:iteration:1"
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            persisted_session = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if persisted_session is None:
+                if destination != "local_session" or metadata_value.get("profile_id", "main") != "main":
+                    raise PermissionError("non-default goal delivery requires an authenticated persisted session")
+                principal_id = principal.actor_id
+                authoritative_metadata = {"profile_id": "main", "delivery_principal_id": principal_id}
+            else:
+                try:
+                    session_metadata = json.loads(persisted_session["metadata"] or "{}")
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise PermissionError("persisted session principal is invalid") from exc
+                if not isinstance(session_metadata, Mapping):
+                    raise PermissionError("persisted session principal is invalid")
+                principal_id = persisted_session["user_id"]
+                if (
+                    principal_id != principal.actor_id
+                    or session_metadata.get("tenant_id") != principal.tenant_id
+                ):
+                    raise PermissionError("goal session owner or tenant does not match the request principal")
+                authoritative_metadata = {"delivery_principal_id": principal_id}
+                if destination == "local_session":
+                    authoritative_profile = session_metadata.get("profile_id", "main")
+                    authoritative_parent = session_metadata.get("parent_profile_id")
+                    requested_profile = metadata_value.get("profile_id", "main")
+                    requested_parent = metadata_value.get("parent_profile_id")
+                    if requested_profile != authoritative_profile or requested_parent != authoritative_parent:
+                        raise PermissionError("goal profile does not match the authenticated session")
+                    authoritative_metadata.update({"profile_id": authoritative_profile})
+                    if authoritative_parent is not None:
+                        authoritative_metadata["parent_profile_id"] = authoritative_parent
+                else:
+                    authoritative_account = session_metadata.get("account_id")
+                    authoritative_conversation = session_metadata.get("conversation_id")
+                    requested_account = destination.removeprefix("channel:")
+                    if (
+                        authoritative_account != requested_account
+                        or metadata_value.get("account_id", requested_account) != authoritative_account
+                        or metadata_value.get("conversation_id") != authoritative_conversation
+                    ):
+                        raise PermissionError("goal channel route does not match the authenticated session")
+                    authoritative_metadata.update({
+                        "account_id": authoritative_account,
+                        "conversation_id": authoritative_conversation,
+                    })
+            authoritative_metadata["delivery_tenant_id"] = principal.tenant_id
+            metadata_value = {**metadata_value, **authoritative_metadata}
+            metadata_json = _json(metadata_value)
+            conn.execute(
+                """INSERT INTO sessions (
+                       session_id, channel, user_id, status, created_at, updated_at, metadata
+                   ) VALUES (?, 'goal', ?, 'active', ?, ?, ?)
+                   ON CONFLICT(session_id) DO NOTHING""",
+                (session_id, principal.actor_id, now_value, now_value,
+                 _json({"tenant_id": principal.tenant_id, "profile_id": "main"})),
+            )
+            conn.execute(
+                """INSERT INTO goals (
+                       goal_id, session_id, goal_text, status, resume_token,
+                       plan, todo_items, metadata,
+                       acceptance_criteria, judge_schema_version, judge_prompt_version,
+                       judge_confidence_threshold, max_iterations, max_tokens,
+                       max_estimated_cost, max_wall_clock_seconds, active_started_at,
+                       pricing_version, pricing_currency, pricing_cost_per_token,
+                       terminal_destination, runtime_version, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    goal_id, session_id, goal_text, "running", f"resume_{uuid.uuid4().hex}",
+                    plan, todo_json, metadata_json,
+                    acceptance_json, config["judge_schema_version"],
+                    config["judge_prompt_version"], config["judge_confidence_threshold"],
+                    config["max_iterations"], config["max_tokens"],
+                    config["max_estimated_cost"], config["max_active_seconds"],
+                    now_value, config.get("pricing_version"), config.get("pricing_currency"),
+                    config.get("pricing_cost_per_token"), destination, 0, now_value, now_value,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO goal_iterations (
+                       iteration_id, goal_id, sequence, state, claim_generation, created_at, updated_at
+                   ) VALUES (?, ?, 1, 'pending', 0, ?, ?)""",
+                (first_id, goal_id, now_value, now_value),
+            )
+            conn.execute(
+                """INSERT INTO messages (message_id, session_id, role, content, created_at, metadata)
+                   VALUES (?, ?, 'user', ?, ?, ?)""",
+                (f"goal:{goal_id}:start", session_id,
+                 start_prompt if start_prompt is not None else f"Start durable goal execution for:\n{goal_text}\n",
+                 now_value, start_metadata_json),
+            )
+            row = conn.execute(
+                "SELECT * FROM goal_iterations WHERE iteration_id = ?", (first_id,)
+            ).fetchone()
+        return self._goal_iteration(row)
+
+    @staticmethod
+    def _insert_or_validate_goal_outbox(
+        conn: sqlite3.Connection, obligation: OutboxObligation
+    ) -> None:
+        """Insert one Goal obligation or prove an idempotent identical replay."""
+        if obligation.state != "pending" or obligation.claim is not None or obligation.attempt != 0:
+            raise ValueError("new goal obligations must be pending and unclaimed")
+        payload = _json(obligation.payload)
+        conn.execute(
+            """INSERT INTO outbox_obligations (
+                   obligation_id, idempotency_key, destination, payload, state,
+                   attempt, claim_generation, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+               ON CONFLICT(destination, idempotency_key) DO NOTHING""",
+            (obligation.obligation_id, obligation.idempotency_key,
+             obligation.destination, payload, _iso(obligation.created_at),
+             _iso(obligation.updated_at)),
+        )
+        stored = conn.execute(
+            """SELECT obligation_id, payload FROM outbox_obligations
+               WHERE destination = ? AND idempotency_key = ?""",
+            (obligation.destination, obligation.idempotency_key),
+        ).fetchone()
+        if stored is None or stored["obligation_id"] != obligation.obligation_id or stored["payload"] != payload:
+            raise StateConflictError("goal outbox identity conflict")
+
+    @staticmethod
+    def goal_outbox_obligation(
+        goal: Mapping[str, Any], *, key: str, content: str, kind: str,
+        goal_status: str, delivery_status: str, now: datetime,
+    ) -> OutboxObligation:
+        """Build a Goal result using the selected destination's real payload protocol."""
+        if not isinstance(content, str) or not content.strip() or len(content.encode("utf-8")) > 65_536:
+            raise ValueError("goal delivery content is invalid or exceeds the byte limit")
+        destination = goal.get("terminal_destination")
+        if not isinstance(destination, str):
+            raise ValueError("goal destination is missing")
+        metadata = goal.get("metadata")
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata or "{}")
+        if not isinstance(metadata, Mapping):
+            raise ValueError("goal metadata is invalid")
+        if destination == "local_session":
+            payload = {
+                "kind": kind, "goal_id": goal["goal_id"], "goal_status": goal_status,
+                "session_id": goal["session_id"], "source_session_id": goal["session_id"],
+                "task_id": key, "profile_id": str(metadata.get("profile_id") or "main"),
+                "parent_profile_id": metadata.get("parent_profile_id"),
+                "principal_id": metadata.get("delivery_principal_id"),
+                "tenant_id": metadata.get("delivery_tenant_id"),
+                "status": delivery_status, "content": content,
+            }
+        elif destination.startswith("channel:"):
+            account_id = destination.removeprefix("channel:")
+            if metadata.get("account_id", account_id) != account_id:
+                raise ValueError("channel goal account mismatch")
+            conversation_id = metadata.get("conversation_id")
+            if not isinstance(conversation_id, str) or not conversation_id.strip():
+                raise ValueError("channel goal conversation is missing")
+            payload = {
+                "account_id": account_id, "conversation_id": conversation_id,
+                "content": content, "source_event_key": key,
+                "metadata": {
+                    "kind": kind, "goal_id": goal["goal_id"], "goal_status": goal_status,
+                    "origin_session_id": goal["session_id"],
+                    "principal_id": metadata.get("delivery_principal_id"),
+                    "tenant_id": metadata.get("delivery_tenant_id"),
+                },
+            }
+        else:
+            raise ValueError("unsupported goal destination")
+        return OutboxObligation(
+            obligation_id=key, idempotency_key=key, destination=destination,
+            payload=payload, created_at=now, updated_at=now,
+        )
+
+    def claim_next_goal_iteration(
+        self,
+        owner_id: str,
+        now: datetime,
+        expires_at: datetime,
+        *,
+        goal_id: str | None = None,
+        principal: RequestPrincipal,
+    ) -> GoalIteration | None:
+        """Claim one due iteration and bind it to a deterministic turn in one transaction."""
+        self._require_goal_principal(principal)
+        self._validate_lease_window(now, expires_at)
+        _require_identifier(owner_id, "owner_id")
+        if goal_id is not None:
+            _require_identifier(goal_id, "goal_id")
+        conn = self._conn
+        now_value = _iso(now)
+        goal_clause = "AND gi.goal_id = ?" if goal_id else ""
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            candidate = conn.execute(
+                f"""SELECT gi.*, g.session_id, g.goal_text,
+                           s.user_id AS session_user_id, s.metadata AS session_metadata
+                    FROM goal_iterations gi
+                    JOIN goals g ON g.goal_id = gi.goal_id
+                    JOIN sessions s ON s.session_id = g.session_id
+                    WHERE (gi.state = 'pending'
+                           OR (gi.state = 'retry_wait' AND gi.next_attempt_at <= ?)
+                           OR (gi.state IN ('running', 'judging') AND gi.claim_expires_at <= ?))
+                      AND g.status IN ('running', 'runnable')
+                      AND s.user_id = ? AND json_extract(s.metadata, '$.tenant_id') = ?
+                      {goal_clause}
+                    ORDER BY gi.created_at, gi.iteration_id LIMIT 1""",
+                (now_value, now_value, principal.actor_id, principal.tenant_id,
+                 *((goal_id,) if goal_id else ())),
+            ).fetchone()
+            if candidate is None:
+                return None
+            thread_id = f"goal:{candidate['goal_id']}:thread"
+            session_metadata = json.loads(candidate["session_metadata"] or "{}")
+            existing_thread = conn.execute(
+                "SELECT * FROM runtime_threads WHERE thread_id = ?", (thread_id,)
+            ).fetchone()
+            if existing_thread is not None:
+                existing_thread_metadata = json.loads(existing_thread["metadata"] or "{}")
+                if (
+                    existing_thread["session_id"] != candidate["session_id"]
+                    or existing_thread["user_id"] != candidate["session_user_id"]
+                    or existing_thread_metadata.get("goal_id") != candidate["goal_id"]
+                    or existing_thread_metadata.get("tenant_id") != session_metadata.get("tenant_id")
+                ):
+                    raise StateConflictError("goal runtime thread principal binding is invalid")
+            next_generation = int(candidate["claim_generation"] or 0) + 1
+            existing_turn = (
+                conn.execute("SELECT * FROM runtime_turns WHERE turn_id = ?", (candidate["turn_id"],)).fetchone()
+                if candidate["turn_id"] else None
+            )
+            if existing_turn is not None and existing_turn["status"] == "completed":
+                expected_thread = f"goal:{candidate['goal_id']}:thread"
+                expected_source = f"goal:{candidate['goal_id']}:iteration:{candidate['sequence']}"
+                try:
+                    existing_metadata = json.loads(existing_turn["metadata"] or "{}")
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise StateConflictError("completed goal turn metadata is invalid") from exc
+                if (
+                    existing_turn["thread_id"] != expected_thread
+                    or existing_turn["session_id"] != candidate["session_id"]
+                    or existing_metadata.get("goal_id") != candidate["goal_id"]
+                    or existing_metadata.get("goal_iteration") != candidate["sequence"]
+                    or existing_metadata.get("source_event_key") != expected_source
+                ):
+                    raise StateConflictError("completed goal turn binding is invalid")
+                turn_id = existing_turn["turn_id"]
+            else:
+                turn_id = f"goal:{candidate['goal_id']}:iteration:{candidate['sequence']}:turn"
+                if next_generation > 1:
+                    turn_id += f":retry:{next_generation}"
+            conn.execute(
+                """INSERT INTO runtime_threads (
+                       thread_id, session_id, user_id, title, status, latest_event_seq,
+                       created_at, updated_at, metadata
+                   ) VALUES (?, ?, ?, ?, 'active', 0, ?, ?, ?)
+                   ON CONFLICT(thread_id) DO NOTHING""",
+                (thread_id, candidate["session_id"], candidate["session_user_id"],
+                 candidate["goal_text"][:200], now_value, now_value,
+                 _json({"goal_id": candidate["goal_id"],
+                        "tenant_id": session_metadata.get("tenant_id")})),
+            )
+            conn.execute(
+                """INSERT INTO runtime_turns (
+                       turn_id, thread_id, session_id, user_input, status, started_at, metadata
+                   ) VALUES (?, ?, ?, ?, 'running', ?, ?)
+                   ON CONFLICT(turn_id) DO NOTHING""",
+                (turn_id, thread_id, candidate["session_id"], candidate["goal_text"], now_value,
+                 _json({"goal_id": candidate["goal_id"], "goal_iteration": candidate["sequence"],
+                        "source_event_key": f"goal:{candidate['goal_id']}:iteration:{candidate['sequence']}"})),
+            )
+            row = conn.execute(
+                """UPDATE goal_iterations SET state = 'running', turn_id = ?, claim_owner = ?,
+                       claim_generation = claim_generation + 1, claim_expires_at = ?,
+                       attempt = attempt + 1, next_attempt_at = NULL, updated_at = ?
+                   WHERE iteration_id = ? AND
+                     (state = 'pending' OR (state = 'retry_wait' AND next_attempt_at <= ?)
+                      OR (state IN ('running', 'judging') AND claim_expires_at <= ?))
+                   RETURNING *""",
+                (turn_id, owner_id, _iso(expires_at), now_value, candidate["iteration_id"], now_value, now_value),
+            ).fetchone()
+        return self._goal_iteration(row) if row else None
+
+    def get_goal_for_principal(
+        self, goal_id: str, principal: RequestPrincipal, *, conceal: bool = False
+    ) -> dict[str, Any] | None:
+        self._require_goal_principal(principal)
+        _require_identifier(goal_id, "goal_id")
+        row = self._conn.execute(
+            """SELECT g.* FROM goals g JOIN sessions s ON s.session_id = g.session_id
+               WHERE g.goal_id = ? AND s.user_id = ?
+                 AND json_extract(s.metadata, '$.tenant_id') = ?""",
+            (goal_id, principal.actor_id, principal.tenant_id),
+        ).fetchone()
+        if row is None and not conceal and self._conn.execute(
+            "SELECT 1 FROM goals WHERE goal_id = ?", (goal_id,)
+        ).fetchone() is not None:
+            raise PermissionError("goal principal does not own this tenant")
+        return self.control_plane._row_to_dict(row) if row else None
+
+    def list_goals_for_principal(
+        self, principal: RequestPrincipal, *, status: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self._require_goal_principal(principal)
+        if status is not None and status not in {
+            "draft", "running", "runnable", "paused", "blocked", "completed", "failed", "cancelled"
+        }:
+            raise ValueError("unsupported goal status filter")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        status_clause = "AND g.status = ?" if status is not None else ""
+        rows = self._conn.execute(
+            f"""SELECT g.* FROM goals g JOIN sessions s ON s.session_id = g.session_id
+                WHERE s.user_id = ? AND json_extract(s.metadata, '$.tenant_id') = ?
+                {status_clause} ORDER BY g.created_at LIMIT ?""",
+            (principal.actor_id, principal.tenant_id,
+             *((status,) if status is not None else ()), limit),
+        ).fetchall()
+        return [self.control_plane._row_to_dict(row) for row in rows]
+
+    def append_goal_guidance(
+        self, goal_id: str, content: str, *, now: datetime, principal: RequestPrincipal
+    ) -> int:
+        self._require_goal_principal(principal)
+        _require_identifier(goal_id, "goal_id")
+        _require_identifier(content, "content")
+        if len(content.encode("utf-8")) > 4096:
+            raise ValueError("guidance content exceeds the byte limit")
+        _require_aware(now, "now")
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            goal = conn.execute(
+                """SELECT g.last_guidance_sequence, s.user_id, s.metadata AS session_metadata
+                   FROM goals g JOIN sessions s ON s.session_id = g.session_id
+                   WHERE g.goal_id = ?""", (goal_id,),
+            ).fetchone()
+            if goal is None:
+                raise KeyError(f"Goal not found: {goal_id}")
+            session_metadata = json.loads(goal["session_metadata"] or "{}")
+            if goal["user_id"] != principal.actor_id or session_metadata.get("tenant_id") != principal.tenant_id:
+                raise PermissionError("goal guidance principal does not own this tenant")
+            pending = conn.execute(
+                """SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0)
+                   FROM goal_guidance WHERE goal_id = ? AND sequence > ?""",
+                (goal_id, int(goal["last_guidance_sequence"])),
+            ).fetchone()
+            if int(pending[0]) >= 100 or int(pending[1]) + len(content.encode("utf-8")) > 65_536:
+                raise ValueError("pending guidance quota exceeded")
+            sequence = int(conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM goal_guidance WHERE goal_id = ?",
+                (goal_id,),
+            ).fetchone()[0])
+            conn.execute(
+                "INSERT INTO goal_guidance (goal_id, sequence, content, created_at) VALUES (?, ?, ?, ?)",
+                (goal_id, sequence, content, _iso(now)),
+            )
+        return sequence
+
+    def list_goal_guidance(
+        self, goal_id: str, *, after_sequence: int = 0, limit: int = 100,
+        principal: RequestPrincipal,
+    ) -> list[dict[str, Any]]:
+        self._require_goal_principal(principal)
+        _require_identifier(goal_id, "goal_id")
+        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int) or after_sequence < 0:
+            raise ValueError("after_sequence must be a non-negative integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        owner = self._conn.execute(
+            """SELECT s.user_id, s.metadata FROM goals g JOIN sessions s ON s.session_id = g.session_id
+               WHERE g.goal_id = ?""", (goal_id,),
+        ).fetchone()
+        owner_metadata = json.loads(owner["metadata"] or "{}") if owner else {}
+        if owner is None or owner["user_id"] != principal.actor_id or owner_metadata.get("tenant_id") != principal.tenant_id:
+            raise PermissionError("goal guidance principal does not own this tenant")
+        rows = self._conn.execute(
+            "SELECT * FROM goal_guidance WHERE goal_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
+            (goal_id, after_sequence, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _issue_goal_operator_approval(
+        self, operator: OperatorPrincipal, principal: RequestPrincipal, goal_id: str, *, approval_id: str,
+        decision: str, expected_goal_version: int, expires_at: datetime,
+        now: datetime, budget_updates: Mapping[str, int | float] | None,
+        capability: object,
+    ) -> None:
+        if capability is not self._operator_authority_capability or capability is None:
+            raise PermissionError("invalid operator authority capability")
+        self._require_operator_principal(operator)
+        self._require_goal_principal(principal)
+        if operator.tenant_id != principal.tenant_id:
+            raise PermissionError("operator tenant does not match the Goal subject")
+        for value, name in ((goal_id, "goal_id"), (approval_id, "approval_id")):
+            _require_identifier(value, name)
+            if len(value.encode("utf-8")) > 128:
+                raise ValueError(f"{name} exceeds the byte limit")
+        if decision not in {"reset_failures", "increase_budget"}:
+            raise ValueError("unsupported operator decision")
+        _require_aware(now, "now")
+        _require_aware(expires_at, "expires_at")
+        if expires_at <= now or expires_at - now > timedelta(hours=1):
+            raise ValueError("operator approval expiry must be within one hour")
+        if isinstance(expected_goal_version, bool) or not isinstance(expected_goal_version, int) or expected_goal_version < 0:
+            raise ValueError("expected_goal_version must be non-negative")
+        approved_updates = dict(budget_updates or {})
+        if decision == "reset_failures" and approved_updates:
+            raise ValueError("reset approval cannot authorize budget updates")
+        if decision == "increase_budget" and not approved_updates:
+            raise ValueError("budget approval requires canonical updates")
+        allowed = {"max_iterations", "max_tokens", "max_estimated_cost", "max_wall_clock_seconds"}
+        if set(approved_updates) - allowed:
+            raise ValueError("unsupported approved budget update")
+        for name, value in approved_updates.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or not 0 < value <= 1_000_000_000_000_000:
+                raise ValueError("approved budget update exceeds the upper bound")
+            if name in {"max_iterations", "max_tokens"} and not isinstance(value, int):
+                raise ValueError("approved count budgets must be integers")
+        approved_json = _json(approved_updates)
+        with self._conn:
+            goal = self._conn.execute(
+                """SELECT g.runtime_version, s.user_id, s.metadata FROM goals g
+                   JOIN sessions s ON s.session_id = g.session_id
+                   WHERE g.goal_id = ?""", (goal_id,),
+            ).fetchone()
+            if goal is None:
+                raise KeyError(f"Goal not found: {goal_id}")
+            owner_metadata = json.loads(goal["metadata"] or "{}")
+            if (
+                goal["user_id"] != principal.actor_id
+                or owner_metadata.get("tenant_id") != principal.tenant_id
+                or int(goal["runtime_version"]) != expected_goal_version
+            ):
+                raise PermissionError("operator principal/version does not own the goal")
+            self._conn.execute(
+                """INSERT INTO goal_operator_approvals
+                   (approval_id, goal_id, principal_id, tenant_id, issuer_id, decision,
+                    issuer_tenant_id, expected_goal_version, approved_budget_updates, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (approval_id, goal_id, principal.actor_id, principal.tenant_id,
+                 operator.issuer_id, decision, operator.tenant_id,
+                 expected_goal_version, approved_json,
+                 _iso(now), _iso(expires_at)),
+            )
+
+    def transition_goal(
+        self, goal_id: str, *, expected_version: int, action: str, now: datetime, reason: str,
+        principal: RequestPrincipal,
+        operator_decision: str | None = None,
+        approval_id: str | None = None,
+        budget_updates: Mapping[str, int | float] | None = None,
+    ) -> dict[str, Any]:
+        """CAS pause/resume/cancel while accounting only active elapsed time."""
+        self._require_goal_principal(principal)
+        if action not in {"pause", "resume", "cancel"}:
+            raise ValueError("unsupported goal transition")
+        _require_aware(now, "now")
+        _require_identifier(goal_id, "goal_id")
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 0:
+            raise ValueError("expected_version must be a non-negative integer")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be a non-empty string")
+        if len(reason.encode("utf-8")) > 4096:
+            raise ValueError("reason exceeds the byte limit")
+        updates = dict(budget_updates or {})
+        allowed_budget_updates = {"max_iterations", "max_tokens", "max_estimated_cost", "max_wall_clock_seconds"}
+        if set(updates) - allowed_budget_updates:
+            raise ValueError("unsupported budget update")
+        for name, value in updates.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+            if name in {"max_iterations", "max_tokens"} and not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer")
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            goal = conn.execute("SELECT * FROM goals WHERE goal_id = ?", (goal_id,)).fetchone()
+            if goal is None:
+                raise KeyError(f"Goal not found: {goal_id}")
+            session_owner = conn.execute(
+                "SELECT user_id, metadata FROM sessions WHERE session_id = ?", (goal["session_id"],)
+            ).fetchone()
+            session_metadata = json.loads(session_owner["metadata"] or "{}") if session_owner else {}
+            if (
+                session_owner is None or session_owner["user_id"] != principal.actor_id
+                or session_metadata.get("tenant_id") != principal.tenant_id
+            ):
+                raise PermissionError("goal transition principal does not own this tenant")
+            if int(goal["runtime_version"]) != expected_version:
+                raise StateConflictError(f"concurrent goal update: {goal_id}")
+            current = goal["status"]
+            allowed = {"pause": {"running", "runnable"}, "resume": {"paused", "blocked"},
+                       "cancel": {"running", "runnable", "paused", "blocked"}}
+            if current not in allowed[action]:
+                raise StateConflictError(f"cannot {action} goal from {current}")
+            consumed = float(goal["consumed_active_seconds"] or 0)
+            active_started = goal["active_started_at"]
+            if action in {"pause", "cancel"} and active_started:
+                consumed += max(0.0, (now - datetime.fromisoformat(active_started)).total_seconds())
+            new_status = {"pause": "paused", "resume": "running", "cancel": "cancelled"}[action]
+            metadata = json.loads(goal["metadata"] or "{}")
+            pause_kind = metadata.get("pause_kind")
+            reset_failures = False
+            if updates and not (action == "resume" and pause_kind == "budget"):
+                raise StateConflictError("budget updates are only allowed for budget-paused resume")
+            if action == "resume" and current == "blocked":
+                if operator_decision != "reset_failures":
+                    raise StateConflictError("blocked goal resume requires reset_failures operator decision")
+                reset_failures = True
+            if action == "resume" and pause_kind == "budget":
+                if operator_decision != "increase_budget" or not updates:
+                    raise StateConflictError("budget-paused goal resume requires an atomic budget increase")
+                if any(float(value) <= float(goal[name]) for name, value in updates.items()):
+                    raise StateConflictError("budget updates must increase persisted limits")
+                projected_limits = {
+                    name: updates.get(name, goal[name]) for name in allowed_budget_updates
+                }
+                consumed_by_limit = {
+                    "max_iterations": goal["consumed_iterations"],
+                    "max_tokens": goal["consumed_tokens"],
+                    "max_estimated_cost": goal["consumed_estimated_cost"],
+                    "max_wall_clock_seconds": goal["consumed_active_seconds"],
+                }
+                if any(
+                    projected_limits[name] is None
+                    or float(projected_limits[name]) <= float(consumed)
+                    for name, consumed in consumed_by_limit.items()
+                ):
+                    raise StateConflictError("budget decision must raise every exhausted limit above consumption")
+            if action == "resume" and (current == "blocked" or pause_kind == "budget"):
+                if not approval_id:
+                    raise PermissionError("sensitive resume requires a persisted operator approval")
+                approved_json = _json(updates)
+                consumed_approval = conn.execute(
+                    """UPDATE goal_operator_approvals SET consumed_at = ?, consumer_id = ?
+                       WHERE approval_id = ? AND goal_id = ? AND principal_id = ? AND tenant_id = ?
+                         AND decision = ? AND expected_goal_version = ?
+                         AND approved_budget_updates = ? AND consumed_at IS NULL AND expires_at > ?
+                         AND EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ?
+                                     AND s.user_id = ? AND json_extract(s.metadata, '$.tenant_id') = ?)""",
+                    (_iso(now), principal.actor_id, approval_id, goal_id, principal.actor_id,
+                     principal.tenant_id, operator_decision, expected_version, approved_json,
+                     _iso(now), goal["session_id"], principal.actor_id, principal.tenant_id),
+                )
+                if consumed_approval.rowcount != 1:
+                    raise PermissionError("operator approval was already consumed")
+            if action == "pause":
+                pause_kind = "budget" if reason.lower().startswith("goal budget exhausted") else "user"
+            elif action == "resume":
+                pause_kind = None
+            metadata = {**metadata, "last_transition_reason": str(reason)[:500], "pause_kind": pause_kind}
+            set_budget = "".join(f", {name} = ?" for name in updates)
+            budget_values = list(updates.values())
+            row = conn.execute(
+                f"""UPDATE goals SET status = ?, consumed_active_seconds = ?, active_started_at = ?,
+                       metadata = ?, runtime_version = runtime_version + 1, updated_at = ?
+                       , transient_failure_count = ? {set_budget}
+                   WHERE goal_id = ? AND runtime_version = ? RETURNING *""",
+                (new_status, consumed, _iso(now) if action == "resume" else None,
+                 _json(metadata), _iso(now), 0 if reset_failures else goal["transient_failure_count"],
+                 *budget_values, goal_id, expected_version),
+            ).fetchone()
+            conn.execute(
+                """INSERT INTO messages (message_id, session_id, role, content, created_at, metadata)
+                   VALUES (?, ?, 'system', ?, ?, ?)""",
+                (
+                    f"goal:{goal_id}:transition:{expected_version + 1}", goal["session_id"],
+                    f"Goal status changed to {new_status}: {reason}", _iso(now),
+                    _json({"goal_id": goal_id, "goal_event": new_status}),
+                ),
+            )
+            if action == "resume" and reset_failures:
+                conn.execute(
+                    """UPDATE goal_iterations SET state = 'retry_wait', next_attempt_at = ?,
+                       last_error = NULL, updated_at = ? WHERE iteration_id = (
+                           SELECT iteration_id FROM goal_iterations WHERE goal_id = ? AND state = 'failed'
+                           ORDER BY sequence DESC LIMIT 1
+                       )""",
+                    (_iso(now), _iso(now), goal_id),
+                )
+            if action == "cancel":
+                conn.execute(
+                    """UPDATE goal_iterations SET state = 'cancelled', claim_owner = NULL,
+                       claim_expires_at = NULL, updated_at = ?
+                       WHERE goal_id = ? AND state IN ('pending', 'retry_wait', 'running', 'judging')""",
+                    (_iso(now), goal_id),
+                )
+                if goal["terminal_destination"]:
+                    key = f"goal:{goal_id}:terminal:v1"
+                    self._insert_or_validate_goal_outbox(
+                        conn, self.goal_outbox_obligation(
+                            dict(goal), key=key, content=str(reason)[:500],
+                            kind="goal_terminal", goal_status="cancelled",
+                            delivery_status="cancelled", now=now,
+                        ),
+                    )
+            elif action == "pause" and pause_kind == "budget" and goal["terminal_destination"]:
+                sequence = int(goal["consumed_iterations"])
+                key = f"goal:{goal_id}:progress:budget:{sequence}:v1"
+                self._insert_or_validate_goal_outbox(
+                    conn, self.goal_outbox_obligation(
+                        dict(goal), key=key, content=str(reason)[:500],
+                        kind="goal_progress", goal_status="paused",
+                        delivery_status="completed", now=now,
+                    ),
+                )
+        return self.control_plane._row_to_dict(row)
+
+    def fail_goal_iteration(
+        self, iteration_id: str, token: ClaimToken, *, error: str, now: datetime,
+        max_transient_failures: int, expected_goal_version: int,
+    ) -> GoalIteration:
+        """Release a transient failure for retry, or block after the configured bound."""
+        _require_identifier(iteration_id, "iteration_id")
+        _require_aware(now, "now")
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("error must be a non-empty string")
+        if isinstance(max_transient_failures, bool) or not isinstance(max_transient_failures, int) or max_transient_failures < 1:
+            raise ValueError("max_transient_failures must be positive")
+        if isinstance(expected_goal_version, bool) or not isinstance(expected_goal_version, int) or expected_goal_version < 0:
+            raise ValueError("expected_goal_version must be non-negative")
+        conn = self._conn
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            iteration = conn.execute("SELECT * FROM goal_iterations WHERE iteration_id = ?", (iteration_id,)).fetchone()
+            if (
+                iteration is None
+                or iteration["state"] not in {"running", "judging"}
+                or iteration["claim_owner"] != token.owner_id
+                or int(iteration["claim_generation"]) != token.generation
+                or iteration["claim_expires_at"] != _iso(token.expires_at)
+                or iteration["claim_expires_at"] <= _iso(now)
+            ):
+                raise StaleClaimError(f"stale goal_iteration claim: {iteration_id}")
+            goal = conn.execute("SELECT * FROM goals WHERE goal_id = ?", (iteration["goal_id"],)).fetchone()
+            if (
+                goal is None or int(goal["runtime_version"]) != expected_goal_version
+                or goal["status"] not in {"running", "runnable"}
+            ):
+                raise StateConflictError(f"concurrent goal update: {iteration['goal_id']}")
+            failures = int(goal["transient_failure_count"] or 0) + 1
+            blocked = failures >= max_transient_failures
+            state = "failed" if blocked else "retry_wait"
+            retry_delay = min(300, 2 ** min(8, max(0, failures - 1)))
+            next_attempt_at = None if blocked else now + timedelta(seconds=retry_delay)
+            active_seconds = float(goal["consumed_active_seconds"] or 0)
+            if blocked and goal["active_started_at"]:
+                active_seconds += max(
+                    0.0,
+                    (now - datetime.fromisoformat(goal["active_started_at"])).total_seconds(),
+                )
+            row = conn.execute(
+                """UPDATE goal_iterations SET state = ?, next_attempt_at = ?, last_error = ?, claim_owner = NULL,
+                       claim_expires_at = NULL, updated_at = ? WHERE iteration_id = ? RETURNING *""",
+                (state, _iso(next_attempt_at) if next_attempt_at else None, str(error)[:500], _iso(now), iteration_id),
+            ).fetchone()
+            goal_update = conn.execute(
+                """UPDATE goals SET status = ?, transient_failure_count = ?, active_step = ?,
+                       consumed_active_seconds = ?, active_started_at = ?,
+                       runtime_version = runtime_version + 1, updated_at = ?
+                       WHERE goal_id = ? AND runtime_version = ? AND status IN ('running', 'runnable')""",
+                ("blocked" if blocked else "running", failures,
+                 f"Manual intervention required: {str(error)[:300]}" if blocked else "retry transient failure",
+                 active_seconds, None if blocked else goal["active_started_at"],
+                _iso(now), iteration["goal_id"], expected_goal_version),
+            )
+            if goal_update.rowcount != 1:
+                raise StateConflictError(f"concurrent goal update: {iteration['goal_id']}")
+            if blocked and goal["terminal_destination"]:
+                key = f"goal:{iteration['goal_id']}:progress:blocked:{failures}:v1"
+                self._insert_or_validate_goal_outbox(
+                    conn, self.goal_outbox_obligation(
+                        dict(goal), key=key, content=str(error)[:500],
+                        kind="goal_progress", goal_status="blocked",
+                        delivery_status="failed", now=now,
+                    ),
+                )
+        return self._goal_iteration(row)
+
     def claim_goal_iteration(
         self,
         iteration_id: str,
@@ -4011,6 +4920,7 @@ class DurableRuntimeRepository:
         expires_at: datetime,
     ) -> GoalIteration | None:
         self._validate_lease_window(now, expires_at)
+        _require_identifier(iteration_id, "iteration_id")
         _require_identifier(owner_id, "owner_id")
         conn = self._conn
         with conn:
@@ -4018,24 +4928,49 @@ class DurableRuntimeRepository:
                 """
                 UPDATE goal_iterations
                 SET state = 'running', claim_owner = ?,
-                    claim_generation = claim_generation + 1, claim_expires_at = ?, updated_at = ?
+                    claim_generation = claim_generation + 1, claim_expires_at = ?,
+                    attempt = attempt + 1, next_attempt_at = NULL, updated_at = ?
                 WHERE iteration_id = ?
-                  AND (state = 'pending' OR (state = 'running' AND claim_expires_at <= ?))
+                  AND (state = 'pending' OR (state = 'retry_wait' AND next_attempt_at <= ?)
+                       OR (state IN ('running', 'judging') AND claim_expires_at <= ?))
                   AND EXISTS (SELECT 1 FROM goals WHERE goals.goal_id = goal_iterations.goal_id
                               AND goals.status IN ('running', 'runnable'))
                 RETURNING *
                 """,
-                (owner_id, _iso(expires_at), _iso(now), iteration_id, _iso(now)),
+                (owner_id, _iso(expires_at), _iso(now), iteration_id, _iso(now), _iso(now)),
             ).fetchone()
         return self._goal_iteration(row) if row else None
 
+    def mark_goal_iteration_judging(
+        self, iteration_id: str, token: ClaimToken, *, now: datetime
+    ) -> GoalIteration:
+        """Persist the execution/judging boundary under the current fencing token."""
+        _require_identifier(iteration_id, "iteration_id")
+        _require_aware(now, "now")
+        with self._conn:
+            row = self._conn.execute(
+                """UPDATE goal_iterations SET state = 'judging', updated_at = ?
+                   WHERE iteration_id = ? AND state = 'running'
+                     AND claim_owner = ? AND claim_generation = ?
+                     AND claim_expires_at = ? AND claim_expires_at > ?
+                   RETURNING *""",
+                (_iso(now), iteration_id, token.owner_id, token.generation,
+                 _iso(token.expires_at), _iso(now)),
+            ).fetchone()
+        if row is None:
+            raise StaleClaimError(f"stale goal_iteration claim: {iteration_id}")
+        return self._goal_iteration(row)
+
     def get_goal_iteration(self, iteration_id: str) -> GoalIteration | None:
+        _require_identifier(iteration_id, "iteration_id")
         row = self._conn.execute(
             "SELECT * FROM goal_iterations WHERE iteration_id = ?", (iteration_id,)
         ).fetchone()
         return self._goal_iteration(row) if row else None
 
     def list_goal_iterations(self, goal_id: str | None = None, limit: int = 100) -> list[GoalIteration]:
+        if goal_id is not None:
+            _require_identifier(goal_id, "goal_id")
         rows = self._list_rows("goal_iterations", "goal_id", goal_id, "goal_id, sequence", limit)
         return [self._goal_iteration(row) for row in rows]
 
@@ -4047,12 +4982,20 @@ class DurableRuntimeRepository:
         judge_result: Mapping[str, Any],
         budget_delta: Mapping[str, int | float],
         continue_running: bool,
+        create_continuation: bool | None = None,
         next_iteration_id: str | None = None,
         goal_status: str | None = None,
+        expected_goal_version: int | None = None,
+        guidance_sequence: int | None = None,
+        terminal_obligation: OutboxObligation | None = None,
         now: datetime,
     ) -> tuple[GoalIteration, GoalIteration | None]:
         if not isinstance(continue_running, bool):
             raise ValueError("continue_running must be a boolean")
+        if create_continuation is None:
+            create_continuation = continue_running
+        if not isinstance(create_continuation, bool) or (continue_running and not create_continuation):
+            raise ValueError("create_continuation must include every running handoff")
         status = goal_status or ("running" if continue_running else "completed")
         allowed_statuses = {"running", "runnable", "completed", "paused", "blocked", "failed", "cancelled"}
         if status not in allowed_statuses or continue_running != (status in {"running", "runnable"}):
@@ -4095,12 +5038,37 @@ class DurableRuntimeRepository:
                 raise StaleClaimError(f"stale goal iteration claim: {iteration_id}")
 
             goal = conn.execute(
-                "SELECT runtime_version FROM goals WHERE goal_id = ?",
+                "SELECT * FROM goals WHERE goal_id = ?",
                 (completed_row["goal_id"],),
             ).fetchone()
             if goal is None:
                 raise StateConflictError(f"missing goal: {completed_row['goal_id']}")
+            if expected_goal_version is not None and int(goal["runtime_version"]) != expected_goal_version:
+                raise StateConflictError(f"concurrent goal update: {completed_row['goal_id']}")
+            resulting = {
+                "iterations": int(goal["consumed_iterations"]) + 1,
+                "tokens": int(goal["consumed_tokens"]) + int(increments["tokens"]),
+                "estimated_cost": float(goal["consumed_estimated_cost"]) + float(increments["estimated_cost"]),
+                "active_seconds": float(goal["consumed_active_seconds"]) + float(increments["active_seconds"]),
+            }
+            limits = {
+                "iterations": goal["max_iterations"], "tokens": goal["max_tokens"],
+                "estimated_cost": goal["max_estimated_cost"],
+                "active_seconds": goal["max_wall_clock_seconds"],
+            }
+            exceeded = [name for name, limit in limits.items() if limit is not None and resulting[name] >= float(limit)]
+            if exceeded and continue_running:
+                raise StateConflictError(f"goal budget exhausted: {', '.join(exceeded)}")
             next_action = str(judge_value.get("next_action", "")) if continue_running else ""
+            goal_metadata = json.loads(goal["metadata"] or "{}")
+            if status == "paused":
+                goal_metadata = {**goal_metadata, "pause_kind": "budget"}
+            if terminal_obligation is not None:
+                if continue_running:
+                    raise ValueError("terminal obligation requires terminal goal state")
+                if terminal_obligation.destination != goal["terminal_destination"]:
+                    raise StateConflictError("goal terminal destination changed")
+                self._insert_or_validate_goal_outbox(conn, terminal_obligation)
             updated = conn.execute(
                 """
                 UPDATE goals
@@ -4108,7 +5076,8 @@ class DurableRuntimeRepository:
                     last_judge_result = ?, consumed_iterations = consumed_iterations + 1,
                     consumed_tokens = consumed_tokens + ?,
                     consumed_estimated_cost = consumed_estimated_cost + ?,
-                    consumed_active_seconds = consumed_active_seconds + ?,
+                    consumed_active_seconds = consumed_active_seconds + ?, active_started_at = ?,
+                    last_guidance_sequence = ?, transient_failure_count = 0, metadata = ?,
                     runtime_version = runtime_version + 1, updated_at = ?
                 WHERE goal_id = ? AND runtime_version = ?
                   AND status IN ('running', 'runnable')
@@ -4120,6 +5089,9 @@ class DurableRuntimeRepository:
                     increments["tokens"],
                     increments["estimated_cost"],
                     increments["active_seconds"],
+                    now_value if continue_running else None,
+                    int(guidance_sequence if guidance_sequence is not None else goal["last_guidance_sequence"]),
+                    _json(goal_metadata),
                     now_value,
                     completed_row["goal_id"],
                     goal["runtime_version"],
@@ -4129,7 +5101,7 @@ class DurableRuntimeRepository:
                 raise StateConflictError(f"concurrent goal update: {completed_row['goal_id']}")
 
             continuation_row = None
-            if continue_running:
+            if create_continuation:
                 next_sequence = completed_row["sequence"] + 1
                 continuation_id = next_iteration_id or f"{completed_row['goal_id']}:iteration:{next_sequence}"
                 conn.execute(
@@ -4153,6 +5125,9 @@ class DurableRuntimeRepository:
                 ).fetchone()
         continuation = self._goal_iteration(continuation_row) if continuation_row else None
         return self._goal_iteration(completed_row), continuation
+
+    def finish_goal_iteration(self, iteration_id: str, token: ClaimToken, **kwargs: Any):
+        return self.complete_goal_iteration_and_continue(iteration_id, token, **kwargs)
 
     def _finish_outbox(
         self,
@@ -4284,4 +5259,9 @@ class DurableRuntimeRepository:
             updated_at=datetime.fromisoformat(row["updated_at"]),
             claim=_claim_from_row(row),
             last_error=row["last_error"],
+            turn_id=row["turn_id"],
+            judge_result=json.loads(row["judge_result"]) if row["judge_result"] else None,
+            budget_delta=json.loads(row["budget_delta"] or "{}"),
+            attempt=row["attempt"],
+            next_attempt_at=datetime.fromisoformat(row["next_attempt_at"]) if row["next_attempt_at"] else None,
         )

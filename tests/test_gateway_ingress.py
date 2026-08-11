@@ -123,7 +123,10 @@ class RecordingRunner:
             raise RuntimeError("simulated crash before Agent execution")
         if self.mode == "complete":
             if self.control_plane is not None:
-                self.control_plane.complete_runtime_turn(runtime_turn["turn_id"], status="completed")
+                self.control_plane.complete_runtime_turn(
+                    runtime_turn["turn_id"], status="completed",
+                    result={"content": self.content or "", "usage": {"total_tokens": 0}},
+                )
             yield SimpleNamespace(event="complete", error=None, content=self.content)
         elif self.mode == "cancelled":
             if self.control_plane is not None:
@@ -914,7 +917,10 @@ async def test_restart_after_completed_agent_turn_only_finishes_inbox(runtime):
         user_input="hello",
         now=NOW,
     )
-    control_plane.complete_runtime_turn(turn["turn_id"], status="completed")
+    control_plane.complete_runtime_turn(
+        turn["turn_id"], status="completed",
+        result={"content": "", "usage": {"total_tokens": 0}},
+    )
 
     runner = RecordingRunner(control_plane)
     restart_now = NOW + timedelta(seconds=10)
@@ -1027,13 +1033,13 @@ def test_runtime_terminal_event_and_status_are_one_idempotent_commit(runtime):
         thread_id="terminal-thread", turn_id="terminal-turn",
         session_id="terminal-session", event_type="complete",
         payload={"event": "complete"}, status="completed",
-        result={"content": "done"},
+        result={"content": "done", "usage": {"total_tokens": 1}},
     )
     replay = control_plane.complete_runtime_turn_with_event(
         thread_id="terminal-thread", turn_id="terminal-turn",
         session_id="terminal-session", event_type="complete",
         payload={"event": "complete"}, status="completed",
-        result={"content": "done"},
+        result={"content": "done", "usage": {"total_tokens": 1}},
     )
 
     assert replay["event_id"] == first["event_id"]
@@ -1355,7 +1361,10 @@ async def test_inbox_cannot_succeed_with_executing_tool_effect(runtime):
                 owner_id="effect-worker", now=NOW,
                 expires_at=NOW + timedelta(seconds=30),
             )
-            control_plane.complete_runtime_turn(runtime_turn["turn_id"], status="completed")
+            control_plane.complete_runtime_turn(
+                runtime_turn["turn_id"], status="completed",
+                result={"content": "", "usage": {"total_tokens": 0}},
+            )
             yield SimpleNamespace(event="complete", error=None)
 
     worker = IngressWorker(

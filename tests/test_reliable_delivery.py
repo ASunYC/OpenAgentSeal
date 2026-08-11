@@ -371,7 +371,7 @@ async def test_retryable_failure_uses_bounded_backoff(delivery_runtime):
     stored = repository.get_outbox("delivery-1")
     assert stored.state == "retry_wait"
     assert stored.next_attempt_at == NOW + timedelta(seconds=5)
-    assert stored.last_error == "chat store busy"
+    assert stored.last_error == "retryable_delivery_error"
 
 
 @pytest.mark.asyncio
@@ -411,7 +411,7 @@ async def test_ambiguous_outcome_is_not_automatically_retried(delivery_runtime):
 
     stored = repository.get_outbox("delivery-1")
     assert stored.state == "delivery_unknown"
-    assert stored.last_error == "timed out after send"
+    assert stored.last_error == "delivery_outcome_unknown"
     assert await worker.run_once(NOW + timedelta(hours=1)) == 0
     assert destination.calls == 1
 
@@ -432,7 +432,7 @@ async def test_delivery_deadline_is_classified_as_unknown(delivery_runtime):
 
     stored = repository.get_outbox("delivery-1")
     assert stored.state == "delivery_unknown"
-    assert "deadline" in stored.last_error
+    assert stored.last_error == "delivery_timeout_unknown"
 
 
 @pytest.mark.asyncio
@@ -557,7 +557,7 @@ async def test_permanent_failure_is_dead_lettered(delivery_runtime):
 
     stored = repository.get_outbox("delivery-1")
     assert stored.state == "dead_letter"
-    assert stored.last_error == "invalid payload"
+    assert stored.last_error == "permanent_delivery_error"
 
 
 @pytest.mark.asyncio

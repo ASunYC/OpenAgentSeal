@@ -41,7 +41,13 @@ class TestGoalMode(unittest.TestCase):
         goal = self.controller.start_goal("session_judge", "Finish a roadmap")
         updated = self.controller.apply_judge_result(
             goal.goal_id,
-            {"done": False, "confidence": 0.8, "reason": "Needs verification", "next_action": "Run checks"},
+            {
+                "done": False,
+                "confidence": 0.8,
+                "reason": "Needs verification",
+                "next_action": "Run checks",
+                "criterion_evidence": {},
+            },
         )
 
         self.assertEqual(updated.status, "running")
@@ -56,7 +62,7 @@ class TestGoalMode(unittest.TestCase):
 
     def test_judge_result_can_complete_goal(self):
         goal = self.controller.start_goal("session_done", "Complete this")
-        result = JudgeResult.from_json('{"done": true, "confidence": 1, "reason": "Done", "next_action": ""}')
+        result = JudgeResult.from_json('{"done": true, "confidence": 1, "reason": "Done", "next_action": "", "criterion_evidence": {}}')
         completed = self.controller.apply_judge_result(goal.goal_id, result)
 
         self.assertEqual(completed.status, "completed")
@@ -65,11 +71,11 @@ class TestGoalMode(unittest.TestCase):
 
     def test_judge_result_requires_boolean_done(self):
         with self.assertRaises(ValueError):
-            JudgeResult.from_json('{"done": "false", "confidence": 1, "reason": "", "next_action": ""}')
+            JudgeResult.from_json('{"done": "false", "confidence": 1, "reason": "", "next_action": "", "criterion_evidence": {}}')
 
     def test_judge_result_requires_confidence_range(self):
         with self.assertRaises(ValueError):
-            JudgeResult.from_json({"done": False, "confidence": 2, "reason": "", "next_action": ""})
+            JudgeResult.from_json({"done": False, "confidence": 2, "reason": "", "next_action": "", "criterion_evidence": {}})
 
 
 if __name__ == "__main__":

@@ -97,6 +97,21 @@ class LocalSessionDestination:
             if not parent_profile_id or parent_profile_id == MAIN_AGENT_ID
             else parent_profile_id
         )
+        kind = payload.get("kind")
+        if isinstance(kind, str) and kind.startswith("goal_"):
+            principal_id = _required_text(payload, "principal_id")
+            tenant_id = _required_text(payload, "tenant_id")
+            session = self.repository.control_plane.get_session(session_id)
+            session_metadata = session.get("metadata") if session else None
+            if (
+                session is None
+                or session.get("user_id") != principal_id
+                or not isinstance(session_metadata, Mapping)
+                or session_metadata.get("tenant_id") != tenant_id
+                or session_metadata.get("profile_id", "main") != profile_id
+                or session_metadata.get("parent_profile_id") != parent_profile_id
+            ):
+                raise PermanentDeliveryError("goal delivery principal mismatch")
         manager = get_chat_manager(parent_key)
         chat = await manager.repo.find_by_session_id(session_id)
         if chat is None:
@@ -298,7 +313,7 @@ class DeliveryWorker:
                     except StaleClaimError:
                         continue
                     continue
-                error = str(exc) or "delivery deadline expired with an unknown outcome"
+                error = "delivery_timeout_unknown"
                 try:
                     self.repository.mark_delivery_unknown(
                         obligation.obligation_id, claim, error, current_time()
@@ -306,7 +321,7 @@ class DeliveryWorker:
                 except StaleClaimError:
                     continue
             except DeliveryOutcomeUnknown as exc:
-                error = str(exc) or "delivery deadline expired with an unknown outcome"
+                error = "delivery_outcome_unknown"
                 try:
                     self.repository.mark_delivery_unknown(
                         obligation.obligation_id, claim, error, current_time()
@@ -319,7 +334,7 @@ class DeliveryWorker:
                     self.repository.retry_outbox(
                         obligation.obligation_id,
                         claim,
-                        str(exc),
+                        "permanent_delivery_error",
                         settlement_now,
                         settlement_now,
                         dead_letter=True,
@@ -333,7 +348,7 @@ class DeliveryWorker:
                     self.repository.retry_outbox(
                         obligation.obligation_id,
                         claim,
-                        str(exc),
+                        "retryable_delivery_error" if isinstance(exc, RetryableDeliveryError) else "delivery_error",
                         self._retry_at_for_error(obligation, settlement_now, exc),
                         settlement_now,
                         dead_letter=exhausted,
