@@ -1,16 +1,64 @@
 ﻿<template>
   <div class="app-container" :class="settingsStore.settings.theme">
+    <div class="desktop-sidebar-host" :class="{ collapsed: sidebarCollapsed, 'workspace-open': isSourceWorkspaceOpen }">
+      <DesktopSidebar
+        :active-panel="activeWorkspacePanel"
+        :app-icon="appIconUrl"
+        :browser-enabled="canUseBrowserPanel"
+        :busy="loading"
+        :collapsed="sidebarCollapsed"
+        :language="settingsStore.settings.language"
+        :sandbox-enabled="canUseSandboxPanel"
+        :workspace-name="sidebarWorkspaceName"
+        :workspace-open="isSourceWorkspaceOpen"
+        :workspace-path="sidebarWorkspacePath"
+        @new-chat="startNewChat"
+        @open-browser="openBrowserHome"
+        @open-runtime="openRuntimePanel"
+        @open-sandbox="openSandboxPanel"
+        @open-settings="openSettings"
+        @open-workspace="toggleSourceWorkspace"
+        @toggle-collapse="sidebarCollapsed = !sidebarCollapsed"
+      >
+        <template #workspace>
+          <section ref="sourceWorkspaceRef" class="sidebar-source-workspace">
+            <WorkspaceManager
+              ref="workspaceManagerRef"
+              @choose-files="chooseWorkspaceFiles"
+              @choose-directory="chooseWorkspaceDirectory"
+              @add-web-url="openWebSourceInput"
+              @add-server-path="openServerPathInput"
+            />
+            <form v-if="showWebSourceInput" class="source-web-form-inline" @submit.prevent="addWebSource">
+              <input
+                ref="webSourceInputRef"
+                v-model="webSourceUrl"
+                type="url"
+                :placeholder="t('输入 Web 地址后回车', 'Enter a web URL')"
+                @keydown.esc.prevent="showWebSourceInput = false"
+              />
+              <button type="submit">{{ t('添加', 'Add') }}</button>
+              <button type="button" @click="showWebSourceInput = false">×</button>
+            </form>
+            <form v-if="showServerPathInput" class="source-web-form-inline" @submit.prevent="addServerPathSource">
+              <input
+                ref="serverPathInputRef"
+                v-model="serverPathValue"
+                type="text"
+                :placeholder="t('输入服务器上的文件或目录路径后回车', 'Enter a server file or folder path')"
+                @keydown.esc.prevent="showServerPathInput = false"
+              />
+              <button type="submit">{{ t('添加', 'Add') }}</button>
+              <button type="button" @click="showServerPathInput = false">×</button>
+            </form>
+          </section>
+        </template>
+      </DesktopSidebar>
+    </div>
     <!-- 主聊天面板-->
     <main class="main-chat">
       <!-- 顶部标题栏-->
       <header class="chat-header">
-        <div class="header-left">
-          <div class="logo">
-            <img class="logo-icon" :src="appIconUrl" alt="" aria-hidden="true" />
-            <span class="logo-text">OpenAgentSeal</span>
-          </div>
-        </div>
-        
         <div class="header-center">
           <div class="agent-dock-wrap header-agent-dock">
             <div ref="agentDockRef" class="agent-dock-notch" :aria-label="t('智能体会话切换', 'Agent session switcher')">
@@ -46,146 +94,18 @@
           </div>
         </div>
         
-        <div class="header-right">
-          <button
-            class="btn-settings"
-            :class="{ active: isSourceWorkspaceOpen }"
-            @click="toggleSourceWorkspace"
-            :title="t('工作区', 'Workspace')"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-              <path d="M12 11v5"/>
-              <path d="M9.5 13.5h5"/>
-            </svg>
-          </button>
-          <button
-            v-if="canUseBrowserPanel"
-            class="btn-settings"
-            :class="{ active: activeWorkspacePanel === 'browser' }"
-            @click="openBrowserHome"
-            title="Browser"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"/>
-              <path d="M2 12h20"/>
-              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-            </svg>
-          </button>
-          <button
-            class="btn-settings"
-            :class="{ active: activeWorkspacePanel === 'runtime' }"
-            @click="openRuntimePanel"
-            :title="t('对话与运行', 'Chats & runtime')"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M8 15.5 4 19v-4.4A6.6 6.6 0 0 1 10.6 4H13a6.6 6.6 0 0 1 6.4 5"/>
-              <path d="M10 14a5 5 0 0 0 5 5h3.2L21 21.5V19a5 5 0 0 0-3-9h-3a5 5 0 0 0-5 5Z"/>
-            </svg>
-          </button>
-          <button
-            v-if="canUseSandboxPanel"
-            class="btn-settings"
-            :class="{ active: activeWorkspacePanel === 'sandbox' }"
-            @click="openSandboxPanel"
-            :title="t('沙盒', 'Sandbox')"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 17 10 11 4 5"/>
-              <path d="M12 19h8"/>
-              <path d="M20 5H12"/>
-            </svg>
-          </button>
-          <button class="btn-settings" @click="openSettings" :title="t('设置', 'Settings')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-            </svg>
-          </button>
-        </div>
       </header>
       
       <!-- 中间聊天区域 -->
       <div
+        ref="chatBodyRef"
         class="chat-body"
         :class="{
           'dual-panel': isWorkspaceOpen,
-          'source-open': isSourceWorkspaceOpen,
           'workspace-fullscreen': isWorkspacePanelFullscreen,
         }"
         :style="workspaceLayoutStyle"
       >
-        <aside v-if="isSourceWorkspaceOpen" ref="sourceWorkspaceRef" class="source-workspace-panel">
-          <header class="source-workspace-header">
-            <div class="workspace-panel-title source-workspace-title">
-              <svg class="workspace-panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                <path d="M12 11v5"/>
-                <path d="M9.5 13.5h5"/>
-              </svg>
-              <div class="workspace-panel-copy">
-                <h3>{{ t('工作区', 'Workspace') }}</h3>
-                <p>{{ t('添加文件、目录作为当前任务工作区来源', 'Add files and folders as task workspace sources') }}</p>
-              </div>
-            </div>
-            <div class="workspace-panel-actions">
-              <button class="workspace-header-button workspace-close" @click="isSourceWorkspaceOpen = false" :title="t('关闭', 'Close')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M18 6 6 18"/>
-                  <path d="m6 6 12 12"/>
-                </svg>
-              </button>
-            </div>
-          </header>
-
-          <section class="source-list">
-            <WorkspaceManager
-              ref="workspaceManagerRef"
-              @choose-files="chooseWorkspaceFiles"
-              @choose-directory="chooseWorkspaceDirectory"
-              @add-web-url="openWebSourceInput"
-              @add-server-path="openServerPathInput"
-            />
-            <!-- Web URL form -->
-            <form v-if="showWebSourceInput" class="source-web-form-inline" @submit.prevent="addWebSource">
-              <input
-                ref="webSourceInputRef"
-                v-model="webSourceUrl"
-                type="url"
-                :placeholder="t('输入 Web 地址后回车', 'Enter a web URL')"
-                @keydown.esc.prevent="showWebSourceInput = false"
-              />
-              <button type="submit">{{ t('添加', 'Add') }}</button>
-              <button type="button" @click="showWebSourceInput = false">×</button>
-            </form>
-            <!-- Server path form -->
-            <form v-if="showServerPathInput" class="source-web-form-inline" @submit.prevent="addServerPathSource">
-              <input
-                ref="serverPathInputRef"
-                v-model="serverPathValue"
-                type="text"
-                :placeholder="t('输入服务器上的文件或目录路径后回车', 'Enter a server file or folder path')"
-                @keydown.esc.prevent="showServerPathInput = false"
-              />
-              <button type="submit">{{ t('添加', 'Add') }}</button>
-              <button type="button" @click="showServerPathInput = false">×</button>
-            </form>
-          </section>
-        </aside>
-
-        <button
-          v-if="isSourceWorkspaceOpen"
-          class="source-resizer"
-          :class="{ active: isResizingSourceWorkspace }"
-          type="button"
-          :title="t('拖动调整工作区宽度，双击重置', 'Drag to resize workspace, double-click to reset')"
-          :aria-label="t('调整工作区宽度', 'Resize workspace')"
-          @pointerdown="startSourceWorkspaceResize"
-          @dblclick="resetSourceWorkspaceWidth"
-        >
-          <span></span>
-        </button>
-
         <!-- 私人对话区-->
         <div class="private-chat-panel" :class="{ 'agent-switching': isAgentSwitching }">
           <div class="chat-messages" ref="messagesContainer" @click="handleChatClick">
@@ -1296,6 +1216,7 @@ import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThinkingProcess from '@/components/ThinkingProcess.vue'
 import WorkspaceManager from '@/views/WorkspaceManager.vue'
 import SandboxPanel from '@/components/SandboxPanel.vue'
+import DesktopSidebar from '@/components/DesktopSidebar.vue'
 import { useWorkspaceManager } from '@/composables/useWorkspaceManager'
 import { useMessageQueue, type QueuedComposerMessage } from '@/composables/useMessageQueue'
 import {
@@ -1319,6 +1240,10 @@ const settingsStore = useSettingsStore()
 const chatStore = useChatStore()
 const managedWorkspace = useWorkspaceManager()
 const workspaceManagerRef = ref<{ refreshWorkspace: (wsId?: string) => Promise<void> } | null>(null)
+const chatBodyRef = ref<HTMLElement | null>(null)
+const sidebarCollapsed = ref(false)
+const sidebarWorkspacePath = computed(() => managedWorkspace.currentWorkspace.value?.path || settingsStore.settings.workspace || '')
+const sidebarWorkspaceName = computed(() => managedWorkspace.currentWorkspace.value?.name || sidebarWorkspacePath.value || t('工作目录', 'Workspace'))
 const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
 // 褰撳墠瑙嗗浘
@@ -1352,9 +1277,8 @@ const isClearingChat = ref(false)
 const showClearAllChatsConfirm = ref(false)
 const isClearingAllChats = ref(false)
 const isSourceWorkspaceOpen = ref(false)
-const isChatConstrained = computed(() => isWorkspaceOpen.value || isSourceWorkspaceOpen.value)
+const isChatConstrained = computed(() => isWorkspaceOpen.value)
 const sourceWorkspaceRef = ref<HTMLElement | null>(null)
-const sourceDragDepth = ref(0)
 const workspaceSources = ref<WorkspaceSource[]>([])
 const selectedWorkspacePaths = ref<string[]>([])
 const expandedWorkspacePaths = ref<string[]>([])
@@ -1365,81 +1289,19 @@ const webSourceInputRef = ref<HTMLInputElement | null>(null)
 const showServerPathInput = ref(false)
 const serverPathValue = ref('')
 const serverPathInputRef = ref<HTMLInputElement | null>(null)
-const sourceWorkspaceWidth = ref(426)
-const isResizingSourceWorkspace = ref(false)
-const workspaceWidth = ref(560)
+const workspaceWidth = ref(400)
 const isResizingWorkspace = ref(false)
-const SOURCE_WORKSPACE_DEFAULT_WIDTH = 426
-const SOURCE_WORKSPACE_MIN_WIDTH = 320
-const SOURCE_WORKSPACE_MAX_WIDTH = 700
-const WORKSPACE_DEFAULT_WIDTH = 560
-const WORKSPACE_MIN_WIDTH = 360
+const WORKSPACE_DEFAULT_WIDTH = 400
+const WORKSPACE_MIN_WIDTH = 320
 const WORKSPACE_MAX_WIDTH = 820
-const WORKSPACE_MIN_CHAT_WIDTH = 480
-const WORKSPACE_DUAL_MIN_CHAT_WIDTH = 300
+const WORKSPACE_MIN_CHAT_WIDTH = 420
 const PANEL_RESIZER_WIDTH = 8
-const SOURCE_WORKSPACE_LEFT_MARGIN = 9
-const WORKSPACE_RIGHT_MARGIN = 9
 
 const workspaceLayoutStyle = computed<Record<string, string>>(() => {
   return {
     '--workspace-width': isWorkspaceOpen.value ? `${workspaceWidth.value}px` : '0px',
-    '--source-workspace-width': isSourceWorkspaceOpen.value ? `${sourceWorkspaceWidth.value}px` : '0px',
   }
 })
-
-function clampSourceWorkspaceWidth(width: number): number {
-  if (typeof window === 'undefined') {
-    return Math.min(Math.max(width, SOURCE_WORKSPACE_MIN_WIDTH), SOURCE_WORKSPACE_MAX_WIDTH)
-  }
-
-  const minChatWidth = isWorkspaceOpen.value ? WORKSPACE_DUAL_MIN_CHAT_WIDTH : WORKSPACE_MIN_CHAT_WIDTH
-  const reservedRight = isWorkspaceOpen.value
-    ? workspaceWidth.value + WORKSPACE_RIGHT_MARGIN + PANEL_RESIZER_WIDTH
-    : 0
-  const viewportMax = Math.max(
-    SOURCE_WORKSPACE_MIN_WIDTH,
-    window.innerWidth - minChatWidth - reservedRight - SOURCE_WORKSPACE_LEFT_MARGIN - PANEL_RESIZER_WIDTH,
-  )
-  const maxWidth = Math.min(SOURCE_WORKSPACE_MAX_WIDTH, viewportMax)
-  return Math.round(Math.min(Math.max(width, SOURCE_WORKSPACE_MIN_WIDTH), maxWidth))
-}
-
-function updateSourceWorkspaceWidthFromPointer(clientX: number): void {
-  sourceWorkspaceWidth.value = clampSourceWorkspaceWidth(clientX - SOURCE_WORKSPACE_LEFT_MARGIN)
-}
-
-function startSourceWorkspaceResize(event: PointerEvent): void {
-  if (!isSourceWorkspaceOpen.value) return
-
-  event.preventDefault()
-  const target = event.currentTarget as HTMLElement | null
-  target?.setPointerCapture?.(event.pointerId)
-  isResizingSourceWorkspace.value = true
-  document.body.classList.add('source-workspace-resizing')
-  updateSourceWorkspaceWidthFromPointer(event.clientX)
-  window.addEventListener('pointermove', onSourceWorkspaceResize)
-  window.addEventListener('pointerup', stopSourceWorkspaceResize, { once: true })
-  window.addEventListener('pointercancel', stopSourceWorkspaceResize, { once: true })
-}
-
-function onSourceWorkspaceResize(event: PointerEvent): void {
-  updateSourceWorkspaceWidthFromPointer(event.clientX)
-}
-
-function stopSourceWorkspaceResize(): void {
-  if (!isResizingSourceWorkspace.value) return
-
-  isResizingSourceWorkspace.value = false
-  document.body.classList.remove('source-workspace-resizing')
-  window.removeEventListener('pointermove', onSourceWorkspaceResize)
-  window.removeEventListener('pointerup', stopSourceWorkspaceResize)
-  window.removeEventListener('pointercancel', stopSourceWorkspaceResize)
-}
-
-function resetSourceWorkspaceWidth(): void {
-  sourceWorkspaceWidth.value = clampSourceWorkspaceWidth(SOURCE_WORKSPACE_DEFAULT_WIDTH)
-}
 
 const workspacePanelTitle = computed(() => {
   if (activeWorkspacePanel.value === 'browser') return t('浏览器', 'Browser')
@@ -1460,13 +1322,10 @@ function clampWorkspaceWidth(width: number): number {
     return Math.min(Math.max(width, WORKSPACE_MIN_WIDTH), WORKSPACE_MAX_WIDTH)
   }
 
-  const minChatWidth = isSourceWorkspaceOpen.value ? WORKSPACE_DUAL_MIN_CHAT_WIDTH : WORKSPACE_MIN_CHAT_WIDTH
-  const reservedLeft = isSourceWorkspaceOpen.value
-    ? sourceWorkspaceWidth.value + SOURCE_WORKSPACE_LEFT_MARGIN + PANEL_RESIZER_WIDTH
-    : 0
+  const availableWidth = chatBodyRef.value?.getBoundingClientRect().width || window.innerWidth
   const viewportMax = Math.max(
     WORKSPACE_MIN_WIDTH,
-    window.innerWidth - reservedLeft - minChatWidth - WORKSPACE_RIGHT_MARGIN - PANEL_RESIZER_WIDTH,
+    availableWidth - WORKSPACE_MIN_CHAT_WIDTH - PANEL_RESIZER_WIDTH,
   )
   const maxWidth = Math.min(WORKSPACE_MAX_WIDTH, viewportMax)
   return Math.round(Math.min(Math.max(width, WORKSPACE_MIN_WIDTH), maxWidth))
@@ -1474,7 +1333,8 @@ function clampWorkspaceWidth(width: number): number {
 
 function updateWorkspaceWidthFromPointer(clientX: number): void {
   if (typeof window === 'undefined') return
-  workspaceWidth.value = clampWorkspaceWidth(window.innerWidth - clientX - WORKSPACE_RIGHT_MARGIN)
+  const chatBodyRight = chatBodyRef.value?.getBoundingClientRect().right || window.innerWidth
+  workspaceWidth.value = clampWorkspaceWidth(chatBodyRight - clientX)
 }
 
 function startWorkspaceResize(event: PointerEvent): void {
@@ -1512,9 +1372,6 @@ function resetWorkspaceWidth(): void {
 function syncPanelWidths(): void {
   if (isWorkspaceOpen.value) {
     workspaceWidth.value = clampWorkspaceWidth(workspaceWidth.value)
-  }
-  if (isSourceWorkspaceOpen.value) {
-    sourceWorkspaceWidth.value = clampSourceWorkspaceWidth(sourceWorkspaceWidth.value)
   }
 }
 
@@ -2776,12 +2633,6 @@ function saveWorkspaceSourceState() {
 
 function toggleSourceWorkspace() {
   isSourceWorkspaceOpen.value = !isSourceWorkspaceOpen.value
-  if (!isSourceWorkspaceOpen.value) {
-    stopSourceWorkspaceResize()
-    return
-  }
-
-  syncPanelWidths()
 }
 
 async function importFilesIntoCurrentWorkspace(paths: string[]) {
@@ -3607,7 +3458,6 @@ function closeWorkspacePanel() {
 function toggleWorkspaceFullscreen(): void {
   if (activeWorkspacePanel.value !== 'browser' && activeWorkspacePanel.value !== 'sandbox') return
 
-  stopSourceWorkspaceResize()
   stopWorkspaceResize()
   fullscreenWorkspacePanel.value = isWorkspacePanelFullscreen.value ? '' : activeWorkspacePanel.value
 }
@@ -3679,13 +3529,11 @@ async function listenForDesktopFileDrops() {
     unlistenDesktopFileDrops = await webview.onDragDropEvent((event: any) => {
       const overSourceWorkspace = isDesktopDropOverSourceWorkspace(event.payload?.position)
       if (event.payload?.type === 'over') {
-        sourceDragDepth.value = overSourceWorkspace ? 1 : 0
         composerDragDepth.value = overSourceWorkspace ? 0 : 1
         return
       }
       if (event.payload?.type === 'drop') {
         composerDragDepth.value = 0
-        sourceDragDepth.value = 0
         if (overSourceWorkspace) {
           void importDroppedWorkspacePaths(event.payload.paths || [])
         } else {
@@ -3694,7 +3542,6 @@ async function listenForDesktopFileDrops() {
         return
       }
       composerDragDepth.value = 0
-      sourceDragDepth.value = 0
     })
   } catch (error) {
     console.debug('Tauri file drop bridge is not available in web mode:', error)
@@ -3770,7 +3617,6 @@ onUnmounted(() => {
     window.clearInterval(collaborationRefreshTimer)
     collaborationRefreshTimer = undefined
   }
-  stopSourceWorkspaceResize()
   stopWorkspaceResize()
 })
 </script>
@@ -3826,6 +3672,73 @@ onUnmounted(() => {
   opacity: 0.62;
 }
 
+.desktop-sidebar-host {
+  flex: 0 0 232px;
+  width: 232px;
+  min-width: 0;
+  height: 100%;
+  position: relative;
+  z-index: 3;
+  overflow: hidden;
+  transition: width 0.18s ease, flex-basis 0.18s ease;
+}
+
+.desktop-sidebar-host.collapsed {
+  flex-basis: 68px;
+  width: 68px;
+}
+
+.desktop-sidebar-host.workspace-open {
+  flex-basis: 340px;
+  width: 340px;
+}
+
+.sidebar-source-workspace {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--glass-bg-strong);
+}
+
+.sidebar-source-workspace :deep(.workspace-manager) {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  background: transparent;
+}
+
+.sidebar-source-workspace > .source-web-form-inline {
+  flex: 0 0 auto;
+}
+
+.sidebar-source-workspace :deep(.wm-header) {
+  padding-inline: 10px;
+}
+
+.sidebar-source-workspace :deep(.wm-workspace-select) {
+  max-width: 94px;
+}
+
+.sidebar-source-workspace :deep(.wm-search-box) {
+  padding-inline: 7px;
+}
+
+.sidebar-source-workspace :deep(.wm-toolbar) {
+  gap: 3px;
+  padding-inline: 8px;
+}
+
+.sidebar-source-workspace :deep(.wm-toolbar-btn) {
+  gap: 3px;
+  padding-inline: 5px;
+}
+
+.sidebar-source-workspace :deep(.wm-workspace-path) {
+  display: none;
+}
+
 @keyframes mesh-drift {
   from {
     transform: translate3d(-1.5%, -1%, 0) scale(1);
@@ -3838,6 +3751,7 @@ onUnmounted(() => {
 /* 涓昏亰澶╁尯鍩?*/
 .main-chat {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: transparent;
@@ -4164,7 +4078,7 @@ onUnmounted(() => {
 .chat-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 18px;
   padding: 12px 24px;
   background: var(--glass-bg);
@@ -4208,7 +4122,7 @@ onUnmounted(() => {
 .header-center {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 16px;
   flex: 1 1 auto;
   min-width: 0;
@@ -5589,144 +5503,7 @@ onUnmounted(() => {
   min-height: 0;
 }
 
-.chat-body.source-open {
-  flex-direction: row;
-  align-items: stretch;
-}
 
-.source-workspace-panel {
-  flex: 0 0 var(--source-workspace-width, 320px);
-  min-width: 320px;
-  max-width: 700px;
-  height: calc(100% - 16px);
-  max-height: calc(100% - 16px);
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  align-self: stretch;
-  margin: 8px 0 8px 9px;
-  border: 1px solid var(--border-color);
-  border-radius: 22px;
-  background: var(--glass-bg-strong);
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(18px) saturate(160%);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
-  overflow: hidden;
-}
-
-.source-resizer {
-  flex: 0 0 8px;
-  width: 8px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  cursor: col-resize;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  z-index: 10;
-}
-
-.source-resizer span {
-  width: 4px;
-  height: 60px;
-  border-radius: 999px;
-  background: rgba(115, 115, 115, 0.32);
-  transition: all 0.2s;
-}
-
-.source-resizer:hover span {
-  height: 100px;
-  background: var(--primary-color, #3b82f6);
-}
-
-.source-resizer.active span {
-  width: 4px;
-  height: 100%;
-  background: var(--primary-color, #3b82f6);
-}
-
-.source-resizer:hover,
-.source-resizer.active {
-  background: transparent;
-}
-
-.source-workspace-header {
-  min-height: 68px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border-color);
-  background: transparent;
-  flex-shrink: 0;
-}
-
-.source-drop-zone {
-  flex: 0 0 auto;
-  margin: 14px;
-  min-height: 174px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  padding: 18px;
-  border: 1px dashed rgba(47, 110, 244, 0.36);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--glass-bg-strong) 86%, rgba(47, 110, 244, 0.08));
-  color: var(--text-secondary);
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.source-drop-zone:hover,
-.source-drop-zone.drag-over {
-  border-color: rgba(47, 110, 244, 0.68);
-  background: color-mix(in srgb, var(--glass-bg-strong) 78%, rgba(47, 110, 244, 0.18));
-  box-shadow: 0 14px 34px rgba(47, 110, 244, 0.12);
-}
-
-.source-drop-icon {
-  width: 44px;
-  height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 14px;
-  background: rgba(47, 110, 244, 0.12);
-  color: var(--primary-color);
-}
-
-.source-drop-icon svg {
-  width: 22px;
-  height: 22px;
-}
-
-.source-drop-zone strong {
-  color: var(--text-primary);
-  font-size: 14px;
-}
-
-.source-drop-zone span {
-  max-width: 230px;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.source-drop-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.source-drop-actions button,
 .source-list-head button {
   height: 30px;
   padding: 0 12px;
@@ -5960,10 +5737,6 @@ onUnmounted(() => {
   min-width: 420px;
 }
 
-.chat-body.source-open.dual-panel .private-chat-panel {
-  flex-basis: 0;
-  min-width: 300px;
-}
 
 .agent-dock-wrap {
   position: relative;
@@ -6175,16 +5948,16 @@ onUnmounted(() => {
   flex: 0 0 var(--workspace-width, clamp(420px, 42vw, 700px));
   display: flex;
   flex-direction: column;
-  min-width: 360px;
+  min-width: 320px;
   min-height: 0;
   align-self: stretch;
   position: relative;
   overflow: hidden;
-  margin: 8px 9px 8px 0;
+  margin: 0;
   border: 1px solid var(--border-color);
-  border-radius: 22px;
+  border-radius: 0;
   background: var(--glass-bg-strong);
-  box-shadow: var(--glass-shadow);
+  box-shadow: none;
   backdrop-filter: blur(18px) saturate(160%);
   -webkit-backdrop-filter: blur(18px) saturate(160%);
 }
@@ -6195,8 +5968,6 @@ onUnmounted(() => {
   align-items: stretch;
 }
 
-.chat-body.workspace-fullscreen .source-workspace-panel,
-.chat-body.workspace-fullscreen .source-resizer,
 .chat-body.workspace-fullscreen .private-chat-panel,
 .chat-body.workspace-fullscreen .workspace-resizer {
   display: none;
@@ -7132,20 +6903,26 @@ onUnmounted(() => {
   cursor: col-resize;
 }
 
-:global(body.source-workspace-resizing) {
-  user-select: none;
-  cursor: col-resize;
-}
-
 :global(body.workspace-resizing) .browser-frame {
   pointer-events: none;
 }
 
-:global(body.source-workspace-resizing) .browser-frame {
-  pointer-events: none;
+@media (max-width: 1168px) {
+  .desktop-sidebar-host.workspace-open {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 340px;
+    z-index: 40;
+    box-shadow: 14px 0 28px rgba(15, 23, 42, 0.14);
+  }
 }
 
 @media (max-width: 980px) {
+  .desktop-sidebar-host {
+    flex-basis: 68px;
+    width: 68px;
+  }
+
   .app-footer {
     grid-template-columns: minmax(120px, 1fr) minmax(0, 1.3fr);
   }
@@ -7181,38 +6958,32 @@ onUnmounted(() => {
     max-width: 220px;
   }
 
-  .chat-body.source-open,
+}
+
+@media (max-width: 820px) {
   .chat-body.dual-panel {
     flex-direction: column;
+    overflow-y: auto;
   }
 
-  .source-workspace-panel {
-    flex: 0 0 auto;
-    max-width: none;
-    width: auto;
-    max-height: 42%;
-    margin: 8px 16px 0;
-  }
-
-  .source-resizer {
+  .workspace-resizer {
     display: none;
   }
 
   .chat-body.dual-panel .private-chat-panel {
+    flex: 0 0 max(320px, 55vh);
     min-width: 0;
-    min-height: 48%;
+    min-height: 320px;
+    overflow: visible;
     border-right: none;
     border-bottom: 1px solid var(--border-color);
   }
 
   .workspace-panel {
-    flex: 1 1 52%;
+    flex: 0 0 max(360px, 55vh);
     min-width: 0;
-    margin: 12px 16px 16px;
-  }
-
-  .workspace-resizer {
-    display: none;
+    min-height: 360px;
+    margin: 0;
   }
 }
 </style>
